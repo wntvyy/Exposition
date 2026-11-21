@@ -333,6 +333,27 @@ pub struct TaskFileRow {
     pub op_ref: Option<String>,
 }
 
+/// A changed file's review record without its texts (summaries and counts).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskFileState {
+    pub path: WorkspacePath,
+    pub kind: ReviewChangeKind,
+    pub entangled: bool,
+    pub state: ReviewState,
+}
+
+/// How a text compares with the texts stored for a changed file, decided
+/// inside SQLite: none of the stored texts is read out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextMatch {
+    /// The stored baseline and tip are the same text (no net change).
+    pub unchanged: bool,
+    /// The text is the stored tip (the file after the task's latest change).
+    pub at_tip: bool,
+    /// The text is the stored baseline (the file without the task's changes).
+    pub at_baseline: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChangeRow {
     pub id: i64,
@@ -1190,15 +1211,60 @@ impl Store {
         Ok(())
     }
 
+    /// One changed file's record (only that file's texts are read).
     pub fn task_file(&self, task: &TaskId, path: &WorkspacePath) -> StoreResult<Option<TaskFileRow>> {
-        Ok(self.task_files(task)?.into_iter().find(|f| &f.path == path))
+        Ok(self.task_file_rows(task, Some(path))?.into_iter().next())
     }
 
     pub fn task_files(&self, task: &TaskId) -> StoreResult<Vec<TaskFileRow>> {
+        self.task_file_rows(task, None)
+    }
+
+    /// The task's changed files without their texts, in path order.
+    pub fn task_file_states(&self, task: &TaskId) -> StoreResult<Vec<TaskFileState>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("SELECT path, kind, entangled, state FROM task_files WHERE task_id = ?1 ORDER BY path")?;
+        let raws: Vec<(String, String, bool, String)> = stmt
+            .query_map([&task.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        raws.into_iter()
+            .map(|(path, kind, entangled, state)| {
+                Ok(TaskFileState {
+                    path: WorkspacePath::parse(&path).map_err(|e| StoreError(e.to_string()))?,
+                    kind: from_json(&kind)?,
+                    entangled,
+                    state: from_json(&state)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Compare `current` with a changed file's stored baseline and tip
+    /// (`None`: the task has no record for the path).
+    pub fn task_file_match(
+        &self,
+        task: &TaskId,
+        path: &WorkspacePath,
+        current: &str,
+    ) -> StoreResult<Option<TextMatch>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT baseline_text = tip_text, tip_text = ?3, baseline_text = ?3 FROM task_files
+                 WHERE task_id = ?1 AND path = ?2",
+                params![task.0, path.as_str(), current],
+                |r| Ok(TextMatch { unchanged: r.get(0)?, at_tip: r.get(1)?, at_baseline: r.get(2)? }),
+            )
+            .optional()?)
+    }
+
+    fn task_file_rows(&self, task: &TaskId, only: Option<&WorkspacePath>) -> StoreResult<Vec<TaskFileRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT path, kind, document, checkpoint_text, baseline_text, tip_text, tip_revision, entangled, state,
-                change_count, message, op_ref FROM task_files WHERE task_id = ?1 ORDER BY path",
+                change_count, message, op_ref FROM task_files
+             WHERE task_id = ?1 AND (?2 IS NULL OR path = ?2) ORDER BY path",
         )?;
         type Raw = (
             String,
@@ -1215,7 +1281,7 @@ impl Store {
             Option<String>,
         );
         let raws: Vec<Raw> = stmt
-            .query_map([&task.0], |r| {
+            .query_map(params![task.0, only.map(WorkspacePath::as_str)], |r| {
                 Ok((
                     r.get(0)?,
                     r.get(1)?,

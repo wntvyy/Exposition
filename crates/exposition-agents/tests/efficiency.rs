@@ -1,0 +1,211 @@
+//! Cost regressions of the agent harness, asserted with deterministic
+//! counters (never wall-clock time), next to the correctness each saving
+//! must keep. The benchmarks that measured these costs are in
+//! `perf_agents.rs`.
+#![cfg(debug_assertions)]
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use exposition_agents::credentials::MemoryStore;
+use exposition_agents::store::StoreStats;
+use exposition_agents::tools::services::UnavailableServices;
+use exposition_agents::*;
+use exposition_core::document::{
+    ConflictPolicy, DocumentEdit, EditOrigin, TextPatch, TransactionId, TransactionRequest, UndoBehavior,
+};
+use exposition_core::path::WorkspacePath;
+use exposition_workspace::DocumentService;
+use serde_json::{Value, json};
+use tempfile::TempDir;
+
+const MAIN: &str = "= Notes\nThe cat sat on the mat.\n";
+
+struct Harness {
+    service: AgentService,
+    documents: Arc<DocumentService>,
+    project: TempDir,
+    _data: TempDir,
+}
+
+fn harness() -> Harness {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("main.typ"), MAIN).unwrap();
+    std::fs::write(project.path().join("other.typ"), "= Other\nA dog.\n").unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let documents = Arc::new(DocumentService::new());
+    let service = AgentService::new(AgentConfig {
+        database: Some(data.path().join("agents.sqlite3")),
+        documents: Arc::clone(&documents),
+        workspace: None,
+        credentials: Arc::new(MemoryStore::default()),
+        services: Arc::new(UnavailableServices),
+        runtime: tokio::runtime::Handle::current(),
+        allow_scripted: true,
+        anthropic_base_url: None,
+        retry: None,
+        graph: None,
+    })
+    .unwrap();
+    service
+        .update_settings(ProviderSettings { provider: ProviderKind::Scripted, ..ProviderSettings::default() })
+        .unwrap();
+    Harness { service, documents, project, _data: data }
+}
+
+fn p(s: &str) -> WorkspacePath {
+    WorkspacePath::parse(s).unwrap()
+}
+
+fn request(h: &Harness, permission: PermissionProfile) -> CreateTaskRequest {
+    CreateTaskRequest {
+        prompt: "Improve the notes".into(),
+        workspace_root: h.project.path().display().to_string(),
+        scope: TaskScope::Workspace,
+        permission,
+        execution: ExecutionMode::Disabled,
+        consent: None,
+        budgets: None,
+        approval_mode: None,
+        provider: None,
+        attachments: None,
+    }
+}
+
+async fn run(h: &Harness, script: Value, req: CreateTaskRequest) -> TaskSummary {
+    h.service.load_script(script).unwrap();
+    let task = h.service.create_task(req).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), h.service.join(&task.id)).await.expect("task finished");
+    h.service.task(&task.id).unwrap()
+}
+
+fn tool(id: &str, name: &str, input: Value) -> Value {
+    json!({"toolUse": {"id": id, "name": name, "input": input}})
+}
+
+fn turns(calls: Vec<Value>) -> Value {
+    let mut turns: Vec<Value> = calls.into_iter().map(|c| json!({"steps": [c], "chunkDelayMs": 0})).collect();
+    turns.push(json!({"steps": [{"text": "Done."}], "chunkDelayMs": 0}));
+    json!({"turns": turns})
+}
+
+fn read_then_edit(path: &str, old: &str, new: &str) -> Value {
+    turns(vec![
+        tool("read", "read_file", json!({"path": path})),
+        tool(
+            "edit",
+            "edit_document",
+            json!({"path": path, "base_revision": "$ref:read/revision", "edits": [{"old_text": old, "new_text": new}]}),
+        ),
+    ])
+}
+
+fn since(h: &Harness, before: StoreStats) -> StoreStats {
+    let after = h.service.store_stats();
+    StoreStats {
+        ops: after.ops - before.ops,
+        changes: after.changes - before.changes,
+        review_text_bytes: after.review_text_bytes - before.review_text_bytes,
+        transcript_bytes: after.transcript_bytes - before.transcript_bytes,
+        tool_result_bytes: after.tool_result_bytes - before.tool_result_bytes,
+    }
+}
+
+fn user_edit(h: &Harness, path: &str, patch: TextPatch) {
+    let id = h.documents.find_by_path(&p(path)).unwrap();
+    let base = h.documents.info(&id).unwrap().revision;
+    h.documents
+        .apply(TransactionRequest {
+            id: TransactionId(format!("user-{base}")),
+            origin: EditOrigin::Source,
+            edits: vec![DocumentEdit { document: id, base_revision: base, patches: vec![patch] }],
+            undo: UndoBehavior::NewGroup,
+            conflict: ConflictPolicy::Reject,
+            label: None,
+            selection: None,
+        })
+        .unwrap();
+}
+
+fn undo(h: &Harness, path: &str) {
+    let id = h.documents.find_by_path(&p(path)).unwrap();
+    h.documents.undo(&id, EditOrigin::Source).unwrap();
+}
+
+fn text_of(h: &Harness, path: &str) -> String {
+    let id = h.documents.find_by_path(&p(path)).unwrap();
+    h.documents.state(&id).unwrap().text
+}
+
+/// AGENTS-1. A task summary (computed on every status update, and for every
+/// task in the list) reads no review text out of the database while the file
+/// is at the task's tip or back at its baseline, and the pending count still
+/// follows the file's content through undo, later edits, and an undone revert.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn summaries_read_no_review_texts_and_still_follow_content() {
+    let h = harness();
+    let task = run(&h, read_then_edit("main.typ", "cat sat", "dog sat"), request(&h, PermissionProfile::AutoApply)).await;
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert_eq!((task.changed_files, task.pending_review), (1, 1));
+
+    // At the tip: decided without reading a text.
+    let before = h.service.store_stats();
+    assert_eq!(h.service.task(&task.id).unwrap().pending_review, 1);
+    let listed = h.service.list_tasks().unwrap();
+    assert_eq!(listed.iter().find(|t| t.id == task.id).unwrap().pending_review, 1);
+    assert_eq!(since(&h, before).review_text_bytes, 0, "a summary read review texts");
+
+    // The user edits elsewhere: the change is still there (decided by diffing).
+    user_edit(&h, "main.typ", TextPatch::insert(0, "// note\n"));
+    assert_eq!(h.service.task(&task.id).unwrap().pending_review, 1);
+
+    // The user undoes their edit, then the agent's: back at the baseline, not pending.
+    undo(&h, "main.typ");
+    undo(&h, "main.typ");
+    assert_eq!(text_of(&h, "main.typ"), MAIN);
+    let before = h.service.store_stats();
+    assert_eq!(h.service.task(&task.id).unwrap().pending_review, 0, "an undone change is not pending");
+    assert_eq!(since(&h, before).review_text_bytes, 0);
+    // The review view agrees (it reads the texts: it shows them).
+    assert_eq!(h.service.review(&task.id).unwrap().files[0].state, ReviewState::Undone);
+
+    // A second task whose change the user reverts, then brings back with undo.
+    let second =
+        run(&h, read_then_edit("other.typ", "A dog.", "A cat."), request(&h, PermissionProfile::AutoApply)).await;
+    assert_eq!(second.pending_review, 1);
+    assert!(h.service.revert(&second.id, None).unwrap()[0].ok);
+    assert_eq!(h.service.task(&second.id).unwrap().pending_review, 0);
+    undo(&h, "other.typ");
+    assert_eq!(text_of(&h, "other.typ"), "= Other\nA cat.\n");
+    let before = h.service.store_stats();
+    assert_eq!(h.service.task(&second.id).unwrap().pending_review, 1, "an undone revert is pending again");
+    assert_eq!(since(&h, before).review_text_bytes, 0);
+    assert_eq!(h.service.review(&second.id).unwrap().files[0].state, ReviewState::Pending);
+}
+
+/// AGENTS-1. Recording an edit reads the record of the edited file only, not
+/// the texts of every file the task changed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recording_an_edit_reads_one_file_record() {
+    let h = harness();
+    let big = "x".repeat(40_000);
+    std::fs::write(h.project.path().join("big.typ"), format!("= Big\nMARK\n{big}\n")).unwrap();
+    let script = turns(vec![
+        tool("r1", "read_file", json!({"path": "big.typ"})),
+        tool("e1", "edit_document", json!({"path": "big.typ", "base_revision": "$ref:r1/revision",
+            "edits": [{"old_text": "MARK", "new_text": "DONE"}]})),
+        tool("r2", "read_file", json!({"path": "main.typ"})),
+        tool("e2", "edit_document", json!({"path": "main.typ", "base_revision": "$ref:r2/revision",
+            "edits": [{"old_text": "cat sat", "new_text": "dog sat"}]})),
+        tool("e3", "edit_document", json!({"path": "main.typ", "base_revision": "$ref:e2/revision",
+            "edits": [{"old_text": "the mat", "new_text": "a mat"}]})),
+    ]);
+    let before = h.service.store_stats();
+    let task = run(&h, script, request(&h, PermissionProfile::AutoApply)).await;
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert_eq!((task.changed_files, task.pending_review), (2, 2));
+    assert_eq!(text_of(&h, "main.typ"), "= Notes\nThe dog sat on a mat.\n");
+    // Only the third edit finds an existing record: main.typ's three small texts.
+    let read = since(&h, before).review_text_bytes;
+    assert!(read < 1_000, "edits to main.typ read {read} bytes of review texts (big.typ's were read too)");
+}

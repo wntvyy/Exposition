@@ -2626,22 +2626,53 @@ impl Inner {
 
     /// Files whose changes still await review, judged from content once the
     /// task has stopped (a change the user undid is not pending).
-    fn pending_review(&self, row: &TaskRow, files: &[crate::store::TaskFileRow]) -> u32 {
-        let stored = |f: &crate::store::TaskFileRow| f.state == ReviewState::Pending;
+    ///
+    /// The stored texts stay in the database: a file at the task's tip or
+    /// back at its baseline is decided by comparing there, and only a file
+    /// that has moved on from both has its texts read and diffed.
+    fn pending_review(&self, row: &TaskRow, files: &[crate::store::TaskFileState]) -> Result<u32> {
         let project = if row.status.is_active() { None } else { self.content_files(row) };
-        let Some(project) = project else { return files.iter().filter(|f| stored(f)).count() as u32 };
-        files
-            .iter()
-            .filter(|f| matches!(f.state, ReviewState::Pending | ReviewState::Reverted))
-            .filter(|f| {
-                let current = review::current(&f.path, &self.documents, &project);
-                review::effective_state(f, &current).0 == ReviewState::Pending
-            })
-            .count() as u32
+        let Some(project) = project else {
+            return Ok(files.iter().filter(|f| f.state == ReviewState::Pending).count() as u32);
+        };
+        let mut pending = 0;
+        for file in files.iter().filter(|f| matches!(f.state, ReviewState::Pending | ReviewState::Reverted)) {
+            let current = review::current(&file.path, &self.documents, &project);
+            let compared = match current.text() {
+                Some(text) if file.kind == ReviewChangeKind::Edited && !file.entangled => {
+                    Some(self.net_change_in(&row.id, &file.path, text)?)
+                }
+                _ => None,
+            };
+            // `judge` consults the comparison exactly when it was made above.
+            let judged = review::judge(file.kind, file.state, file.entangled, &current, |_| {
+                compared.unwrap_or((review::Presence::Present, true))
+            });
+            if judged.map_or(file.state, |(state, _)| state) == ReviewState::Pending {
+                pending += 1;
+            }
+        }
+        Ok(pending)
+    }
+
+    /// Whether the task's net change to an edited file is in `text`, and
+    /// whether `text` is the file without that change (its stored baseline).
+    fn net_change_in(&self, id: &TaskId, path: &WorkspacePath, text: &str) -> Result<(review::Presence, bool)> {
+        if let Some(compared) = self.store.task_file_match(id, path, text)?
+            && let Some(presence) = review::presence_of(compared)
+        {
+            return Ok((presence, compared.at_baseline));
+        }
+        // The file has moved on from both stored texts: diff them.
+        Ok(match self.store.task_file(id, path)? {
+            Some(row) => (review::presence(&row.baseline_text, &row.tip_text, text), text == row.baseline_text),
+            // The record is gone: the stored state stands.
+            None => (review::Presence::Present, true),
+        })
     }
 
     fn summary_of(&self, row: &TaskRow) -> Result<TaskSummary> {
-        let files = self.store.task_files(&row.id)?;
+        let files = self.store.task_file_states(&row.id)?;
         Ok(TaskSummary {
             id: row.id.clone(),
             title: row.title.clone(),
@@ -2650,7 +2681,7 @@ impl Inner {
             status: row.status.clone(),
             spec: row.spec.clone(),
             usage: row.usage.clone(),
-            pending_review: self.pending_review(row, &files),
+            pending_review: self.pending_review(row, &files)?,
             changed_files: files.len() as u32,
         })
     }
