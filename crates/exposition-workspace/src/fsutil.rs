@@ -124,19 +124,48 @@ fn temp_path_for(target: &Path) -> io::Result<PathBuf> {
 /// on NTFS and POSIX file systems). On any failure the temporary file is
 /// removed and the original target is left untouched.
 pub fn write_atomic(target: &Path, bytes: &[u8]) -> io::Result<()> {
-    let temp = temp_path_for(target)?;
-    let result = (|| {
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&temp)?;
-        file.write_all(bytes)?;
+    StagedWrite::create(target, |file| file.write_all(bytes))?.commit()
+}
+
+/// The first half of an atomic write: the content is complete and flushed
+/// to disk in a temporary file next to `target`; [`StagedWrite::commit`]
+/// renames it over the target. Dropped without a commit, the temporary file
+/// is removed and the target is untouched.
+#[derive(Debug)]
+pub struct StagedWrite {
+    temp: PathBuf,
+    target: PathBuf,
+    committed: bool,
+}
+
+impl StagedWrite {
+    pub fn create(target: &Path, write: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<Self> {
+        let temp = temp_path_for(target)?;
+        // Declared before the file, so a failed write closes the file first
+        // and then removes it.
+        let staged = Self { temp, target: target.to_path_buf(), committed: false };
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&staged.temp)?;
+        write(&mut file)?;
         file.flush()?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&temp, target)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
+        Ok(staged)
     }
-    result
+
+    /// Put the staged content in place (rename over the target).
+    pub fn commit(mut self) -> io::Result<()> {
+        fs::rename(&self.temp, &self.target)?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for StagedWrite {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.temp);
+        }
+    }
 }
 
 /// Move `from` to `to` (on the same volume) without ever replacing an entry

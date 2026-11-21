@@ -1,6 +1,7 @@
 //! Lazy directory listing for the file tree.
 
 use std::fs;
+use std::path::{Component, Path};
 
 use exposition_core::path::WorkspacePath;
 
@@ -31,6 +32,32 @@ pub fn is_graph_storage(path: &WorkspacePath) -> bool {
     rest.starts_with("graph.sqlite3")
         || (rest == "graph-backups" || rest.starts_with("graph-backups/"))
         || rest.starts_with("graph.damaged")
+}
+
+/// [`is_ignored`] for a path relative to the root that is not (yet) a
+/// validated workspace path, without allocating for ordinary paths: true
+/// when a workspace path with these components is ignored. The watcher uses
+/// it to drop notifications from ignored trees before they are queued.
+pub fn is_ignored_relative(rest: &Path) -> bool {
+    let mut in_app_folder = false;
+    for (index, component) in rest.components().enumerate() {
+        let Component::Normal(part) = component else { return false };
+        let Some(name) = part.to_str() else { return false };
+        if HIDDEN_NAMES.contains(&name) || name.contains(TEMP_MARKER) {
+            return true;
+        }
+        match index {
+            0 => in_app_folder = name.eq_ignore_ascii_case(".exposition"),
+            1 if in_app_folder => {
+                let name = name.to_ascii_lowercase();
+                if name.starts_with("graph.sqlite3") || name == "graph-backups" || name.starts_with("graph.damaged") {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// List one directory (`None` = the root): directories first, then files, each
@@ -150,6 +177,43 @@ mod tests {
         assert_eq!(err.code, "path.outsideWorkspace");
         let err = list_dir(&root, Some(&WorkspacePath::parse("a.tex").unwrap())).unwrap_err();
         assert_eq!(err.code, "path.notDirectory");
+    }
+
+    #[test]
+    fn relative_path_filter_agrees_with_the_workspace_path_filter() {
+        for path in [
+            ".git/index",
+            ".git",
+            ".lake/build/lib/A.olean",
+            "app/node_modules/x/y.js",
+            "dir/.main.typ.exposition-save-12.tmp",
+            "dir/.exposition-save-op1-2.tmp/sub/a.csv",
+            ".exposition/graph.sqlite3",
+            ".exposition/graph.sqlite3-journal",
+            ".exposition/graph-backups/b1.sqlite3",
+            ".exposition/graph-backups",
+            ".exposition/graph-backups-other/x",
+            ".exposition/graph.damaged-1/x",
+            ".exposition/project.json",
+            ".exposition/research/r/fit.py",
+            ".exposition/research/graph.sqlite3",
+            ".exposition",
+            "chapters/target.typ",
+            "chapters/target/out.pdf",
+            "targets/a.txt",
+            ".Exposition/graph.sqlite3-journal",
+            ".EXPOSITION/Graph-Backups",
+            ".Exposition/research/r/fit.py",
+            "sub/.exposition/graph.sqlite3",
+            "main.typ",
+        ] {
+            let expected = is_ignored(&WorkspacePath::parse(path).unwrap());
+            assert_eq!(is_ignored_relative(Path::new(path)), expected, "{path}");
+            let native = path.replace('/', std::path::MAIN_SEPARATOR_STR);
+            assert_eq!(is_ignored_relative(Path::new(&native)), expected, "{native}");
+        }
+        // Not a path inside the folder: left to the full check.
+        assert!(!is_ignored_relative(Path::new("../.git/index")));
     }
 
     #[test]

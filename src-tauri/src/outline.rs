@@ -17,13 +17,15 @@ pub async fn document_outline_get(
     state: State<'_, AppState>,
     document: DocumentId,
 ) -> Result<DocumentOutline, CommandError> {
-    let current = state.documents.state(&document).map_err(|e| CommandError::new("document.unknown", e.to_string()))?;
-    let Some(path) = current.info.path.clone() else {
+    // The buffer is shared with the document service, not copied.
+    let (info, text) =
+        state.documents.shared_state(&document).map_err(|e| CommandError::new("document.unknown", e.to_string()))?;
+    let Some(path) = info.path.clone() else {
         return Err(CommandError::new("outline.untitled", "This document has no file path, so it has no outline."));
     };
-    let unsaved = current.info.saved_revision != Some(current.info.revision);
-    let revision = current.info.revision;
-    tauri::async_runtime::spawn_blocking(move || document_outline(&path, &current.text, revision, unsaved))
+    let unsaved = info.saved_revision != Some(info.revision);
+    let revision = info.revision;
+    tauri::async_runtime::spawn_blocking(move || document_outline(&path, &text, revision, unsaved))
         .await
         .map_err(|e| CommandError::new("internal.task", format!("Outline task failed: {e}")))
 }

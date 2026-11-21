@@ -13,13 +13,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use exposition_core::document::{
-    ConflictPolicy, DocumentEdit, DocumentEvent, DocumentId, DocumentInfo, DocumentState, EditOrigin, LineEnding,
-    TextEncoding, TextPatch, TransactionId, TransactionOutcome, TransactionRequest, UndoBehavior,
+    ConflictPolicy, DocumentEdit, DocumentEvent, DocumentId, DocumentInfo, EditOrigin, LineEnding, TextEncoding,
+    TextPatch, TransactionId, TransactionOutcome, TransactionRequest, UndoBehavior,
 };
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::TextRange;
@@ -37,14 +37,14 @@ use crate::encoding::{
     DecodeError, Decoded, MAX_TEXT_BYTES, SaveRefusal, check_reopenable, decode, encode, encoding_label, language_for,
 };
 use crate::error::{WorkspaceError, WorkspaceResult};
-use crate::fsutil::{FileIdentity, hash_file, read_limited, read_with_identity, sha256_hex, write_atomic};
-use crate::recovery::{JOURNAL_VERSION, Journal, RecoveryStore, StoredEntry, workspace_key};
+use crate::fsutil::{FileIdentity, StagedWrite, hash_file, read_limited, read_with_identity, sha256_hex, write_atomic};
+use crate::recovery::{JOURNAL_VERSION, JournalRef, RecoveryStore, StoredEntry, workspace_key};
 use crate::root::WorkspaceRoot;
 use crate::settings::{
     self, AppSettings, Loaded, ProjectSettings, load_app_settings, load_project_settings, store_app_settings,
     store_project_settings,
 };
-use crate::tree::{is_ignored, list_dir};
+use crate::tree::{is_ignored, is_ignored_relative, list_dir};
 use crate::types::{
     ConflictKind, DiskConflict, DocumentOpened, FileChange, FileChangeKind, FileEntry, RecentProject,
     RecoveryDiskState, RecoveryEntry, RestoreOutcome, SaveAllOutcome, SaveFailure, SavedCopy, WorkspaceEvent,
@@ -56,6 +56,12 @@ use crate::types::{
 pub const JOURNAL_DELAY: Duration = Duration::from_millis(300);
 /// Time to let a burst of file-system events settle before processing it.
 pub const FS_SETTLE_DELAY: Duration = Duration::from_millis(150);
+/// Watcher notifications that may wait for the background loop. Beyond it
+/// further notifications are dropped and the batch is reported as a rescan
+/// (`FilesChanged { rescan: true }`): every consumer re-reads what it shows,
+/// which is its path for missed notifications. Bulk operations inside the
+/// project (a checkout of a few thousand files) stay below it.
+pub const FS_BACKLOG_LIMIT: usize = 16_384;
 /// Largest file read for build inputs.
 const MAX_BUILD_INPUT_BYTES: u64 = 256 * 1024 * 1024;
 const PROJECT_SETTINGS_PATH: &str = ".exposition/project.json";
@@ -165,6 +171,82 @@ pub struct FsSignal {
     event: notify::Result<Event>,
 }
 
+/// The way watcher notifications reach the background loop: notifications
+/// that could report nothing are dropped at once, and the number waiting is
+/// bounded.
+#[derive(Clone)]
+struct FsIntake {
+    tx: mpsc::UnboundedSender<FsSignal>,
+    /// Notifications queued since start (a counter for tests and benchmarks).
+    queued: Arc<AtomicU64>,
+    /// Notifications queued and not yet taken for processing.
+    backlog: Arc<AtomicUsize>,
+    /// Notifications were dropped since the loop last took a batch.
+    overflowed: Arc<AtomicBool>,
+}
+
+impl FsIntake {
+    fn accept(&self, filter: &WatchFilter, generation: u64, event: notify::Result<Event>) {
+        if event.as_ref().is_ok_and(|event| filter.ignores(event)) {
+            return;
+        }
+        if self.backlog.load(Ordering::Acquire) >= FS_BACKLOG_LIMIT {
+            // Dropped. One error signal per overflow makes the batch that
+            // follows a rescan; it is sent after the drop was decided, so a
+            // rescan is always reported after the last dropped notification.
+            if !self.overflowed.swap(true, Ordering::AcqRel) {
+                self.send(FsSignal { generation, event: Err(notify::Error::generic("watcher backlog limit reached")) });
+            }
+            return;
+        }
+        self.send(FsSignal { generation, event });
+    }
+
+    fn send(&self, signal: FsSignal) {
+        self.backlog.fetch_add(1, Ordering::AcqRel);
+        self.queued.fetch_add(1, Ordering::Relaxed);
+        let _ = self.tx.send(signal);
+    }
+
+    /// The loop took `count` notifications for processing.
+    fn taken(&self, count: usize) {
+        self.backlog.fetch_sub(count, Ordering::AcqRel);
+        self.overflowed.store(false, Ordering::Release);
+    }
+}
+
+/// Decides in the watcher's callback whether a notification could report
+/// anything, from the path alone (no file-system access, no allocation).
+struct WatchFilter {
+    /// The root as the watcher may spell it: canonical, and for display.
+    roots: [PathBuf; 2],
+}
+
+impl WatchFilter {
+    fn new(root: &WorkspaceRoot) -> Self {
+        Self { roots: [root.path().to_path_buf(), PathBuf::from(root.display_path())] }
+    }
+
+    /// True when [`WorkspaceService::process_fs`] would report nothing for
+    /// this event: it asks for no rescan, and it is an access or every path
+    /// lies in an ignored tree (`.git`, `.lake`, `node_modules`, `target`,
+    /// temporary save files, graph storage).
+    fn ignores(&self, event: &Event) -> bool {
+        if event.need_rescan() {
+            return false;
+        }
+        if matches!(event.kind, EventKind::Access(_)) {
+            return true;
+        }
+        !event.paths.is_empty() && event.paths.iter().all(|path| self.ignored(path))
+    }
+
+    fn ignored(&self, absolute: &Path) -> bool {
+        // A path under neither spelling of the root is left to the full check.
+        self.roots.iter().find_map(|root| absolute.strip_prefix(root).ok()).is_some_and(is_ignored_relative)
+    }
+}
+
 pub struct WorkspaceService {
     documents: Arc<DocumentService>,
     data_dir: PathBuf,
@@ -173,10 +255,8 @@ pub struct WorkspaceService {
     /// Serializes opening documents so aliases of one file resolve to one document.
     opening: Mutex<()>,
     events: broadcast::Sender<WorkspaceEvent>,
-    fs_tx: mpsc::UnboundedSender<FsSignal>,
+    fs: FsIntake,
     fs_rx: Mutex<Option<mpsc::UnboundedReceiver<FsSignal>>>,
-    /// Watcher notifications queued for the background loop since start.
-    fs_queued: Arc<AtomicU64>,
     counter: AtomicU64,
 }
 
@@ -203,6 +283,9 @@ struct OpenWorkspace {
     /// that the user has not saved or reloaded since: only the user decides
     /// whether that text replaces the file.
     recovered: HashSet<DocumentId>,
+    /// Revision held by each document's live recovery journal, so a journal
+    /// staged from an older revision never replaces a newer one.
+    journaled: HashMap<DocumentId, u64>,
     _watcher: Option<RecommendedWatcher>,
 }
 
@@ -218,6 +301,23 @@ enum DiskRead {
     Missing,
     Text { hash: String, decoded: Decoded },
     Unreadable { hash: Option<String>, error: WorkspaceError },
+}
+
+/// A document's file as read, before decoding.
+enum DiskBytes {
+    Missing,
+    Unreadable { hash: Option<String>, error: WorkspaceError },
+    Bytes { hash: String, bytes: Vec<u8> },
+}
+
+/// A recovery journal written completely next to its place (outside the I/O
+/// lock), with the document facts it was written from.
+struct StagedJournal {
+    path: WorkspacePath,
+    base: Option<String>,
+    revision: u64,
+    encoding: TextEncoding,
+    file: StagedWrite,
 }
 
 /// A completed save: what was written.
@@ -299,24 +399,34 @@ fn too_large(path: &WorkspacePath, size: u64) -> WorkspaceError {
     )
 }
 
-/// Read and decode a document's file for comparison with its buffer.
-fn read_disk(root: &WorkspaceRoot, path: &WorkspacePath) -> DiskRead {
+/// Read and hash a document's file.
+fn read_disk_bytes(root: &WorkspaceRoot, path: &WorkspacePath) -> DiskBytes {
     let target = match root.resolve_existing(path) {
         Ok(target) => target,
-        Err(e) if e.code == "path.notFound" => return DiskRead::Missing,
-        Err(error) => return DiskRead::Unreadable { hash: None, error },
+        Err(e) if e.code == "path.notFound" => return DiskBytes::Missing,
+        Err(error) => return DiskBytes::Unreadable { hash: None, error },
     };
     match read_limited(&target, MAX_TEXT_BYTES) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DiskRead::Missing,
-        Err(e) => DiskRead::Unreadable { hash: None, error: WorkspaceError::io(path, &e) },
-        Ok(Err(size)) => DiskRead::Unreadable { hash: hash_file(&target).ok(), error: too_large(path, size) },
-        Ok(Ok(bytes)) => {
-            let hash = sha256_hex(&bytes);
-            match decode(&bytes) {
-                Ok(decoded) => DiskRead::Text { hash, decoded },
-                Err(e) => DiskRead::Unreadable { hash: Some(hash), error: decode_error(path, e) },
-            }
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DiskBytes::Missing,
+        Err(e) => DiskBytes::Unreadable { hash: None, error: WorkspaceError::io(path, &e) },
+        Ok(Err(size)) => DiskBytes::Unreadable { hash: hash_file(&target).ok(), error: too_large(path, size) },
+        Ok(Ok(bytes)) => DiskBytes::Bytes { hash: sha256_hex(&bytes), bytes },
+    }
+}
+
+fn decode_disk(path: &WorkspacePath, hash: String, bytes: &[u8]) -> DiskRead {
+    match decode(bytes) {
+        Ok(decoded) => DiskRead::Text { hash, decoded },
+        Err(e) => DiskRead::Unreadable { hash: Some(hash), error: decode_error(path, e) },
+    }
+}
+
+/// Read and decode a document's file for comparison with its buffer.
+fn read_disk(root: &WorkspaceRoot, path: &WorkspacePath) -> DiskRead {
+    match read_disk_bytes(root, path) {
+        DiskBytes::Missing => DiskRead::Missing,
+        DiskBytes::Unreadable { hash, error } => DiskRead::Unreadable { hash, error },
+        DiskBytes::Bytes { hash, bytes } => decode_disk(path, hash, &bytes),
     }
 }
 
@@ -331,9 +441,13 @@ impl WorkspaceService {
             io: Mutex::new(()),
             opening: Mutex::new(()),
             events,
-            fs_tx,
+            fs: FsIntake {
+                tx: fs_tx,
+                queued: Arc::new(AtomicU64::new(0)),
+                backlog: Arc::new(AtomicUsize::new(0)),
+                overflowed: Arc::new(AtomicBool::new(false)),
+            },
             fs_rx: Mutex::new(Some(fs_rx)),
-            fs_queued: Arc::new(AtomicU64::new(0)),
             counter: AtomicU64::new(0),
         })
     }
@@ -368,6 +482,28 @@ impl WorkspaceService {
     /// folder use it to refuse results of a folder that is no longer open.
     pub fn open_root(&self) -> Option<PathBuf> {
         lock(&self.state).open.as_ref().map(|o| o.root.path().to_path_buf())
+    }
+
+    /// The open folder as [`WorkspaceInfo::root`] spells it (its display
+    /// path), without reading anything: [`Self::current`] also lists the
+    /// recovery entries, which reads their journals and files.
+    pub fn open_display_root(&self) -> Option<String> {
+        lock(&self.state).open.as_ref().map(|o| o.root.display_path())
+    }
+
+    /// The revision held by a document's live recovery journal, if one was
+    /// written in this session.
+    fn journaled_revision(&self, id: &DocumentId) -> Option<u64> {
+        lock(&self.state).open.as_ref().and_then(|o| o.journaled.get(id).copied())
+    }
+
+    fn set_journaled(&self, id: &DocumentId, revision: Option<u64>) {
+        if let Some(open) = lock(&self.state).open.as_mut() {
+            match revision {
+                Some(revision) => open.journaled.insert(id.clone(), revision),
+                None => open.journaled.remove(id),
+            };
+        }
     }
 
     fn recovery_store(&self) -> WorkspaceResult<RecoveryStore> {
@@ -458,6 +594,7 @@ impl WorkspaceService {
                 conflicts: HashMap::new(),
                 suspended: HashSet::new(),
                 recovered: HashSet::new(),
+                journaled: HashMap::new(),
                 _watcher: watcher,
             });
         }
@@ -471,13 +608,9 @@ impl WorkspaceService {
     }
 
     fn start_watcher(&self, root: &WorkspaceRoot, generation: u64) -> Option<RecommendedWatcher> {
-        let tx = self.fs_tx.clone();
-        let queued = Arc::clone(&self.fs_queued);
-        let mut watcher = notify::recommended_watcher(move |event| {
-            queued.fetch_add(1, Ordering::Relaxed);
-            let _ = tx.send(FsSignal { generation, event });
-        })
-        .ok()?;
+        let intake = self.fs.clone();
+        let filter = WatchFilter::new(root);
+        let mut watcher = notify::recommended_watcher(move |event| intake.accept(&filter, generation, event)).ok()?;
         watcher.watch(root.path(), RecursiveMode::Recursive).ok()?;
         Some(watcher)
     }
@@ -486,15 +619,18 @@ impl WorkspaceService {
     /// callback of the OS watcher does (benchmarks and tests of event bursts).
     #[doc(hidden)]
     pub fn inject_fs_event(&self, event: notify::Result<Event>) {
-        let Some(generation) = lock(&self.state).open.as_ref().map(|o| o.generation) else { return };
-        self.fs_queued.fetch_add(1, Ordering::Relaxed);
-        let _ = self.fs_tx.send(FsSignal { generation, event });
+        let Some((generation, filter)) =
+            lock(&self.state).open.as_ref().map(|o| (o.generation, WatchFilter::new(&o.root)))
+        else {
+            return;
+        };
+        self.fs.accept(&filter, generation, event);
     }
 
     /// Watcher notifications queued for the background loop since start.
     #[doc(hidden)]
     pub fn fs_signals_queued(&self) -> u64 {
-        self.fs_queued.load(Ordering::Relaxed)
+        self.fs.queued.load(Ordering::Relaxed)
     }
 
     /// Close the folder and every document from it. Unsaved buffers keep their
@@ -668,6 +804,7 @@ impl WorkspaceService {
                 open.conflicts.remove(id);
                 open.suspended.remove(id);
                 open.recovered.remove(id);
+                open.journaled.remove(id);
                 open.recovery.clone()
             })
         };
@@ -708,6 +845,7 @@ impl WorkspaceService {
             let mut state = lock(&self.state);
             let open = state.open.as_mut().ok_or_else(WorkspaceError::no_workspace)?;
             open.suspended.insert(id.clone());
+            open.journaled.remove(id);
             open.recovery.clone()
         };
         if let Some(path) = info.path {
@@ -763,16 +901,15 @@ impl WorkspaceService {
     /// why it would refuse (the same checks; nothing is written).
     pub fn exact_save_preview(&self, id: &DocumentId) -> WorkspaceResult<SavePreview> {
         let _io = lock(&self.io);
-        let state = self.documents.state(id)?;
-        let path = state
-            .info
+        let (info, text) = self.documents.shared_state(id)?;
+        let path = info
             .path
             .clone()
             .ok_or_else(|| WorkspaceError::new("document.noPath", "This document has no file to save to."))?;
         if self.is_suspended(id) {
             return Err(suspended_error(&path));
         }
-        self.exact_refusal(id, &path, state.info.revision, state.info.revision)?;
+        self.exact_refusal(id, &path, info.revision, info.revision)?;
         let root = self.root()?;
         let target = root.resolve_for_write(&path)?;
         let base = self.disk_base(id).unwrap_or(None);
@@ -798,14 +935,14 @@ impl WorkspaceService {
             }
             Err(e) => return Err(WorkspaceError::io(&path, &e)),
         };
-        let bytes = encode(&state.text, state.info.encoding);
+        let bytes = encode(&text, info.encoding);
         Ok(SavePreview {
             path,
-            revision: state.info.revision,
-            unsaved: state.info.saved_revision != Some(state.info.revision),
+            revision: info.revision,
+            unsaved: info.saved_revision != Some(info.revision),
             bytes: bytes.len() as u64,
             content_hash: sha256_hex(&bytes),
-            text: state.text,
+            text: text.to_string(),
             disk_text,
         })
     }
@@ -833,11 +970,7 @@ impl WorkspaceService {
                 ),
             ));
         }
-        let pending = self.recovery_store()?.entries().into_iter().any(|entry| match entry {
-            StoredEntry::Valid { journal, .. } => journal.path == *path,
-            StoredEntry::Unreadable { path: entry_path, .. } => entry_path.as_ref() == Some(path),
-        });
-        if pending {
+        if self.recovery_store()?.has_entry_for(path) {
             return Err(WorkspaceError::new(
                 "document.recoveryPending",
                 format!(
@@ -857,9 +990,9 @@ impl WorkspaceService {
     /// The save itself (the caller holds the I/O lock). With `exact`, the
     /// stricter rules of [`Self::save_document_exact`] apply.
     fn save_locked(&self, id: &DocumentId, overwrite: bool, exact: Option<u64>) -> WorkspaceResult<SavedDocument> {
-        let state = self.documents.state(id)?;
-        let path = state
-            .info
+        // The buffer is shared, not copied: the save encodes it directly.
+        let (doc, text) = self.documents.shared_state(id)?;
+        let path = doc
             .path
             .clone()
             .ok_or_else(|| WorkspaceError::new("document.noPath", "This document has no file to save to."))?;
@@ -867,7 +1000,7 @@ impl WorkspaceService {
             return Err(suspended_error(&path));
         }
         if let Some(revision) = exact {
-            self.exact_refusal(id, &path, state.info.revision, revision)?;
+            self.exact_refusal(id, &path, doc.revision, revision)?;
         }
         let root = self.root()?;
         let base = self.disk_base(id).unwrap_or(None);
@@ -904,9 +1037,9 @@ impl WorkspaceService {
             }
             Err(e) => return Err(WorkspaceError::io(&path, &e)),
         }
-        let bytes = encode(&state.text, state.info.encoding);
+        let bytes = encode(&text, doc.encoding);
         // Never write a file Exposition would then refuse to reopen.
-        check_reopenable(&state.text, bytes.len()).map_err(|refusal| match refusal {
+        check_reopenable(&text, bytes.len()).map_err(|refusal| match refusal {
             SaveRefusal::TooLarge { size } => WorkspaceError::new(
                 "file.tooLarge",
                 format!(
@@ -931,7 +1064,7 @@ impl WorkspaceService {
         })?;
         let content_hash = sha256_hex(&bytes);
         self.set_disk_base(id, Some(content_hash.clone()));
-        let info = self.documents.mark_saved(id, state.info.revision)?;
+        let info = self.documents.mark_saved(id, doc.revision)?;
         self.resolve_conflict(id);
         if let Some(open) = lock(&self.state).open.as_mut() {
             open.recovered.remove(id);
@@ -939,9 +1072,10 @@ impl WorkspaceService {
         if info.saved_revision == Some(info.revision)
             && let Ok(store) = self.recovery_store()
         {
+            self.set_journaled(id, None);
             let _ = store.remove_live(&path);
         }
-        Ok(SavedDocument { info, path, revision: state.info.revision, bytes: bytes.len() as u64, content_hash })
+        Ok(SavedDocument { info, path, revision: doc.revision, bytes: bytes.len() as u64, content_hash })
     }
 
     /// Save the document's CURRENT text (unsaved edits included, in its
@@ -953,7 +1087,7 @@ impl WorkspaceService {
     /// own data folder). Never replaces anything (`document.exists`).
     pub fn save_document_copy(&self, id: &DocumentId, destination: &str) -> WorkspaceResult<SavedCopy> {
         let _io = lock(&self.io);
-        let state = self.documents.state(id)?;
+        let (info, text) = self.documents.shared_state(id)?;
         let root = self.root()?;
         let invalid = || WorkspaceError::new("path.invalid", format!("{destination} is not a file path."));
         let raw = Path::new(destination);
@@ -992,8 +1126,8 @@ impl WorkspaceService {
         if fs::symlink_metadata(&target).is_ok() {
             return Err(exists());
         }
-        let bytes = encode(&state.text, state.info.encoding);
-        check_reopenable(&state.text, bytes.len()).map_err(|refusal| match refusal {
+        let bytes = encode(&text, info.encoding);
+        check_reopenable(&text, bytes.len()).map_err(|refusal| match refusal {
             SaveRefusal::TooLarge { size } => WorkspaceError::new(
                 "file.tooLarge",
                 format!(
@@ -1092,11 +1226,11 @@ impl WorkspaceService {
     /// `external` transaction) and mark it saved.
     pub fn reload_document(&self, id: &DocumentId) -> WorkspaceResult<DocumentInfo> {
         let _io = lock(&self.io);
-        let state = self.documents.state(id)?;
-        let path = state.info.path.clone().ok_or_else(|| WorkspaceError::new("document.noPath", "No file."))?;
+        let (current, text) = self.documents.shared_state(id)?;
+        let path = current.path.clone().ok_or_else(|| WorkspaceError::new("document.noPath", "No file."))?;
         match read_disk(&self.root()?, &path) {
             DiskRead::Text { hash, decoded } => {
-                let info = self.apply_disk_text(id, &state, decoded, hash, "Reload from disk")?;
+                let info = self.apply_disk_text(id, &current, &text, decoded, hash, "Reload from disk")?;
                 self.emit(WorkspaceEvent::DocumentReloaded { document: id.clone(), path });
                 Ok(info)
             }
@@ -1121,18 +1255,19 @@ impl WorkspaceService {
     fn apply_disk_text(
         &self,
         id: &DocumentId,
-        state: &DocumentState,
+        current: &DocumentInfo,
+        text: &str,
         decoded: Decoded,
         hash: String,
         label: &str,
     ) -> WorkspaceResult<DocumentInfo> {
-        let patches = diff_patches(&state.text, &decoded.text);
-        let mut revision = state.info.revision;
+        let patches = diff_patches(text, &decoded.text);
+        let mut revision = current.revision;
         if !patches.is_empty() {
             let outcome = self.documents.apply(TransactionRequest {
                 id: self.next_transaction("external"),
                 origin: EditOrigin::External,
-                edits: vec![DocumentEdit { document: id.clone(), base_revision: state.info.revision, patches }],
+                edits: vec![DocumentEdit { document: id.clone(), base_revision: current.revision, patches }],
                 undo: UndoBehavior::NewGroup,
                 conflict: ConflictPolicy::Reject,
                 label: Some(label.to_owned()),
@@ -1140,7 +1275,7 @@ impl WorkspaceService {
             })?;
             revision = outcome.applied[0].revision;
         }
-        if decoded.encoding != state.info.encoding {
+        if decoded.encoding != current.encoding {
             self.documents.set_encoding(id, decoded.encoding)?;
         }
         self.set_disk_base(id, Some(hash));
@@ -1156,12 +1291,20 @@ impl WorkspaceService {
     /// reloaded; dirty buffers enter a conflict that needs a user decision.
     pub fn check_document(&self, id: &DocumentId) {
         let _io = lock(&self.io);
-        let Ok(state) = self.documents.state(id) else { return };
-        let Some(path) = state.info.path.clone() else { return };
+        let Ok((current, text)) = self.documents.shared_state(id) else { return };
+        let Some(path) = current.path.clone() else { return };
         let Ok(root) = self.root() else { return };
         let Some(base) = self.disk_base(id) else { return };
-        let clean = state.info.saved_revision == Some(state.info.revision);
-        match read_disk(&root, &path) {
+        let clean = current.saved_revision == Some(current.revision);
+        let disk = match read_disk_bytes(&root, &path) {
+            DiskBytes::Missing => DiskRead::Missing,
+            DiskBytes::Unreadable { hash, error } => DiskRead::Unreadable { hash, error },
+            // The file is as it was loaded or saved (the watcher reports the
+            // app's own save too): nothing to decode or compare.
+            DiskBytes::Bytes { hash, .. } if Some(&hash) == base.as_ref() => return,
+            DiskBytes::Bytes { hash, bytes } => decode_disk(&path, hash, &bytes),
+        };
+        match disk {
             DiskRead::Missing => {
                 if base.is_none() {
                     return;
@@ -1204,15 +1347,15 @@ impl WorkspaceService {
                 if Some(&hash) == base.as_ref() {
                     return;
                 }
-                if decoded.text == *state.text && decoded.encoding == state.info.encoding {
+                if decoded.text == *text && decoded.encoding == current.encoding {
                     // Disk now matches the buffer (e.g. restored by another tool).
                     self.set_disk_base(id, Some(hash));
-                    let _ = self.documents.mark_saved(id, state.info.revision);
+                    let _ = self.documents.mark_saved(id, current.revision);
                     self.resolve_conflict(id);
                     return;
                 }
                 if clean {
-                    match self.apply_disk_text(id, &state, decoded, hash.clone(), "External change") {
+                    match self.apply_disk_text(id, &current, &text, decoded, hash.clone(), "External change") {
                         Ok(_) => {
                             self.emit(WorkspaceEvent::DocumentReloaded { document: id.clone(), path });
                             return;
@@ -1247,15 +1390,15 @@ impl WorkspaceService {
             LineEnding::Crlf => "\r\n",
             _ => return Err(WorkspaceError::new("document.invalidLineEnding", "Choose LF or CRLF.")),
         };
-        let state = self.documents.state(id)?;
-        let patches = line_ending_patches(&state.text, target);
+        let (info, text) = self.documents.shared_state(id)?;
+        let patches = line_ending_patches(&text, target);
         if patches.is_empty() {
             return Ok(None);
         }
         let outcome = self.documents.apply(TransactionRequest {
             id: self.next_transaction("eol"),
             origin: EditOrigin::System,
-            edits: vec![DocumentEdit { document: id.clone(), base_revision: state.info.revision, patches }],
+            edits: vec![DocumentEdit { document: id.clone(), base_revision: info.revision, patches }],
             undo: UndoBehavior::NewGroup,
             conflict: ConflictPolicy::Reject,
             label: Some("Normalize line endings".into()),
@@ -1266,35 +1409,103 @@ impl WorkspaceService {
 
     // ----- recovery ------------------------------------------------------------
 
-    /// Write (or remove) recovery journals for the given documents.
+    /// Write (or remove) recovery journals for the given documents. When it
+    /// returns, the journal of every unsaved document among them holds the
+    /// text the document had when the call started, or a later one.
+    ///
+    /// The text is written and flushed to a temporary file before the I/O
+    /// lock is taken (so a save, reload, or rename never waits for a large
+    /// journal), and installed under the lock only if it is still the
+    /// journal that a write under the lock would produce for an unsaved
+    /// document: same file, base, and encoding, a revision that is not yet
+    /// saved and is newer than the journal already in place. Otherwise the
+    /// journal is written under the lock from the current state.
     pub fn journal_documents(&self, ids: &HashSet<DocumentId>) {
+        let staged = self.stage_journals(ids);
         let _io = lock(&self.io);
-        self.journal_locked(ids);
+        self.install_journals(ids, staged);
     }
 
+    /// [`Self::journal_documents`] for a caller that holds the I/O lock.
     fn journal_locked(&self, ids: &HashSet<DocumentId>) {
+        self.install_journals(ids, HashMap::new());
+    }
+
+    /// Write the journals of the unsaved documents among `ids` next to their
+    /// place, without the I/O lock. A journal that cannot be staged is left
+    /// to the write under the lock, which reports the failure.
+    fn stage_journals(&self, ids: &HashSet<DocumentId>) -> HashMap<DocumentId, StagedJournal> {
+        let mut staged = HashMap::new();
+        let Ok(store) = self.recovery_store() else { return staged };
+        for id in ids {
+            let Ok((info, text)) = self.documents.shared_state(id) else { continue };
+            let Some(path) = info.path.clone() else { continue };
+            let Some(base) = self.disk_base(id) else { continue };
+            if self.is_suspended(id) || info.saved_revision == Some(info.revision) {
+                continue;
+            }
+            let journal = JournalRef {
+                version: JOURNAL_VERSION,
+                path: &path,
+                base_hash: base.as_deref(),
+                revision: info.revision,
+                encoding: info.encoding,
+                saved_at: crate::fsutil::now_millis(),
+                text: &text,
+            };
+            if let Ok(file) = store.stage_live(&journal) {
+                let journal = StagedJournal { path, base, revision: info.revision, encoding: info.encoding, file };
+                staged.insert(id.clone(), journal);
+            }
+        }
+        staged
+    }
+
+    /// Bring the live journals of `ids` up to date (the caller holds the I/O
+    /// lock): removed for a saved document, otherwise the staged journal when
+    /// it is still valid, otherwise written from the current state.
+    fn install_journals(&self, ids: &HashSet<DocumentId>, mut staged: HashMap<DocumentId, StagedJournal>) {
         let Ok(store) = self.recovery_store() else { return };
         for id in ids {
-            let Ok(state) = self.documents.state(id) else { continue };
-            let Some(path) = state.info.path.clone() else { continue };
+            let prepared = staged.remove(id);
+            let Ok(info) = self.documents.info(id) else { continue };
+            let Some(path) = info.path.clone() else { continue };
             let Some(base) = self.disk_base(id) else { continue };
             if self.is_suspended(id) {
                 // Its file was deleted on purpose: a journal would offer to
                 // bring it back after a restart.
                 continue;
             }
-            let result = if state.info.saved_revision == Some(state.info.revision) {
+            let result = if info.saved_revision == Some(info.revision) {
+                self.set_journaled(id, None);
                 store.remove_live(&path)
             } else {
-                store.write_live(&Journal {
-                    version: JOURNAL_VERSION,
-                    path: path.clone(),
-                    base_hash: base,
-                    revision: state.info.revision,
-                    encoding: state.info.encoding,
-                    saved_at: crate::fsutil::now_millis(),
-                    text: state.text,
-                })
+                let in_place = self.journaled_revision(id);
+                let written = match prepared {
+                    Some(journal)
+                        if journal.path == path
+                            && journal.base == base
+                            && journal.encoding == info.encoding
+                            && journal.revision <= info.revision
+                            && journal.revision > info.saved_revision.unwrap_or(0)
+                            && in_place.is_none_or(|revision| journal.revision > revision) =>
+                    {
+                        journal.file.commit().map(|()| journal.revision)
+                    }
+                    _ => self.documents.shared_state(id).map_err(std::io::Error::other).and_then(|(info, text)| {
+                        let journal = JournalRef {
+                            version: JOURNAL_VERSION,
+                            path: &path,
+                            base_hash: base.as_deref(),
+                            revision: info.revision,
+                            encoding: info.encoding,
+                            saved_at: crate::fsutil::now_millis(),
+                            text: &text,
+                        };
+                        store.stage_live(&journal)?.commit().map(|()| info.revision)
+                    }),
+                };
+                written.map(|revision| self.set_journaled(id, Some(revision)))
             };
             if let Err(e) = result {
                 self.emit(WorkspaceEvent::JournalFailed {
@@ -1406,13 +1617,13 @@ impl WorkspaceService {
             },
         };
         let disk_changed = self.disk_base(&id).unwrap_or(None) != journal.base_hash;
-        let state = self.documents.state(&id)?;
-        let patches = diff_patches(&state.text, &journal.text);
+        let (info, text) = self.documents.shared_state(&id)?;
+        let patches = diff_patches(&text, &journal.text);
         if !patches.is_empty() {
             self.documents.apply(TransactionRequest {
                 id: self.next_transaction("recovery"),
                 origin: EditOrigin::Recovery,
-                edits: vec![DocumentEdit { document: id.clone(), base_revision: state.info.revision, patches }],
+                edits: vec![DocumentEdit { document: id.clone(), base_revision: info.revision, patches }],
                 undo: UndoBehavior::NewGroup,
                 conflict: ConflictPolicy::Reject,
                 label: Some("Restore unsaved changes".into()),
@@ -1568,12 +1779,14 @@ impl WorkspaceService {
 
     /// Check open documents affected by `changes` (all of them on `rescan`).
     pub fn check_changed_documents(&self, changes: &[FileChange], rescan: bool) {
+        // A document is affected by a change to its file or to a folder above it.
+        let changed: HashSet<&str> = changes.iter().map(|c| c.path.as_str()).collect();
         for info in self.documents.list() {
             let Some(path) = &info.path else { continue };
+            let path = path.as_str();
             let affected = rescan
-                || changes
-                    .iter()
-                    .any(|c| c.path == *path || path.as_str().starts_with(&format!("{}/", c.path.as_str())));
+                || changed.contains(path)
+                || path.match_indices('/').any(|(end, _)| changed.contains(&path[..end]));
             if affected {
                 self.check_document(&info.id);
             }
@@ -1610,6 +1823,7 @@ impl WorkspaceService {
                 },
                 signal = fs_rx.recv() => match signal {
                     Some(signal) => {
+                        // At most FS_BACKLOG_LIMIT (+1) wait here and in the channel.
                         pending_fs.push(signal);
                         fs_at.get_or_insert_with(|| Instant::now() + FS_SETTLE_DELAY);
                     }
@@ -1617,15 +1831,20 @@ impl WorkspaceService {
                 },
                 _ = tokio::time::sleep_until(next.unwrap_or_else(Instant::now)), if next.is_some() => {
                     let now = Instant::now();
+                    // File I/O runs on the blocking pool, not on an async
+                    // worker; the loop waits for it, so batches stay ordered.
                     if journal_at.is_some_and(|at| at <= now) {
                         journal_at = None;
                         let ids = std::mem::take(&mut pending_docs);
-                        self.journal_documents(&ids);
+                        let service = Arc::clone(&self);
+                        let _ = tokio::task::spawn_blocking(move || service.journal_documents(&ids)).await;
                     }
                     if fs_at.is_some_and(|at| at <= now) {
                         fs_at = None;
                         let signals = std::mem::take(&mut pending_fs);
-                        self.process_fs(signals);
+                        self.fs.taken(signals.len());
+                        let service = Arc::clone(&self);
+                        let _ = tokio::task::spawn_blocking(move || service.process_fs(signals)).await;
                     }
                 }
             }
