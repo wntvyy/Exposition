@@ -433,6 +433,8 @@ fn the_same_document_under_a_path_the_build_did_not_know_is_not_skipped() {
     let notes = env.open("notes.txt");
     env.service.watch(&path("main.tex")).unwrap();
     env.next_result();
+    // Only a full build's read set is evidence that a file is not read.
+    env.build(TexBuildMode::Full);
     env.drain(Duration::from_millis(300));
     env.prepend(&notes, "x");
     assert!(!env.changed(&notes, "notes.txt"), "known and unread");

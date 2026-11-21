@@ -360,7 +360,7 @@ fn a_densely_cyclic_object_graph_terminates() {
     let (counted, visits, objects) = doc.page_keys_counted();
     assert_eq!(counted, keys);
     assert!(keys[0].is_none(), "a graph this cyclic is not hashed: {:?}", keys[0]);
-    assert!(objects >= 30 && objects < 64, "{objects} objects");
+    assert!((30..64).contains(&objects), "{objects} objects");
     assert!(visits <= objects * 16 + 4096 + 1, "{visits} visits for {objects} objects");
     // A page that cannot be followed within the bound has no key (build-unique reference).
     doc.render_page(0, 1.0).expect("still renders");

@@ -370,7 +370,12 @@ fn an_entry_with_a_biber_control_file_is_rebuilt_for_every_open_document() {
     let Some(mut env) = Env::new() else { return };
     let main = env.open("main.tex");
     let notes = env.open("notes.txt");
+    env.service.watch(&path("main.tex")).unwrap();
+    env.next_result();
     // Without the control file: skipped after a full build.
+    env.build(TexBuildMode::Full);
+    env.insert(&main, "anchor0 ", "x");
+    assert!(env.changed(&main, "main.tex"), "the entry is watched");
     env.build(TexBuildMode::Full);
     env.insert(&notes, "notes", "x");
     assert!(!env.changed(&notes, "notes.txt"));
