@@ -790,11 +790,17 @@ impl Store {
     }
 
     pub fn transcript(&self, task: &TaskId) -> StoreResult<Vec<TranscriptRow>> {
+        self.transcript_from(task, 0)
+    }
+
+    /// The transcript rows with sequence number `from` or later, in order.
+    pub fn transcript_from(&self, task: &TaskId, from: u64) -> StoreResult<Vec<TranscriptRow>> {
         let conn = self.lock();
-        let mut stmt = conn
-            .prepare("SELECT seq, created_at, kind, role, content FROM transcript WHERE task_id = ?1 ORDER BY seq")?;
+        let mut stmt = conn.prepare(
+            "SELECT seq, created_at, kind, role, content FROM transcript WHERE task_id = ?1 AND seq >= ?2 ORDER BY seq",
+        )?;
         let raws = stmt
-            .query_map([&task.0], |r| {
+            .query_map(params![task.0, i(from)], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, i64>(1)?,
@@ -1027,12 +1033,24 @@ impl Store {
     }
 
     pub fn tool_calls(&self, task: &TaskId) -> StoreResult<Vec<ToolCallRow>> {
+        self.tool_call_rows(task, None)
+    }
+
+    /// The task's tool calls with each result cut to its first `chars`
+    /// characters (for previews: a whole result can be hundreds of kilobytes).
+    pub fn tool_call_previews(&self, task: &TaskId, chars: usize) -> StoreResult<Vec<ToolCallRow>> {
+        self.tool_call_rows(task, Some(chars))
+    }
+
+    fn tool_call_rows(&self, task: &TaskId, result_chars: Option<usize>) -> StoreResult<Vec<ToolCallRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT tool_use_id, turn, name, input, status, result, is_error, authorized_by, figures FROM tool_calls WHERE task_id = ?1 ORDER BY rowid",
+            "SELECT tool_use_id, turn, name, input, status,
+                CASE WHEN ?2 IS NULL THEN result ELSE substr(result, 1, ?2) END,
+                is_error, authorized_by, figures FROM tool_calls WHERE task_id = ?1 ORDER BY rowid",
         )?;
         let raws = stmt
-            .query_map([&task.0], |r| {
+            .query_map(params![task.0, result_chars.map(|n| n as i64)], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, u32>(1)?,
@@ -1451,6 +1469,16 @@ impl Store {
     }
 
     /// The latest graph context of a task and how many were attached.
+    /// How many graph contexts were attached to the task (one per run).
+    pub fn graph_context_count(&self, task: &TaskId) -> StoreResult<u32> {
+        let count: i64 = self.lock().query_row(
+            "SELECT count(*) FROM task_graph_contexts WHERE task_id = ?1",
+            [&task.0],
+            |r| r.get(0),
+        )?;
+        Ok(count as u32)
+    }
+
     pub fn graph_context(&self, task: &TaskId) -> StoreResult<(Option<crate::graph::GraphContext>, u32)> {
         let conn = self.lock();
         let count: i64 =

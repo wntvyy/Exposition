@@ -224,7 +224,9 @@ export const commands = {
   agentsAttachmentPreview: (id: AttachmentId) => invoke<string | null>("agents_attachment_preview", { id }),
   agentsAttachmentsDiscard: (ids: AttachmentId[]) => invoke<void>("agents_attachments_discard", { ids }),
   agentsTaskList: () => invoke<TaskSummary[]>("agents_task_list"),
-  agentsTaskDetail: (task: TaskId) => invoke<TaskDetail>("agents_task_detail", { task }),
+  /** `sinceSeq`: a partial read (see `TaskDetail.transcriptFrom`). */
+  agentsTaskDetail: (task: TaskId, sinceSeq?: number) =>
+    invoke<TaskDetail>("agents_task_detail", sinceSeq === undefined ? { task } : { task, sinceSeq }),
   agentsTaskCreate: (request: CreateTaskRequest) => invoke<TaskSummary>("agents_task_create", { request }),
   agentsTaskContinue: (
     task: TaskId,

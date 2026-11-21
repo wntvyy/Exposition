@@ -374,3 +374,87 @@ async fn every_request_of_a_run_carries_the_attachments() {
         store.messages(&task.id).unwrap().iter().map(|(_, c)| serde_json::to_string(c).unwrap().len()).sum();
     assert!((since(&h, before).transcript_bytes as usize) < 2 * stored);
 }
+
+/// The transcript's result preview, as it was computed from a whole result.
+fn preview(text: &str) -> String {
+    const LIMIT: usize = 4000;
+    if text.len() <= LIMIT {
+        return text.to_owned();
+    }
+    let mut end = LIMIT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+fn seq_of(item: &TranscriptItem) -> u64 {
+    match item {
+        TranscriptItem::UserText { seq, .. }
+        | TranscriptItem::AssistantText { seq, .. }
+        | TranscriptItem::Thinking { seq, .. }
+        | TranscriptItem::ToolCall { seq, .. }
+        | TranscriptItem::Notice { seq, .. } => *seq,
+    }
+}
+
+/// AGENTS-6. Reading a task's detail reads no more of each tool result than
+/// its preview shows, and a partial read (what a transcript event makes the
+/// webview do) reads and returns only the tail, identical to the tail of a
+/// full read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn detail_reads_are_bounded_and_a_partial_read_is_the_tail_of_a_full_one() {
+    let h = harness();
+    // Multi-byte text, so a preview cut can fall inside a character.
+    let big = "→é".repeat(12_000);
+    std::fs::write(h.project.path().join("big.typ"), format!("= Big\n{big}\n")).unwrap();
+    let mut calls = vec![tool("read", "read_file", json!({"path": "big.typ"}))];
+    for i in 0..10 {
+        calls.push(tool(&format!("l{i}"), "list_files", json!({"path": "", "recursive": false})));
+    }
+    let task = run(&h, turns(calls), request(&h, PermissionProfile::ReadOnly)).await;
+    assert_eq!(task.status, TaskStatus::Completed);
+
+    let before = h.service.store_stats();
+    let full = h.service.task_detail(&task.id).unwrap();
+    let cost = since(&h, before);
+    assert_eq!(full.transcript_from, None);
+    // Eleven results, each read up to its preview (4,001 characters of at most four bytes).
+    assert!(cost.tool_result_bytes < 11 * 4_001 * 4, "a detail read {} bytes of tool results", cost.tool_result_bytes);
+    // The previews are what cutting the whole results gives.
+    let store = exposition_agents::store::Store::open(&h._data.path().join("agents.sqlite3")).unwrap();
+    let whole = store.tool_calls(&task.id).unwrap();
+    assert!(whole[0].result.as_ref().unwrap().len() > 50_000);
+    let mut shown = 0;
+    for item in &full.transcript {
+        if let TranscriptItem::ToolCall { tool_use_id, result, .. } = item {
+            let stored = whole.iter().find(|c| &c.tool_use_id == tool_use_id).unwrap();
+            assert_eq!(result.as_deref(), stored.result.as_deref().map(preview).as_deref(), "{tool_use_id}");
+            shown += 1;
+        }
+    }
+    assert_eq!(shown, 11);
+
+    // A partial read from the latest assistant message.
+    let from = full
+        .transcript
+        .iter()
+        .filter(|item| !matches!(item, TranscriptItem::UserText { .. } | TranscriptItem::Notice { .. }))
+        .map(seq_of)
+        .max()
+        .unwrap();
+    let before = h.service.store_stats();
+    let partial = h.service.task_detail_from(&task.id, Some(from)).unwrap();
+    let cost = since(&h, before);
+    assert_eq!(partial.transcript_from, Some(from));
+    let tail: Vec<TranscriptItem> = full.transcript.iter().filter(|item| seq_of(item) >= from).cloned().collect();
+    assert!(!tail.is_empty() && tail.len() < full.transcript.len());
+    assert_eq!(partial.transcript, tail);
+    assert_eq!((&partial.summary, &partial.approvals, &partial.allowances), (&full.summary, &full.approvals, &full.allowances));
+    assert_eq!(partial.questions, full.questions);
+    assert_eq!(partial.graph.contexts, full.graph.contexts);
+    assert!(cost.transcript_bytes < 1_000, "a partial read parsed {} bytes of the transcript", cost.transcript_bytes);
+
+    // From before everything: the whole transcript again.
+    assert_eq!(h.service.task_detail_from(&task.id, Some(0)).unwrap().transcript, full.transcript);
+}

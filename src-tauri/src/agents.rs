@@ -250,8 +250,13 @@ pub async fn agents_task_list(state: State<'_, AppState>) -> Result<Vec<TaskSumm
 }
 
 #[tauri::command]
-pub async fn agents_task_detail(state: State<'_, AppState>, task: TaskId) -> Result<TaskDetail, CommandError> {
-    state.agents.task_detail(&task_id(task)?).map_err(command_error)
+pub async fn agents_task_detail(
+    state: State<'_, AppState>,
+    task: TaskId,
+    since_seq: Option<u64>,
+) -> Result<TaskDetail, CommandError> {
+    // `since_seq`: a partial read for a view that holds an earlier detail.
+    state.agents.task_detail_from(&task_id(task)?, since_seq).map_err(command_error)
 }
 
 #[tauri::command]

@@ -940,16 +940,27 @@ impl AgentService {
     }
 
     pub fn task_detail(&self, id: &TaskId) -> Result<TaskDetail> {
+        self.task_detail_from(id, None)
+    }
+
+    /// The task's detail; with `from`, a partial read for a reader that
+    /// holds an earlier one: only the transcript items with that sequence
+    /// number or a later one, and no graph context (see
+    /// [`TaskDetail::transcript_from`]). Everything else is complete and
+    /// current either way. Stored rows before the latest assistant message
+    /// never change, so a reader that asks from there (or from its earliest
+    /// unfinished tool call) misses nothing.
+    pub fn task_detail_from(&self, id: &TaskId, from: Option<u64>) -> Result<TaskDetail> {
         let summary = self.inner.summary(id)?;
-        let transcript = self.inner.transcript(id)?;
+        let transcript = self.inner.transcript(id, from.unwrap_or(0))?;
         let approvals = lock(&self.inner.running)
             .get(id)
             .map(|r| r.approvals.values().map(|(a, _)| a.clone()).collect())
             .unwrap_or_default();
-        let graph = self.inner.graph_info(id)?;
+        let graph = self.inner.graph_info(id, from.is_none())?;
         let allowances = self.inner.task_allowances(id)?;
         let questions = self.inner.store.questions(id)?;
-        Ok(TaskDetail { summary, transcript, approvals, graph, allowances, questions })
+        Ok(TaskDetail { summary, transcript, approvals, graph, allowances, questions, transcript_from: from })
     }
 
     pub fn create_task(&self, request: CreateTaskRequest) -> Result<TaskSummary> {
@@ -2302,8 +2313,11 @@ impl Inner {
             .map_err(|refusal| AgentError::from_refusal(&refusal))
     }
 
-    fn graph_info(&self, id: &TaskId) -> Result<TaskGraphInfo> {
-        let (context, contexts) = self.store.graph_context(id)?;
+    /// The task's graph record; without `context`, only the number of
+    /// contexts attached is read (a partial detail read).
+    fn graph_info(&self, id: &TaskId, context: bool) -> Result<TaskGraphInfo> {
+        let (context, contexts) =
+            if context { self.store.graph_context(id)? } else { (None, self.store.graph_context_count(id)?) };
         Ok(TaskGraphInfo {
             project: self.store.graph_project(id)?,
             context,
@@ -2695,11 +2709,19 @@ impl Inner {
         }
     }
 
-    fn transcript(&self, id: &TaskId) -> Result<Vec<TranscriptItem>> {
-        let calls: HashMap<String, ToolCallRow> =
-            self.store.tool_calls(id)?.into_iter().map(|c| (c.tool_use_id.clone(), c)).collect();
+    /// The rendered transcript from sequence number `from` on (0: all of it).
+    fn transcript(&self, id: &TaskId, from: u64) -> Result<Vec<TranscriptItem>> {
+        // Results are shown cut to `TRANSCRIPT_RESULT_LIMIT` bytes: read no
+        // more of each than that can need (one more character than the
+        // limit has bytes, so a longer result is still seen to be longer).
+        let calls: HashMap<String, ToolCallRow> = self
+            .store
+            .tool_call_previews(id, TRANSCRIPT_RESULT_LIMIT + 1)?
+            .into_iter()
+            .map(|c| (c.tool_use_id.clone(), c))
+            .collect();
         let mut items = Vec::new();
-        for row in self.store.transcript(id)? {
+        for row in self.store.transcript_from(id, from)? {
             let seq = row.seq;
             // A discussion entry renders like a message; its user text is
             // marked with the question it is about.
