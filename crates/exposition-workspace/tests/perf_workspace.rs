@@ -448,11 +448,13 @@ fn apply_one_edit_in_a_new_group() {
 #[ignore = "perf"]
 fn journal_save_and_disk_check() {
     for size in doc_sizes() {
+        // Room for the characters typed below: a 10 MiB document is at the limit.
+        let size = size - KIB;
         let p = project(&[("doc.txt", &text_of(size, false, 4))]);
         let id = p.service.open_document(&wp("doc.txt")).unwrap().state.info.id;
         let docs = Arc::clone(p.service.documents());
         let ids = HashSet::from([id.clone()]);
-        let scale = json!({ "bytes": size, "size": size_label(size) });
+        let scale = json!({ "bytes": size, "size": size_label(size + KIB) });
         let at = (size / 2) as u32;
 
         let mut samples = Vec::new();
