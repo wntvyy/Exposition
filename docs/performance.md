@@ -140,9 +140,12 @@ sequences and is part of the normal test suite.
 | LaTeX page image | rendered and sent only when the page's content changed | unchanged rebuild at 100 pages: 100 images, 2,307 ms → 0 images; one-character edit: 1 image |
 | LaTeX burst of edits | a superseding request waits for 150 ms of quiet, at most 1 s | 20 edits at 10/s: 20 → 3 engine processes |
 
-When a rebuild may be skipped: only when the entry's latest build is a settled,
-successful full build that did not read the changed document, the entry does
-not use Biber, and no read failed in that build. Everything else rebuilds.
+When a rebuild may be skipped: for a Typst or Markdown entry, only when its
+latest build is still held, had the changed document open without reading it,
+and no read failed in that build; for a pdfLaTeX entry, only when its latest
+build is a settled, successful full build that did not read the changed
+document and the entry does not use Biber. A LuaLaTeX entry and everything
+else rebuilds.
 
 ### Research, jobs and workflows
 
@@ -222,7 +225,8 @@ or product behaviour:
   "for an earlier revision" state in the interface.
 - **Research run retention.** With 2,000 runs on disk, 500 are listed.
 - **Rebuilds for unrelated edits** still happen for a LaTeX entry until its
-  automatic full build has run, after a failed build, and always with Biber.
+  automatic full build has run, after a failed build, and always with Biber
+  or LuaLaTeX.
 - **A file over the whole-read limit** can be read by an agent in parts but not
   edited by it.
 - **`build:app` with nothing changed** takes about 23 s.

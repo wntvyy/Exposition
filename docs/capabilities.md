@@ -90,6 +90,21 @@ that built them is open. Only `.typ`, `.md` (or `.markdown`), and `.tex` files a
 page images are capped at about 32 million pixels; larger pages are shown at
 a lower resolution.
 
+An edit rebuilds the open page views it can concern. A view is left as it is
+only when its latest build is known not to depend on the edited file: for
+Typst and Markdown, that build had the file open, did not read it, and no
+read of it failed; for pdfLaTeX, that build is a successful full build
+without Biber in which the engine did not open the file. LuaLaTeX views, a
+pdfLaTeX view until such a full build has succeeded, and every view after a
+file changes on disk are rebuilt. While you type in a LaTeX document, a build that replaces a
+running one starts after 150 ms without a further edit, and at most 1 s
+after the first. A Page tab hidden behind another tab keeps its document
+built, so Problems and the build status stay current; its pages are loaded
+when it is shown. A page view loads the images of the pages on screen and
+the pages next to them; the other pages keep their place and load when you
+scroll to them. A LaTeX page that a rebuild left unchanged is not rendered
+again.
+
 Markdown mathematics uses a declared LaTeX-math subset (see
 [markdown-profile.md](markdown-profile.md)); unsupported commands render as a
 visible marker and a diagnostic, never silently.
@@ -217,6 +232,14 @@ only. Evidence is current only when every input it records still has the
 same content; it is stale when an input changed or was deleted, and unknown
 when that cannot be established. Unknown is never shown as current, and
 freshness reflects the last reconciled content of each file.
+
+A list that is shown in part says so. The Graph page, its inspector, the
+Mathematics view, and the Dependencies view state when relationships,
+related items, evidence, or the items bound at a position are listed only in
+part; in the Mathematics view each item's proof and association state is
+still computed from all relationships. An impact answer says when it was cut
+off, also when an item has more evidence or more files have unknown coverage
+than it lists.
 
 **Mathematics and Lean.** The Graph page's Mathematics view lists
 statements with their informal proof, formal association, verifier verdict,
@@ -820,7 +843,11 @@ separate sessions. The environment you choose is remembered for the project
 on this computer. Run, Stop, and Rerun work the same in the Research panel
 and on the Research page: Rerun repeats your last kind of run (the file, the
 selection, or the input) against the current source, and running is your own
-action, with no extra dialog.
+action, with no extra dialog. A finished run's output is kept with its
+record in the project and read from there once the run is no longer among
+the most recent; when that stored output is missing or damaged the run shows
+an error, and when it ends early it is marked as incomplete, never shown as
+a run that printed nothing.
 
 **Guided environment setup** (Python). When the selected environment is not
 usable, the Research view says why and offers the next step. **Set up
@@ -1264,7 +1291,9 @@ The project graph is part of every agent task, enforced by the application:
 each run starts with a scoped graph context (the project's identity and
 revision, the files and research entities in the task's scope with their
 versions, coverage, evidence freshness, and relations, and the operations the
-task may perform; under "file names only" no labels or notes), file tools
+task may perform; under "file names only" no labels or notes; a follow-up
+whose context is unchanged is told that the earlier one still holds instead
+of receiving it again), file tools
 resolve the paths they act on to graph identities, and an action whose target
 the graph has not reconciled, cannot identify, or cannot reach at all is
 paused with a stable code instead of falling back to plain file access. Agents
@@ -1311,6 +1340,15 @@ instructions name the app's controls it may point you to (Save, Review
 changes, the Research panel, Review and run…, Record evidence, Set Up
 Mathlib…, and so on); a test fails when one of those names is no longer in
 the interface source that defines it.
+
+Results say what they left out. `list_files` returns 500 entries per call
+and continues from where it stopped; a continuation says when files were
+added, removed, or renamed in between, so nothing is skipped silently.
+`read_file` can return part of a long file by lines and states the lines it
+holds, the total, and where to continue. A file over 512 KiB can be read in
+parts but not edited by an agent. A `run_python` result says when output
+was cut or left out, and a Lean check lists at most 60 diagnostics, errors
+first, with the number it left out.
 
 **Saving by an agent.** `save_document` saves one open document with the
 editor's own save (the same atomic save as Ctrl+S, in the file's encoding
