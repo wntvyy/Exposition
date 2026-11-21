@@ -49,7 +49,7 @@ vi.mock("../editor/documentClient", () => ({ disposeAllHandles: vi.fn(), fileKey
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setTitle: async () => {} }) }));
 
-const { forgetRecent, loadDir, openWorkspace, reopenLastProject, samePath, shareEntries, startWorkspaceEvents, useWorkspace } =
+const { forgetRecent, loadDir, openWorkspace, reopenLastProject, samePath, setExpanded, shareEntries, startWorkspaceEvents, useWorkspace } =
   await import("./store");
 const { resetAppSettingsForTests } = await import("../editor/settings");
 const { resetSettingsWarnings } = await import("../settings/warnings");
@@ -285,5 +285,140 @@ describe("folder listings (perf FE-5 / WS-7)", () => {
     slow.resolve([entry("old-project.txt")]);
     await stale;
     expect(useWorkspace.getState().dirs[""]?.entries?.map((e) => e.path)).toEqual(["new.txt"]);
+  });
+});
+
+// Independent review of the listing coalescing (perf FE-5 / WS-7): can the tree end up stale?
+describe("review: folder listings under races", () => {
+  const entry = (path: string, size: number | null = 1) => ({
+    name: path.split("/").pop() ?? path,
+    path,
+    kind: "file" as const,
+    size,
+    link: false,
+    unavailable: null,
+  });
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+  const queue = () => {
+    const pending: Array<ReturnType<typeof deferred<unknown[]>>> = [];
+    ipc.commands.workspaceListDir.mockReset();
+    ipc.commands.workspaceListDir.mockImplementation((() => {
+      const next = deferred<unknown[]>();
+      pending.push(next);
+      return next.promise;
+    }) as never);
+    return pending;
+  };
+  const paths = (dir: string) => useWorkspace.getState().dirs[dir]?.entries?.map((e) => e.path);
+
+  it("a change that arrives during the trailing listing is listed once more", async () => {
+    const pending = queue();
+    const done = loadDir("d");
+    void loadDir("d"); // change 1, during the first listing
+    pending[0]!.resolve([entry("d/a")]);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    void loadDir("d"); // change 2, during the trailing listing (which started before it)
+    pending[1]!.resolve([entry("d/a"), entry("d/b")]);
+    await vi.waitFor(() => expect(pending).toHaveLength(3));
+    pending[2]!.resolve([entry("d/a"), entry("d/b"), entry("d/c")]);
+    await done;
+    expect(paths("d")).toEqual(["d/a", "d/b", "d/c"]);
+    expect(pending).toHaveLength(3);
+    // Idle: nothing is left in flight, the next request lists at once.
+    void loadDir("d");
+    expect(pending).toHaveLength(4);
+    pending[3]!.resolve([entry("d/a")]);
+    await vi.waitFor(() => expect(paths("d")).toEqual(["d/a"]));
+  });
+
+  it("an error in flight does not swallow the request made meanwhile, and a later answer clears it", async () => {
+    const pending = queue();
+    const done = loadDir("d");
+    void loadDir("d");
+    pending[0]!.reject({ message: "busy" });
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    expect(useWorkspace.getState().dirs.d?.error).toBe("busy");
+    pending[1]!.resolve([entry("d/a")]);
+    await done;
+    expect(paths("d")).toEqual(["d/a"]);
+    expect(useWorkspace.getState().dirs.d).toMatchObject({ loading: false, error: null });
+    // A failed refresh keeps the rows and says so; the same listing again clears the error.
+    const failing = loadDir("d");
+    pending[2]!.reject({ message: "gone" });
+    await failing;
+    expect(paths("d")).toEqual(["d/a"]);
+    expect(useWorkspace.getState().dirs.d?.error).toBe("gone");
+    const again = loadDir("d");
+    pending[3]!.resolve([entry("d/a")]);
+    await again;
+    expect(useWorkspace.getState().dirs.d).toMatchObject({ loading: false, error: null });
+  });
+
+  it("a folder collapsed and expanded again during a listing shows the newest answer", async () => {
+    const pending = queue();
+    useWorkspace.setState({ expanded: new Set() });
+    setExpanded(new Set(["d"]));
+    expect(pending).toHaveLength(1);
+    setExpanded(new Set()); // collapsed while listing
+    setExpanded(new Set(["d"])); // expanded again: no entries yet, so it asks again
+    pending[0]!.resolve([entry("d/old")]);
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1]!.resolve([entry("d/new")]);
+    await vi.waitFor(() => expect(paths("d")).toEqual(["d/new"]));
+    expect(useWorkspace.getState().dirs.d?.loading).toBe(false);
+  });
+
+  it("a project switch during a listing with a request waiting: nothing of the old project is listed or shown", async () => {
+    const pending = queue();
+    ipc.commands.settingsGet.mockResolvedValue({ settings: settings(false), warning: null });
+    void loadDir("d");
+    void loadDir("d"); // waiting for one more listing
+    ipc.commands.workspaceOpen.mockResolvedValue({ root: "C:\next", name: "next", recovery: [] });
+    expect(await openWorkspace("C:\next")).toBe(true);
+    const afterSwitch = pending.length; // the new project's root listing was requested
+    // The same folder name in the new project is listed at once, not joined to the old request.
+    const fresh = loadDir("d");
+    expect(pending).toHaveLength(afterSwitch + 1);
+    pending[0]!.resolve([entry("d/old-project")]);
+    await Promise.resolve();
+    await Promise.resolve();
+    // The old request's "one more" does not run for the new project.
+    expect(pending).toHaveLength(afterSwitch + 1);
+    expect(paths("d")).toBeUndefined();
+    pending[afterSwitch]!.resolve([entry("d/new-project")]);
+    await fresh;
+    expect(paths("d")).toEqual(["d/new-project"]);
+    for (const rest of pending) rest.resolve([]);
+  });
+
+  it("a reordered or renamed listing is stored (same entries in another order is a change)", async () => {
+    const a = entry("a.txt");
+    const b = entry("b.txt");
+    expect(shareEntries([a, b], [entry("b.txt"), entry("a.txt")])).toEqual([b, a]);
+    expect(shareEntries([a, b], [entry("b.txt"), entry("a.txt")])[0]).toBe(b);
+    const previous = [a, b];
+    expect(shareEntries(previous, [entry("a.txt"), entry("b.txt")])).toBe(previous);
+    expect(shareEntries(previous, [entry("a.txt")])).not.toBe(previous);
+    expect(shareEntries(previous, [entry("a.txt"), entry("b.txt"), entry("c.txt")])).not.toBe(previous);
+    // Every field of an entry counts.
+    for (const changed of [
+      { ...entry("a.txt"), name: "A.txt" },
+      { ...entry("a.txt"), kind: "directory" as const },
+      { ...entry("a.txt"), size: 2 },
+      { ...entry("a.txt"), link: true },
+      { ...entry("a.txt"), unavailable: "outside" },
+    ]) {
+      const shared = shareEntries(previous, [changed, entry("b.txt")]);
+      expect(shared[0]).toBe(changed);
+      expect(shared[1]).toBe(b);
+    }
   });
 });

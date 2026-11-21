@@ -282,3 +282,55 @@ describe("PreviewController", () => {
     controller.dispose();
   });
 });
+
+// Independent review of the shared workspace subscription (perf FE-8): leaks and missed updates
+// as controllers come and go.
+describe("review: shared workspace subscription", () => {
+  async function make(text: string) {
+    const query = vi.fn(async () => [] as ImageReference[]);
+    const controller = new PreviewController(fakeEditor() as never, { path: "doc/notes.md", model: fakeModel(text) } as never, query);
+    await act(async () => {
+      await vi.waitFor(() => expect(query).toHaveBeenCalled());
+    });
+    return { controller, query };
+  }
+
+  it("subscribes once however many controllers exist and unsubscribes exactly once when the last one goes", async () => {
+    const all: Array<Awaited<ReturnType<typeof make>>> = [];
+    for (let i = 0; i < 5; i++) all.push(await make(`x${i}`));
+    expect(ipc.workspace).toHaveBeenCalledTimes(1);
+    // Disposed in another order, some twice.
+    for (const index of [2, 0, 2, 4, 1]) all[index]!.controller.dispose();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ipc.workspaceOff).not.toHaveBeenCalled();
+    const deliver = ipc.workspace.mock.calls[0]![0] as (event: unknown) => void;
+    const before = all[3]!.query.mock.calls.length;
+    const disposedBefore = all[0]!.query.mock.calls.length;
+    deliver({ kind: "filesChanged", rescan: true, changes: [] });
+    await vi.waitFor(() => expect(all[3]!.query.mock.calls.length).toBe(before + 1));
+    expect(all[0]!.query.mock.calls.length).toBe(disposedBefore);
+    all[3]!.controller.dispose();
+    all[3]!.controller.dispose();
+    await vi.waitFor(() => expect(ipc.workspaceOff).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ipc.workspaceOff).toHaveBeenCalledTimes(1);
+  });
+
+  it("a controller created while the previous subscription is still being set up or torn down gets events", async () => {
+    // The subscription resolves late.
+    let resolve!: (off: () => void) => void;
+    ipc.workspace.mockImplementationOnce(() => new Promise<() => void>((r) => (resolve = r)));
+    const first = await make("one");
+    first.controller.dispose(); // disposed before the subscription exists
+    const second = await make("two"); // subscribes anew at once
+    expect(ipc.workspace).toHaveBeenCalledTimes(2);
+    resolve(ipc.workspaceOff);
+    await vi.waitFor(() => expect(ipc.workspaceOff).toHaveBeenCalledTimes(1));
+    const deliver = ipc.workspace.mock.calls[1]![0] as (event: unknown) => void;
+    const before = second.query.mock.calls.length;
+    deliver({ kind: "filesChanged", rescan: false, changes: [{ path: "img/a.PNG", kind: "created" }] });
+    await vi.waitFor(() => expect(second.query.mock.calls.length).toBe(before + 1));
+    second.controller.dispose();
+    await vi.waitFor(() => expect(ipc.workspaceOff).toHaveBeenCalledTimes(2));
+  });
+});

@@ -1884,3 +1884,7 @@ pub use files::{RenamePlan, Renamed};
 
 #[cfg(test)]
 mod tests;
+
+// Independent review of the performance lane (tests only).
+#[cfg(test)]
+mod review_tests;
