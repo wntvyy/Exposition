@@ -176,7 +176,36 @@ change was made here.
 
 ### Release profile
 
-RELEASE_TABLE
+Release profile, `large` scale, same host, minimum / median / maximum in ms. "Before" is
+the code before this work with the same benchmark; 5 to 10 samples per row.
+
+| Operation | Before | After |
+|---|---|---|
+| One typed character, 10 MiB, middle | 35.8 / 36.0 / 36.7 | 4.22 / 4.24 / 4.29 |
+| One typed character, 1 MiB, middle | 3.63 / 3.71 / 3.93 | 0.46 / 0.46 / 0.47 |
+| Undo of a typing group, 10 MiB | 17.4 / 17.5 / 18.2 | 4.19 / 4.22 / 4.26 |
+| Changed-documents scan, 50 documents × 100,000 changes | 371 / 373 / 375 | 2.52 / 2.64 / 3.15 |
+| Agent save with 5 pending recovery entries of 5 MiB | 27.4 / 27.8 / 31.5 | 3.53 / 3.90 / 4.88 |
+| Graph status | 23.7 / 24.0 / 24.6 | 0.05 / 0.06 / 0.06 |
+| Graph: small commit | 41.7 / 42.1 / 44.2 | 1.56 / 1.63 / 1.74 |
+| Graph: one-file pass, file unchanged | 98.7 / 101 / 110 | 0.37 / 0.39 / 0.41 |
+| Graph: one-file pass, file edited | 132 / 133 / 138 | 30.6 / 30.9 / 32.4 |
+| Graph: overlay of a small file | 46.7 / 47.7 / 48.6 | 2.82 / 2.86 / 2.92 |
+| Graph: 2,160 pending marks | 3,711 / 3,740 / 3,806 | 6.56 / 6.83 / 7.07 |
+| Graph: impact of a hub (complete reads) | 234 / 237 / 254 | 252 / 257 / 265 |
+| Graph: snapshot around a 25,000-relation hub (complete reads) | 782 / 800 / 802 | 932 / 936 / 953 |
+| Typst: rebuild after one character, 200 pages | 685 / 688 / 695 | 87.3 / 88.3 / 89.7 |
+| LaTeX: first page-map query, 100 pages | 3,812 / 3,825 / 3,828 | 207 / 208 / 212 |
+| LaTeX: page images after an unchanged rebuild, 100 pages | 1,029 / 1,039 / 1,045 | 0.01 / 0.01 / 0.01 |
+| LaTeX: page images after a one-character edit, 100 pages | 1,030 / 1,030 / 1,040 | 10.6 / 10.8 / 1,030 |
+| Run history listing, limit 100, 500 runs of 870 KB | 147 / 148 / 155 | 0.03 / 0.03 / 0.10 |
+| Run record write (one more index to maintain) | 0.70 / 0.88 / 1.05 | 1.13 / 1.21 / 3.29 |
+
+Three rows are slower and are kept: graph impact and the hub snapshot no longer
+stop at a silent row cap, and a run record write maintains the listing index. The
+maximum of the one-character LaTeX row is the first edit of the run, which changed
+a font subset and with it every page that uses the font. Agents, research and
+webview rows are compared in the debug profile (tables above).
 
 ## Retained state
 
