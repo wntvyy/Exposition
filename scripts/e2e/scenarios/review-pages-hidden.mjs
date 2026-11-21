@@ -23,6 +23,8 @@ export default async function reviewPagesHidden({ launchApp, artifactsDir, asser
   const observations = {};
   try {
     await openWorkspace(page, workspace);
+    // Both files are open; the entry is opened last and switched to Page mode.
+    await openInEditor(page, INCLUDED);
     await openFromTree(page, ENTRY);
     const modeButton = (label) => page.locator(".ui-segmented__item", { hasText: label }).first();
     await modeButton("Page").waitFor({ timeout: 10000 });
@@ -82,7 +84,7 @@ export default async function reviewPagesHidden({ launchApp, artifactsDir, asser
     assert.equal(first.pages, 1);
 
     // 1. The Page tab is hidden behind the included file's source tab; that file is edited.
-    await openInEditor(page, INCLUDED);
+    await tabLocator(page, INCLUDED).click();
     await focusEditor(page, INCLUDED, "end");
     await page.keyboard.type("Hidden addition.");
     await waitFor(async () => (await text(INCLUDED)).includes("Hidden addition."), { message: "the typed text" });
