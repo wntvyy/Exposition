@@ -165,6 +165,9 @@ pub struct BuildSnapshot {
     /// list the entry: what the build read is then unknown. The bibliography
     /// tools' inputs are not recorded.
     engine_inputs: Option<BTreeSet<String>>,
+    /// The build has a biber control file: biber reads the data sources it
+    /// names (any extension, any location) without a record.
+    biber: bool,
     overlay_root: PathBuf,
     project_root: PathBuf,
     entry_dir: Option<WorkspacePath>,
@@ -186,6 +189,11 @@ impl BuildSnapshot {
     /// regard to letter case, as the file system may). `None`: not known.
     pub fn engine_read(&self, path: &WorkspacePath) -> Option<bool> {
         self.engine_inputs.as_ref().map(|inputs| inputs.contains(&path.as_str().to_lowercase()))
+    }
+
+    /// Whether the build's bibliography is made by biber (see `biber`).
+    pub fn uses_biber(&self) -> bool {
+        self.biber
     }
 
     /// The snapshot's TeX sources bound to a SyncTeX file, for mapping.
@@ -873,10 +881,13 @@ impl<R: JobRunner> TexBuilder<R> {
         }
         // A recorder that does not list the entry is not a record of this build.
         let engine_inputs = engine_inputs.contains(&target.entry.as_str().to_lowercase()).then_some(engine_inputs);
+        // biblatex writes `<job>.bcf` next to the recorder file.
+        let biber = fls.with_extension("bcf").is_file();
         BuildSnapshot {
             id: SnapshotId(hex::encode(hasher.finalize())),
             files,
             engine_inputs,
+            biber,
             overlay_root: overlay_root.to_path_buf(),
             project_root: project_root.to_path_buf(),
             entry_dir,

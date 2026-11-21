@@ -353,6 +353,9 @@ fn tex_edit_bursts() {
         let mut samples = Vec::new();
         let mut counters = (0, 0, 0, 0);
         for _ in 0..5 {
+            // As in the application, where a full build follows a draft once
+            // the target has been idle (only its read set scopes rebuilds).
+            env.build(TexBuildMode::Full);
             let started = Instant::now();
             for _ in 0..20 {
                 env.insert(edited, needle, "x");

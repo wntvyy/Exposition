@@ -185,10 +185,17 @@ fn refs(summary: &TexBuildSummary) -> Vec<String> {
 }
 
 /// The soundness check of a skipped rebuild. The entry is watched and built
-/// with `edited` open; then `edited` gets `text` prepended. Returns whether the
-/// change started a build, and whether the pages shown afterwards are stale:
-/// no build started, and a build of the new state has other pages.
+/// with `edited` open, then built in full (only a full build's read set is
+/// evidence that a file is not read); then `edited` gets `text` prepended.
+/// Returns whether the change started a build, and whether the pages shown
+/// afterwards are stale: no build started, and a build of the new state has
+/// other pages.
 fn skip_probe(files: &[(&str, &str)], edited: &str, text: &str) -> Option<(bool, bool)> {
+    probe(files, edited, text, true)
+}
+
+/// As [`skip_probe`]; `settled` is whether a full build precedes the change.
+fn probe(files: &[(&str, &str)], edited: &str, text: &str, settled: bool) -> Option<(bool, bool)> {
     let mut env = Env::new(files, None)?;
     let _main = env.open("main.tex");
     let doc = env.open(edited);
@@ -200,6 +207,9 @@ fn skip_probe(files: &[(&str, &str)], edited: &str, text: &str) -> Option<(bool,
         "the probe document must build: {:?}",
         first.result.diagnostics
     );
+    if settled {
+        env.build(TexBuildMode::Full);
+    }
     env.drain(Duration::from_millis(300));
     env.prepend(&doc, text);
     let started = env.changed(&doc, edited);
@@ -340,12 +350,16 @@ fn a_file_dumped_into_the_page_rebuilds() {
 /// A file that the label of the previous run decides to read: the first draft
 /// does not read it (the label is not known yet), the next run does.
 #[test]
-#[ignore = "review: defect - a file read only once the .aux file knows a label is skipped after a single draft pass; the automatic full build bounds it in the application (next test)"]
 fn a_file_read_depending_on_the_aux_file_rebuilds() {
     let body = "\\makeatletter\\@ifundefined{r@flag}{}{\\input{late.tex}}\\makeatother\nText.\\label{flag}";
     let files = [("main.tex", document(body)), ("late.tex", "Late text.\n".to_owned())];
     let files: Vec<(&str, &str)> = files.iter().map(|(n, t)| (*n, t.as_str())).collect();
-    assert_sound(skip_probe(&files, "late.tex", "More "));
+    // After the single draft pass (the label is not known yet, the file is
+    // not read): a draft is no evidence, so the change builds.
+    let Some((started, stale)) = probe(&files, "late.tex", "More ", false) else { return };
+    assert!(started && !stale, "a draft's read set is not final: the change must build");
+    // After a full build the file has been read, and its change builds.
+    assert_eq!(probe(&files, "late.tex", "More ", true), Some((true, false)));
 }
 
 /// The same document with the defaults of the service (as the application
@@ -460,9 +474,11 @@ fn an_idle_target_starts_at_once_and_a_superseding_request_waits_for_quiet() {
     while !matches!(env.event_within(Duration::from_secs(60)).expect("the build starts"), TexEvent::Started { .. }) {}
     env.insert_body(&main, "B ");
     env.service.request_build(Some(target()), TexBuildMode::Draft).unwrap();
-    // The running build is canceled; the superseding one must not have started 2 s later.
+    // The running build is canceled; the superseding one must not have started
+    // 600 ms later (it starts after the settle time, or after the fixed
+    // maximum of one second when that is shorter, as it is here).
     let mut restarted = false;
-    let until = Instant::now() + Duration::from_secs(2);
+    let until = Instant::now() + Duration::from_millis(600);
     while let Some(event) = env.event_within(until.saturating_duration_since(Instant::now())) {
         if matches!(event, TexEvent::Started { .. }) {
             restarted = true;

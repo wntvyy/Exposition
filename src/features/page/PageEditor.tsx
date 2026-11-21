@@ -74,7 +74,7 @@ export interface PageEditorProps extends EditorProps {
   onRevealMissed?: (offset: number) => void;
   /**
    * False while this view is hidden behind another tab of its group: it then
-   * neither builds nor loads pages, and catches up when shown (default true).
+   * keeps its entry built but shows no build and loads no page until shown (default true).
    */
   visible?: boolean;
 }
@@ -101,7 +101,7 @@ export function PageEditor({ resource, active, onRevealMissed, visible = true }:
     return () => session.detach();
   }, [session]);
 
-  // A hidden tab does no work; shown again it rebuilds and catches up.
+  // A hidden tab does no page work (its entry stays built); shown again it presents the newest build.
   useEffect(() => {
     session.setVisible(visible);
   }, [session, visible]);

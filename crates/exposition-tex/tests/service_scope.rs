@@ -226,9 +226,15 @@ fn a_change_of_a_document_the_latest_build_did_not_read_starts_no_build() {
     env.service.watch(&path("main.tex")).unwrap();
     let first = env.next_result();
     assert_eq!(first.result.status, BuildStatus::Succeeded, "{:?}", first.result.diagnostics);
+    // A draft is one pass: what it did not read, the next pass may. Until a
+    // full build has settled the read set, every change builds.
+    env.insert(&notes, "notes", "x");
+    assert!(env.changed(&notes, "notes.txt"), "a draft is no evidence that a file is not read");
+    env.build(TexBuildMode::Full);
     let jobs = env.exec.list().len();
 
-    // An open file the engine did not read: no build, no process, however often.
+    // An open file the engine did not read in the full build: no build, no
+    // process, however often.
     for _ in 0..5 {
         env.insert(&notes, "notes", "x");
         assert!(!env.changed(&notes, "notes.txt"), "an unrelated edit must not build");
@@ -258,6 +264,7 @@ fn a_change_of_a_document_the_latest_build_did_not_read_starts_no_build() {
     let later = env.open("later.txt");
     env.insert(&later, "later", "x");
     assert!(env.changed(&later, "later.txt"));
+    env.build(TexBuildMode::Full);
     env.insert(&later, "later", "x");
     assert!(!env.changed(&later, "later.txt"));
 
@@ -314,4 +321,85 @@ fn another_open_folder_releases_the_previous_folders_builds_and_workers() {
     assert_eq!(rebuilt.result.pages[0].render_ref, reference, "the same page content");
     assert!(env.service.page_image(&reference).is_some());
     assert_eq!(env.service.retained().0, 1);
+}
+
+/// Under a continuous stream of superseding requests a build still starts
+/// within the fixed maximum, however long the configured settle time is.
+#[test]
+fn a_continuous_stream_of_requests_still_starts_a_build_within_the_maximum() {
+    use exposition_tex::service::MAX_SUPERSEDE_WAIT;
+    let Some(mut env) = Env::new() else { return };
+    let main = env.open("main.tex");
+    env.build(TexBuildMode::Full);
+    // Requests every 50 ms for four times the maximum. Each one supersedes
+    // the running build or extends the wait of the pending one.
+    let stream = MAX_SUPERSEDE_WAIT * 4;
+    let begun = std::time::Instant::now();
+    let mut starts = Vec::new();
+    while begun.elapsed() < stream {
+        env.insert(&main, "anchor0 ", "x");
+        env.service.request_build(Some(target()), TexBuildMode::Draft).unwrap();
+        while let Some(event) = env.event_within(Duration::from_millis(50)) {
+            if matches!(event, TexEvent::Started { .. }) {
+                starts.push(begun.elapsed());
+            }
+        }
+    }
+    // The first request starts at once; without a bound nothing else would
+    // start before the stream ends (every request restarts the wait).
+    assert!(starts.len() >= 3, "builds started during the stream: {starts:?}");
+    for pair in starts.windows(2) {
+        let gap = pair[1] - pair[0];
+        assert!(gap <= MAX_SUPERSEDE_WAIT + Duration::from_millis(900), "no build started for {gap:?}: {starts:?}");
+    }
+    // The stream's last state is built.
+    let wanted = env.revision(&main);
+    loop {
+        let summary = env.next_result();
+        let compiled = summary.result.sources.iter().find(|s| s.path.as_str() == "main.tex").and_then(|s| s.revision);
+        if compiled == Some(wanted) {
+            break;
+        }
+    }
+}
+
+/// A build with a biber control file reads data sources that no record
+/// names: nothing is skipped for it.
+#[test]
+fn an_entry_with_a_biber_control_file_is_rebuilt_for_every_open_document() {
+    let Some(mut env) = Env::new() else { return };
+    let main = env.open("main.tex");
+    let notes = env.open("notes.txt");
+    // Without the control file: skipped after a full build.
+    env.build(TexBuildMode::Full);
+    env.insert(&notes, "notes", "x");
+    assert!(!env.changed(&notes, "notes.txt"));
+    // The document writes `main.bcf` (as biblatex does).
+    env.insert(
+        &main,
+        "\\section{Section 0}",
+        "\\newwrite\\control\\immediate\\openout\\control=\\jobname.bcf \\immediate\\write\\control{x}\\immediate\\closeout\\control\n",
+    );
+    env.service.request_build(Some(target()), TexBuildMode::Full).unwrap();
+    env.next_result();
+    env.insert(&notes, "notes", "x");
+    assert!(env.changed(&notes, "notes.txt"), "biber may read any file its control file names");
+}
+
+/// Events of a target are for the folder it was built in.
+#[test]
+fn a_target_of_a_folder_that_is_no_longer_open_is_told_apart() {
+    let Some(mut env) = Env::new() else { return };
+    let reference = env.service.request_build(Some(target()), TexBuildMode::Draft).unwrap();
+    env.next_result();
+    assert!(env.service.is_open_folder(&reference));
+    let other = tempfile::tempdir().unwrap();
+    std::fs::write(other.path().join("main.tex"), "\\documentclass{article}\\begin{document}B\\end{document}\n")
+        .unwrap();
+    env.workspace.open_workspace(other.path()).unwrap();
+    assert!(!env.service.is_open_folder(&reference), "the same entry path in another folder is another target");
+    env.workspace.close_workspace();
+    assert!(!env.service.is_open_folder(&reference));
+    env.workspace.open_workspace(env.project.path()).unwrap();
+    assert!(env.service.is_open_folder(&reference));
 }

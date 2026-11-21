@@ -241,6 +241,9 @@ struct Control {
     /// The pending request superseded a running build: it starts when this
     /// time has passed without a further request.
     settle_until: Option<Instant>,
+    /// When the pending request began to wait (the wait is extended by later
+    /// requests, but never beyond [`MAX_SUPERSEDE_WAIT`] after this).
+    settle_since: Option<Instant>,
     /// Drafts ran since the last completed full build.
     needs_full: bool,
     /// A requested build was canceled or dropped after `last` finished: `last`
@@ -256,6 +259,11 @@ type PngKey = (String, u32);
 
 /// Cached mappings per build before the cache is reset.
 const MAX_CACHED_PAGES: usize = 48;
+
+/// The longest a request that superseded a running build waits for the burst
+/// it belongs to to end: under a continuous stream of requests a build still
+/// starts this long after the first of them.
+pub const MAX_SUPERSEDE_WAIT: Duration = Duration::from_secs(1);
 
 /// PNG bytes of rendered pages kept for reuse.
 const PAGE_IMAGE_CACHE_BYTES: usize = 96 << 20;
@@ -398,7 +406,9 @@ impl TexService {
             // A burst of requests: each one that supersedes a build, or
             // arrives while such a request still waits, restarts the wait.
             if (control.running.is_some() || control.settle_until.is_some()) && !self.inner.supersede_delay.is_zero() {
-                control.settle_until = Some(Instant::now() + self.inner.supersede_delay);
+                let now = Instant::now();
+                let since = *control.settle_since.get_or_insert(now);
+                control.settle_until = Some((now + self.inner.supersede_delay).min(since + MAX_SUPERSEDE_WAIT));
             }
             // Sent under the lock so it always precedes the worker's `Started`.
             let _ = self.inner.events.send(TexEvent::Queued { target: target.reference.clone(), mode });
@@ -439,6 +449,7 @@ impl TexService {
         let mut control = target.control.lock().unwrap_or_else(|p| p.into_inner());
         let had = control.pending.take().is_some() || control.running.is_some();
         control.settle_until = None;
+        control.settle_since = None;
         if control.running.is_some() {
             target.cancel.cancel();
         }
@@ -706,11 +717,13 @@ impl TexService {
     /// * no build is pending or running and none was canceled or dropped
     ///   since the latest result, so that result is the outcome of the latest
     ///   request;
-    /// * the document was an open buffer of that build (a document opened
-    ///   since is not known to it), is not a bibliography database or style
-    ///   (the bibliography tools read those without a record), and
-    /// * the engine did not open the file, or the build compiled this
-    ///   revision of it (or a later one) already.
+    /// * the document was an open buffer of that build under this path (a
+    ///   document opened or renamed since is not known to it), is not a
+    ///   bibliography database or style (the bibliography tools read those
+    ///   without a record), and
+    /// * the build compiled this revision of it (or a later one) already, or
+    ///   the engine did not open the file in a build whose read set is final:
+    ///   a successful full build with no draft since and without biber.
     ///
     /// What a TeX run reads is decided by the files it has read so far, so a
     /// file the latest run did not open cannot change the next run. A change
@@ -740,15 +753,38 @@ impl TexService {
         if control.pending.is_some() || control.running.is_some() || control.unbuilt_request {
             return true;
         }
-        let Some(snapshot) = control.last.as_ref().and_then(|last| last.build.snapshot.as_ref()) else { return true };
+        let Some(last) = control.last.as_ref() else { return true };
+        let Some(snapshot) = last.build.snapshot.as_ref() else { return true };
         let Some(file) = snapshot.files.get(path).filter(|file| file.document.as_ref() == Some(document)) else {
             return true;
         };
-        match snapshot.engine_read(path) {
-            None => true,
-            Some(false) => false,
-            Some(true) => file.revision.is_none_or(|compiled| compiled < revision),
+        // A revision the latest build compiled needs no other evidence.
+        if snapshot.engine_read(path) == Some(true) {
+            return file.revision.is_none_or(|compiled| compiled < revision);
         }
+        // "Not read" is evidence only from a build whose read set is final:
+        // a full build (its passes ran until the auxiliary files settled; a
+        // draft is one pass on whatever they held, and the next pass may read
+        // more), with no draft since, that succeeded (after an error or a
+        // missing file a later run may read what this one did not reach, or
+        // this very document under the missing name), and that does not use
+        // biber (its data sources are named in the control file and read
+        // without a record).
+        let settled = last.summary.mode == TexBuildMode::Full
+            && !control.needs_full
+            && last.summary.result.status == BuildStatus::Succeeded
+            && !snapshot.uses_biber();
+        !(settled && snapshot.engine_read(path) == Some(false))
+    }
+
+    /// Whether `target` belongs to the folder that is open now (events of a
+    /// build that finishes after its folder was closed are not for the views
+    /// of the folder that replaced it).
+    pub fn is_open_folder(&self, target: &TexTargetRef) -> bool {
+        self.inner
+            .workspace
+            .open_root()
+            .is_some_and(|open| crate::compile::plain_path(&open).display().to_string() == target.root)
     }
 
     /// The workspace closed: stop watching its entries.
@@ -947,6 +983,7 @@ impl Inner {
                             continue;
                         }
                         control.settle_until = None;
+                        control.settle_since = None;
                         control.pending = None;
                         break (mode, false);
                     }

@@ -208,6 +208,13 @@ pub fn is_tex_build(build: &str) -> bool {
 
 fn shared_events(app: &AppHandle, event: &TexEvent) {
     let tex = app.state::<AppState>().tex.clone();
+    // The shared events name an entry by its path alone: a build of the
+    // folder that was open before must not reach the views of this one.
+    let (TexEvent::Queued { target, .. } | TexEvent::Started { target, .. } | TexEvent::Finished { target, .. }) =
+        event;
+    if !tex.is_open_folder(target) {
+        return;
+    }
     let (entry, activity) = match event {
         TexEvent::Queued { target, .. } => (target.entry.clone(), BuildActivity::Queued),
         TexEvent::Started { target, .. } => (target.entry.clone(), BuildActivity::Building),
