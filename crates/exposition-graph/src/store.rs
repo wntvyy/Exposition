@@ -12,6 +12,7 @@
 //! evidence, views, workflow definitions) are not a cache: nothing here
 //! replaces a damaged database with an empty one.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -310,7 +311,8 @@ fn expected_columns(version: u32) -> Vec<(&'static str, Vec<&'static str>)> {
 }
 
 /// Row limits per table: a database beyond them is refused rather than read.
-const ROW_LIMITS: &[(&str, i64)] = &[
+const TABLES: usize = 13;
+const ROW_LIMITS: [(&str, i64); TABLES] = [
     ("meta", 1_000),
     ("entities", 500_000),
     ("bindings", 1_000_000),
@@ -326,7 +328,10 @@ const ROW_LIMITS: &[(&str, i64)] = &[
     ("retired_workflows", 100_000),
 ];
 
-/// Upper bounds on what one read returns.
+/// Upper bound on what one bounded read returns. Reads that must be complete
+/// (an entity's relations for impact, validation and reconciliation; coverage;
+/// a file's bindings) are bounded by their table's row limit instead, and the
+/// reads that stay bounded here say when they left rows out.
 pub const MAX_ROWS: usize = 20_000;
 /// Text fields read from the database are bounded (hostile files).
 const MAX_FIELD: usize = 256 * 1024;
@@ -394,6 +399,38 @@ pub struct GraphStore {
     path: Option<PathBuf>,
     project: ProjectId,
     evidence_key: Option<[u8; 32]>,
+    /// Row headroom per table, so a commit does not count every table
+    /// (see [`Writer::commit`]).
+    budget: RowBudget,
+    /// The status aggregates as of one write stamp (see [`Self::status_summary`]).
+    summary: RefCell<Option<StatusSummary>>,
+}
+
+/// The status aggregates and the write stamp they were computed at.
+type StatusSummary = (WriteStamp, (u32, u32), CoverageSummary);
+
+/// Identifies the database contents as this connection sees them: the rows
+/// this connection changed so far, and SQLite's counter of commits made by
+/// any other connection. Equal stamps mean no row changed in between.
+type WriteStamp = (u64, i64);
+
+/// What is known about how many rows each table can still take.
+///
+/// Owner: the open [`GraphStore`]. Key: the write stamp it was computed at.
+/// A commit subtracts every row changed since then from every table's
+/// headroom (an over-estimate of what the table gained) and counts a table
+/// again only when that estimate is used up, so the limit the validated
+/// open enforces is never exceeded and the cost follows the size of the
+/// change. Dropped with the store; unknown after another connection wrote.
+#[derive(Default)]
+struct RowBudget {
+    state: Cell<Option<BudgetState>>,
+}
+
+#[derive(Clone, Copy)]
+struct BudgetState {
+    stamp: WriteStamp,
+    headroom: [i64; TABLES],
 }
 
 impl GraphStore {
@@ -455,7 +492,14 @@ impl GraphStore {
             .as_deref()
             .and_then(|r| ProjectId::parse(r).ok())
             .ok_or_else(|| StoreError::Untrusted("invalid project identifier".into()))?;
-        Ok(Self { conn, path: Some(path.to_path_buf()), project, evidence_key: None })
+        Ok(Self {
+            conn,
+            path: Some(path.to_path_buf()),
+            project,
+            evidence_key: None,
+            budget: RowBudget::default(),
+            summary: RefCell::new(None),
+        })
     }
 
     /// An in-memory graph (tests, temporary contexts).
@@ -485,7 +529,14 @@ impl GraphStore {
                 return Err(StoreError::Untrusted("the file contains tables this version did not create".into()));
             }
         }
-        let mut store = Self { conn, path, project: ProjectId::mint(), evidence_key: None };
+        let mut store = Self {
+            conn,
+            path,
+            project: ProjectId::mint(),
+            evidence_key: None,
+            budget: RowBudget::default(),
+            summary: RefCell::new(None),
+        };
         if version > 0 && version < SCHEMA_VERSION {
             // Keep a consistent copy of the older graph before changing it.
             if let Some(dir) = store.path.as_deref().and_then(Path::parent) {
@@ -509,7 +560,7 @@ impl GraphStore {
     /// endpoints that satisfy the vocabulary, at most one project entity.
     /// Refused databases are left unchanged for recovery.
     pub fn verify_contents(&self) -> StoreResult<()> {
-        for (table, limit) in ROW_LIMITS {
+        for (table, limit) in &ROW_LIMITS {
             let n: i64 = self.conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
             if n > *limit {
                 return Err(StoreError::Untrusted(format!("{table} holds {n} rows (at most {limit} are read)")));
@@ -729,6 +780,42 @@ impl GraphStore {
         Ok(self.conn.transaction()?)
     }
 
+    /// Start a write transaction with the write helpers. Its commit enforces
+    /// the row limits from this store's row budget instead of counting every
+    /// table (see [`Writer::commit`]).
+    pub fn writer(&mut self) -> StoreResult<Writer<'_>> {
+        let tx = self.conn.transaction()?;
+        Ok(Writer { tx, budget: Some(&self.budget) })
+    }
+
+    /// The current write stamp: it changes whenever a row of the database
+    /// changed (through this connection or, once committed, any other).
+    fn write_stamp(&self) -> StoreResult<WriteStamp> {
+        let mut stmt = self.conn.prepare_cached("PRAGMA data_version")?;
+        let version: i64 = stmt.query_row([], |r| r.get(0))?;
+        Ok((self.conn.total_changes(), version))
+    }
+
+    /// Entity and relation counts and the coverage summary. They are
+    /// aggregates over whole tables, read by every status request, so they
+    /// are computed once per write stamp: a status read after nothing was
+    /// written costs no scan.
+    ///
+    /// Cache owner: this store; key: the write stamp; one entry, replaced on
+    /// the first read after any write and dropped with the store.
+    pub fn status_summary(&self) -> StoreResult<((u32, u32), CoverageSummary)> {
+        let stamp = self.write_stamp()?;
+        if let Some((at, counts, coverage)) = self.summary.borrow().as_ref()
+            && *at == stamp
+        {
+            return Ok((*counts, coverage.clone()));
+        }
+        let counts = self.count_rows()?;
+        let coverage = self.summarize_coverage()?;
+        *self.summary.borrow_mut() = Some((stamp, counts, coverage.clone()));
+        Ok((counts, coverage))
+    }
+
     pub fn meta(&self, key: &str) -> StoreResult<Option<String>> {
         Ok(self.conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional()?)
     }
@@ -739,6 +826,10 @@ impl GraphStore {
     }
 
     pub fn counts(&self) -> StoreResult<(u32, u32)> {
+        Ok(self.status_summary()?.0)
+    }
+
+    fn count_rows(&self) -> StoreResult<(u32, u32)> {
         let entities: i64 =
             self.conn.query_row("SELECT count(*) FROM entities WHERE lifecycle != 'tombstoned'", [], |r| r.get(0))?;
         let relations: i64 = self.conn.query_row("SELECT count(*) FROM relations", [], |r| r.get(0))?;
@@ -858,9 +949,11 @@ impl GraphStore {
         Ok(out)
     }
 
+    /// The entities with these ids that exist (every id is looked up: the
+    /// caller bounds the list).
     pub fn entities(&self, ids: &[EntityId]) -> StoreResult<Vec<Entity>> {
         let mut out = Vec::with_capacity(ids.len());
-        for id in ids.iter().take(MAX_ROWS) {
+        for id in ids {
             if let Some(e) = self.entity(id)? {
                 out.push(e);
             }
@@ -878,9 +971,11 @@ impl GraphStore {
         rows.map(|r| r?).collect()
     }
 
+    /// Every binding in `path`. Complete (bounded by the table's row limit):
+    /// what is bound in a file decides impact, removal and reconciliation.
     pub fn bindings_at_path(&self, path: &WorkspacePath) -> StoreResult<Vec<SourceBinding>> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {BINDING_COLUMNS} FROM bindings WHERE path = ?1 ORDER BY entity_id, ordinal LIMIT {MAX_ROWS}"
+            "SELECT {BINDING_COLUMNS} FROM bindings WHERE path = ?1 ORDER BY entity_id, ordinal LIMIT 1000000"
         ))?;
         let rows = stmt.query_map([path.as_str()], read_binding)?;
         rows.map(|r| r?).collect()
@@ -915,14 +1010,68 @@ impl GraphStore {
         found.map(|r| self.qualified(r)).transpose()
     }
 
+    /// Every relation from `entity`, ordered by kind then id. Complete: an
+    /// entity's relations are what impact, validation and reconciliation
+    /// decide on, so nothing is left out (the bound is the table's row limit).
     pub fn relations_from(&self, entity: &EntityId) -> StoreResult<Vec<Relation>> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {RELATION_COLUMNS} FROM relations WHERE from_id = ?1 ORDER BY kind, id LIMIT {MAX_ROWS}"
-        ))?;
-        let rows = stmt.query_map([entity.as_str()], read_relation)?;
-        let relations: Vec<Relation> = rows.map(|r| r?).collect::<StoreResult<_>>()?;
-        drop(stmt);
-        self.qualified_all(relations)
+        Ok(self.relations_at(Endpoint::From, entity, RELATION_ROWS)?.0)
+    }
+
+    /// Every relation to `entity`, ordered by kind then id. Complete (see
+    /// [`Self::relations_from`]).
+    pub fn relations_to(&self, entity: &EntityId) -> StoreResult<Vec<Relation>> {
+        Ok(self.relations_at(Endpoint::To, entity, RELATION_ROWS)?.0)
+    }
+
+    /// At most `limit` relations from `entity` (kind, id order) for a bounded
+    /// presentation, and whether more exist. A reader that decides anything
+    /// from the relations uses [`Self::relations_from`].
+    pub fn relations_from_bounded(&self, entity: &EntityId, limit: usize) -> StoreResult<(Vec<Relation>, bool)> {
+        self.relations_at(Endpoint::From, entity, limit)
+    }
+
+    /// At most `limit` relations to `entity`; see [`Self::relations_from_bounded`].
+    pub fn relations_to_bounded(&self, entity: &EntityId, limit: usize) -> StoreResult<(Vec<Relation>, bool)> {
+        self.relations_at(Endpoint::To, entity, limit)
+    }
+
+    fn relations_at(&self, end: Endpoint, entity: &EntityId, limit: usize) -> StoreResult<(Vec<Relation>, bool)> {
+        let mut relations: Vec<Relation> = Vec::new();
+        let mut more = false;
+        {
+            let mut stmt = self.conn.prepare_cached(end.select())?;
+            let mut rows = stmt.query(params![entity.as_str(), limit.min(RELATION_ROWS) as i64 + 1])?;
+            while let Some(row) = rows.next()? {
+                if relations.len() >= limit {
+                    more = true;
+                    break;
+                }
+                relations.push(read_relation(row)??);
+            }
+        }
+        Ok((self.qualified_all(relations)?, more))
+    }
+
+    /// Visit every relation at one end of `entity` (kind, id order) without
+    /// holding them all; `visit` returns `false` to stop early. For walks
+    /// that have their own work bound and report reaching it.
+    pub fn visit_relations(
+        &self,
+        end: Endpoint,
+        entity: &EntityId,
+        mut visit: impl FnMut(Relation) -> StoreResult<bool>,
+    ) -> StoreResult<()> {
+        // Not from the statement cache: a visitor may read this entity's
+        // relations again while the walk is open.
+        let mut stmt = self.conn.prepare(end.select())?;
+        let mut rows = stmt.query(params![entity.as_str(), RELATION_ROWS as i64])?;
+        while let Some(row) = rows.next()? {
+            let relation = self.qualified(read_relation(row)??)?;
+            if !visit(relation)? {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Every relation of one kind (bounded), e.g. the whole containment tree.
@@ -936,39 +1085,69 @@ impl GraphStore {
         self.qualified_all(relations)
     }
 
-    pub fn relations_to(&self, entity: &EntityId) -> StoreResult<Vec<Relation>> {
-        let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {RELATION_COLUMNS} FROM relations WHERE to_id = ?1 ORDER BY kind, id LIMIT {MAX_ROWS}"
-        ))?;
-        let rows = stmt.query_map([entity.as_str()], read_relation)?;
-        let relations: Vec<Relation> = rows.map(|r| r?).collect::<StoreResult<_>>()?;
-        drop(stmt);
-        self.qualified_all(relations)
+    /// Relations whose both endpoints are in `ids` (ordered by source, kind,
+    /// id), at most [`MAX_ROWS`]. A caller that must know whether that left
+    /// relations out uses [`Self::relations_among_bounded`].
+    pub fn relations_among(&self, ids: &BTreeSet<EntityId>) -> StoreResult<Vec<Relation>> {
+        Ok(self.relations_among_bounded(ids, MAX_ROWS)?.0)
     }
 
-    /// Relations whose both endpoints are in `ids`.
-    pub fn relations_among(&self, ids: &BTreeSet<EntityId>) -> StoreResult<Vec<Relation>> {
+    /// At most `limit` relations whose both endpoints are in `ids` (ordered
+    /// by source, kind, id), and whether more exist.
+    pub fn relations_among_bounded(
+        &self,
+        ids: &BTreeSet<EntityId>,
+        limit: usize,
+    ) -> StoreResult<(Vec<Relation>, bool)> {
         let mut out = Vec::new();
-        let mut seen = BTreeSet::new();
-        for id in ids {
-            for r in self.relations_from(id)? {
-                if ids.contains(&r.to) && seen.insert(r.id.clone()) {
-                    out.push(r);
-                    if out.len() >= MAX_ROWS {
-                        return Ok(out);
-                    }
-                }
+        let mut more = false;
+        self.visit_relations_among(ids, |r| {
+            if out.len() >= limit {
+                more = true;
+                return Ok(false);
+            }
+            out.push(r);
+            Ok(true)
+        })?;
+        Ok((out, more))
+    }
+
+    /// Visit every relation whose both endpoints are in `ids` (ordered by
+    /// source, kind, id); `visit` returns `false` to stop early. The
+    /// endpoint filter runs in the database: relations that leave the set
+    /// (a hub's other links) are neither decoded nor qualified.
+    pub fn visit_relations_among(
+        &self,
+        ids: &BTreeSet<EntityId>,
+        mut visit: impl FnMut(Relation) -> StoreResult<bool>,
+    ) -> StoreResult<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let list = serde_json::to_string(&ids.iter().map(EntityId::as_str).collect::<Vec<_>>())?;
+        let columns: Vec<String> = RELATION_COLUMNS.split(", ").map(|c| format!("r.{c}")).collect();
+        // The id list drives the join (CROSS JOIN fixes the order): one index
+        // seek per listed entity, then a membership probe per outgoing row.
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {} FROM json_each(?1) AS f CROSS JOIN relations AS r
+             WHERE r.from_id = f.value AND r.to_id IN (SELECT value FROM json_each(?1))
+             ORDER BY r.from_id, r.kind, r.id",
+            columns.join(", ")
+        ))?;
+        let mut rows = stmt.query([list])?;
+        while let Some(row) = rows.next()? {
+            let relation = self.qualified(read_relation(row)??)?;
+            if !visit(relation)? {
+                break;
             }
         }
-        Ok(out)
+        Ok(())
     }
 
     /// An existing relation of this kind between these endpoints (not rejected).
     pub fn find_relation(&self, kind: RelationKind, from: &EntityId, to: &EntityId) -> StoreResult<Option<Relation>> {
         let found = {
-            let mut stmt = self.conn.prepare_cached(&format!(
-                "SELECT {RELATION_COLUMNS} FROM relations WHERE kind = ?1 AND from_id = ?2 AND to_id = ?3 LIMIT 1"
-            ))?;
+            let mut stmt = self.conn.prepare_cached(&find_relation_sql(kind))?;
             stmt.query_row(params![kind.as_str(), from.as_str(), to.as_str()], read_relation).optional()?.transpose()?
         };
         found.map(|r| self.qualified(r)).transpose()
@@ -1017,6 +1196,31 @@ impl GraphStore {
         rows.map(|r| decode::<Evidence>(&r?)).collect()
     }
 
+    /// The newest record of `kind` about `subject` (latest first, ties by
+    /// id, as [`Self::evidence_for_subject`] orders them), wherever it falls
+    /// among the subject's records.
+    pub fn latest_evidence_of_kind(&self, subject: &EntityId, kind: EvidenceKind) -> StoreResult<Option<Evidence>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT body FROM evidence WHERE subject = ?1 AND kind = ?2 ORDER BY recorded_at DESC, id LIMIT 1",
+        )?;
+        let body: Option<String> = stmt.query_row(params![subject.as_str(), kind.as_str()], |r| r.get(0)).optional()?;
+        body.map(|b| decode::<Evidence>(&b)).transpose()
+    }
+
+    /// At most `limit` of the newest records about `subject`, and whether
+    /// older ones exist.
+    pub fn evidence_for_subject_bounded(&self, subject: &EntityId, limit: usize) -> StoreResult<(Vec<Evidence>, bool)> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT body FROM evidence WHERE subject = ?1 ORDER BY recorded_at DESC, id LIMIT ?2")?;
+        let rows =
+            stmt.query_map(params![subject.as_str(), limit.saturating_add(1) as i64], |r| r.get::<_, String>(0))?;
+        let mut out: Vec<Evidence> = rows.map(|r| decode::<Evidence>(&r?)).collect::<StoreResult<_>>()?;
+        let more = out.len() > limit;
+        out.truncate(limit);
+        Ok((out, more))
+    }
+
     // ----- coverage -----
 
     pub fn coverage(&self, path: &WorkspacePath) -> StoreResult<Option<ResourceCoverage>> {
@@ -1024,10 +1228,11 @@ impl GraphStore {
         stmt.query_row([path.as_str()], read_coverage).optional()?.transpose()
     }
 
+    /// Coverage of every indexed file, by path. Complete (bounded by the
+    /// table's row limit): a summary computed from it counts every file.
     pub fn all_coverage(&self) -> StoreResult<Vec<ResourceCoverage>> {
-        let mut stmt = self
-            .conn
-            .prepare_cached(&format!("SELECT {COVERAGE_COLUMNS} FROM coverage ORDER BY path LIMIT {MAX_ROWS}"))?;
+        let mut stmt =
+            self.conn.prepare_cached(&format!("SELECT {COVERAGE_COLUMNS} FROM coverage ORDER BY path LIMIT 500000"))?;
         let rows = stmt.query_map([], read_coverage)?;
         rows.map(|r| r?).collect()
     }
@@ -1067,11 +1272,11 @@ impl GraphStore {
         let mut out = BTreeMap::new();
         let mut stmt = self.conn.prepare_cached(&format!(
             "SELECT {COVERAGE_COLUMNS}, size, modified_ms, file_identity FROM coverage
-             WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\' LIMIT 500000"
+             WHERE path >= ?1 AND path < ?3 AND (path = ?1 OR path >= ?2) LIMIT 500000"
         ))?;
         for prefix in prefixes {
-            let like = format!("{}/%", escape_like(prefix.as_str()));
-            let rows = stmt.query_map(params![prefix.as_str(), like], |r| {
+            let (low, high) = under(prefix);
+            let rows = stmt.query_map(params![prefix.as_str(), low, high], |r| {
                 let coverage = read_coverage_stored(r)?;
                 Ok((coverage, r.get::<_, Option<i64>>(7)?, r.get::<_, Option<i64>>(8)?, r.get::<_, Option<String>>(9)?))
             })?;
@@ -1125,11 +1330,45 @@ impl GraphStore {
             Some(prefixes) => {
                 let mut stmt = self.conn.prepare_cached(
                     "SELECT id, key, roles, lifecycle, created_at FROM entities
-                     WHERE kind = 'resource' AND (key = ?1 OR key LIKE ?2 ESCAPE '\\') LIMIT 500000",
+                     WHERE key >= ?1 AND key < ?3 AND (key = ?1 OR key >= ?2) AND +kind = 'resource' LIMIT 500000",
                 )?;
                 for prefix in prefixes {
-                    let like = format!("{}/%", escape_like(prefix.as_str()));
-                    read(stmt.query_map(params![prefix.as_str(), like], map)?)?;
+                    let (low, high) = under(prefix);
+                    read(stmt.query_map(params![prefix.as_str(), low, high], map)?)?;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The live resource of `path`: the oldest non-tombstoned identity with
+    /// that key (the one a full pass keeps as the file's resource).
+    pub fn live_resource_id(&self, path: &WorkspacePath) -> StoreResult<Option<EntityId>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id FROM entities WHERE kind = 'resource' AND key = ?1 AND lifecycle != 'tombstoned'
+             ORDER BY created_at, id LIMIT 1",
+        )?;
+        let id: Option<String> = stmt.query_row([path.as_str()], |r| r.get(0)).optional()?;
+        id.map(|i| EntityId::parse(&i).map_err(|_| untrusted("entity id"))).transpose()
+    }
+
+    /// Paths of the live resources whose file name is one of `names`
+    /// (e.g. the Lake package files), without decoding whole records.
+    pub fn live_resource_paths_named(&self, names: &[&str]) -> StoreResult<Vec<WorkspacePath>> {
+        let mut out = Vec::new();
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT key FROM entities WHERE kind = 'resource' AND lifecycle != 'tombstoned'
+             AND (key = ?1 OR key LIKE ?2 ESCAPE '\\') LIMIT 500000",
+        )?;
+        for name in names {
+            let like = format!("%/{}", escape_like(name));
+            let rows = stmt.query_map(params![name, like], |r| r.get::<_, Option<String>>(0))?;
+            for key in rows {
+                // The pattern ignores ASCII case; the file name must match exactly.
+                if let Some(path) = key?.as_deref().and_then(|k| WorkspacePath::parse(k).ok())
+                    && path.file_name() == *name
+                {
+                    out.push(path);
                 }
             }
         }
@@ -1180,6 +1419,10 @@ impl GraphStore {
     }
 
     pub fn coverage_summary(&self) -> StoreResult<CoverageSummary> {
+        Ok(self.status_summary()?.1)
+    }
+
+    fn summarize_coverage(&self) -> StoreResult<CoverageSummary> {
         let mut summary = CoverageSummary::default();
         let mut stmt = self.conn.prepare_cached(
             "SELECT CASE WHEN pending > 0 THEN 'pending' ELSE state END AS s, count(*), sum(unresolved)
@@ -1278,25 +1521,62 @@ impl GraphStore {
 /// project revision exactly once (`record_change`).
 pub struct Writer<'a> {
     pub tx: Transaction<'a>,
+    /// The store's row budget ([`GraphStore::writer`]); without one the
+    /// commit counts every table.
+    budget: Option<&'a RowBudget>,
 }
 
 impl<'a> Writer<'a> {
     pub fn new(tx: Transaction<'a>) -> Self {
-        Self { tx }
+        Self { tx, budget: None }
     }
 
     /// Commit, unless the transaction would leave a table beyond the row
     /// limit the validated open enforces (then nothing is written).
+    ///
+    /// With the store's row budget ([`GraphStore::writer`]) a table is
+    /// counted only when the rows changed since its last count could have
+    /// filled it: every row this connection changed since then (whatever
+    /// statement changed it, in this transaction or outside the helpers) is
+    /// charged against every table's headroom, so the estimate never
+    /// exceeds the truth and the refusal is exactly as strict as counting
+    /// every table.
     pub fn commit(self) -> StoreResult<()> {
-        for (table, max) in ROW_LIMITS {
+        let count = |table: &str, max: i64| -> StoreResult<i64> {
             let n: i64 = self.tx.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))?;
-            if n > *max {
+            if n > max {
                 return Err(limit(format!(
                     "the change would leave {n} rows in {table} (a project graph holds at most {max}); nothing was written"
                 )));
             }
+            Ok(n)
+        };
+        let Some(budget) = self.budget else {
+            for (table, max) in &ROW_LIMITS {
+                count(table, *max)?;
+            }
+            return Ok(self.tx.commit()?);
+        };
+        let version: i64 = self.tx.query_row("PRAGMA data_version", [], |r| r.get(0))?;
+        let stamp: WriteStamp = (self.tx.total_changes(), version);
+        // An estimate made before another connection wrote is not used.
+        let prior = budget.state.get().filter(|s| s.stamp.1 == version && s.stamp.0 <= stamp.0);
+        let mut headroom = [0i64; TABLES];
+        for (i, (table, max)) in ROW_LIMITS.iter().enumerate() {
+            let estimate = prior.and_then(|s| {
+                let spent = i64::try_from(stamp.0 - s.stamp.0).ok()?;
+                (s.headroom[i] >= spent).then_some(s.headroom[i] - spent)
+            });
+            headroom[i] = match estimate {
+                Some(left) => left,
+                None => *max - count(table, *max)?,
+            };
         }
-        Ok(self.tx.commit()?)
+        self.tx.commit()?;
+        // Recorded only for a transaction that was written: a refused or
+        // failed one leaves the earlier (still conservative) estimate.
+        budget.state.set(Some(BudgetState { stamp, headroom }));
+        Ok(())
     }
 
     pub fn revision(&self) -> StoreResult<u64> {
@@ -1345,14 +1625,12 @@ impl<'a> Writer<'a> {
         for (json, what) in [(&roles, "the roles"), (&origin, "the origin"), (&attributes, "the attributes")] {
             check_record(json, what)?;
         }
-        self.tx.execute(
-            "INSERT INTO entities (id, kind, roles, label, key, lifecycle, tombstone_reason, revision, origin, attributes, created_at, updated_at)
+        self.tx.prepare_cached("INSERT INTO entities (id, kind, roles, label, key, lifecycle, tombstone_reason, revision, origin, attributes, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, roles = excluded.roles, label = excluded.label,
              key = excluded.key, lifecycle = excluded.lifecycle, tombstone_reason = excluded.tombstone_reason,
              revision = excluded.revision, origin = excluded.origin, attributes = excluded.attributes,
-             updated_at = excluded.updated_at",
-            params![
+             updated_at = excluded.updated_at")?.execute(params![
                 e.id.as_str(),
                 e.kind.as_str(),
                 roles,
@@ -1381,12 +1659,10 @@ impl<'a> Writer<'a> {
             check_field(b.version.as_ref().map(|v| v.content_hash.as_str()), MAX_SHORT_FIELD, "a content hash")?;
             check_record(&serde_json::to_string(&b.selector)?, "a binding selector")?;
         }
-        self.tx.execute("DELETE FROM bindings WHERE entity_id = ?1", [entity.as_str()])?;
+        self.tx.prepare_cached("DELETE FROM bindings WHERE entity_id = ?1")?.execute([entity.as_str()])?;
         for (ordinal, b) in bindings.iter().enumerate() {
-            self.tx.execute(
-                "INSERT INTO bindings (entity_id, ordinal, path, selector, range_start, range_end, content_hash, revision, saved, fingerprint, state, detail)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
+            self.tx.prepare_cached("INSERT INTO bindings (entity_id, ordinal, path, selector, range_start, range_end, content_hash, revision, saved, fingerprint, state, detail)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)")?.execute(params![
                     entity.as_str(),
                     ordinal as i64,
                     b.path.as_str(),
@@ -1412,14 +1688,12 @@ impl<'a> Writer<'a> {
         check_field(r.reviewed_statement.as_deref(), MAX_SHORT_FIELD, "a reviewed statement digest")?;
         check_record(&serde_json::to_string(&r.origin)?, "the origin")?;
         check_record(&serde_json::to_string(&r.evidence)?, "the evidence list")?;
-        self.tx.execute(
-            "INSERT INTO relations (id, kind, from_id, to_id, origin, status, evidence_kind, evidence, from_version, to_version, note, revision, created_at, updated_at, reviewed_statement)
+        self.tx.prepare_cached("INSERT INTO relations (id, kind, from_id, to_id, origin, status, evidence_kind, evidence, from_version, to_version, note, revision, created_at, updated_at, reviewed_statement)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(id) DO UPDATE SET status = excluded.status, evidence_kind = excluded.evidence_kind,
              evidence = excluded.evidence, from_version = excluded.from_version, to_version = excluded.to_version,
              note = excluded.note, revision = excluded.revision, origin = excluded.origin, updated_at = excluded.updated_at,
-             reviewed_statement = excluded.reviewed_statement",
-            params![
+             reviewed_statement = excluded.reviewed_statement")?.execute(params![
                 r.id.as_str(),
                 r.kind.as_str(),
                 r.from.as_str(),
@@ -1441,13 +1715,11 @@ impl<'a> Writer<'a> {
     }
 
     pub fn delete_relation(&self, id: &RelationId) -> StoreResult<bool> {
-        Ok(self.tx.execute("DELETE FROM relations WHERE id = ?1", [id.as_str()])? > 0)
+        Ok(self.tx.prepare_cached("DELETE FROM relations WHERE id = ?1")?.execute([id.as_str()])? > 0)
     }
 
     pub fn find_relation(&self, kind: RelationKind, from: &EntityId, to: &EntityId) -> StoreResult<Option<Relation>> {
-        let mut stmt = self.tx.prepare_cached(&format!(
-            "SELECT {RELATION_COLUMNS} FROM relations WHERE kind = ?1 AND from_id = ?2 AND to_id = ?3 LIMIT 1"
-        ))?;
+        let mut stmt = self.tx.prepare_cached(&find_relation_sql(kind))?;
         stmt.query_row(params![kind.as_str(), from.as_str(), to.as_str()], read_relation).optional()?.transpose()
     }
 
@@ -1468,16 +1740,15 @@ impl<'a> Writer<'a> {
         let kind = e.kind.as_str();
         let body = serde_json::to_string(e)?;
         check_record(&body, "the evidence record")?;
-        self.tx.execute(
-            "INSERT INTO evidence (id, kind, subject, body, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
+        self.tx
+            .prepare_cached("INSERT INTO evidence (id, kind, subject, body, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5)")?
+            .execute(params![
                 e.id.as_str(),
                 kind,
                 e.subject.as_ref().map(|s| s.as_str().to_owned()),
                 body,
                 e.recorded_at_ms as i64
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
@@ -1485,10 +1756,11 @@ impl<'a> Writer<'a> {
     /// its id and stored body under the app-local key.
     pub fn seal_evidence(&self, id: &EvidenceId, key: &[u8; 32]) -> StoreResult<()> {
         let body: String = self.tx.query_row("SELECT body FROM evidence WHERE id = ?1", [id.as_str()], |r| r.get(0))?;
-        self.tx.execute(
-            "INSERT INTO evidence_seals (id, mac) VALUES (?1, ?2) ON CONFLICT(id) DO UPDATE SET mac = excluded.mac",
-            params![id.as_str(), crate::mac::evidence_mac(key, id.as_str(), &body)],
-        )?;
+        self.tx
+            .prepare_cached(
+                "INSERT INTO evidence_seals (id, mac) VALUES (?1, ?2) ON CONFLICT(id) DO UPDATE SET mac = excluded.mac",
+            )?
+            .execute(params![id.as_str(), crate::mac::evidence_mac(key, id.as_str(), &body)])?;
         Ok(())
     }
 
@@ -1512,13 +1784,15 @@ impl<'a> Writer<'a> {
         check_field(c.detail.as_deref(), MAX_FIELD, "a coverage detail")?;
         check_field(c.extractor.as_deref(), MAX_SHORT_FIELD, "an extractor name")?;
         check_field(c.content_hash.as_deref(), MAX_SHORT_FIELD, "a content hash")?;
-        self.tx.execute(
-            "INSERT INTO coverage (path, extractor, state, unresolved, detail, content_hash, indexed_at)
+        self.tx
+            .prepare_cached(
+                "INSERT INTO coverage (path, extractor, state, unresolved, detail, content_hash, indexed_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(path) DO UPDATE SET extractor = excluded.extractor, state = excluded.state,
              unresolved = excluded.unresolved, detail = excluded.detail, content_hash = excluded.content_hash,
              indexed_at = excluded.indexed_at",
-            params![
+            )?
+            .execute(params![
                 c.path.as_str(),
                 c.extractor,
                 c.state.as_str(),
@@ -1526,8 +1800,7 @@ impl<'a> Writer<'a> {
                 c.detail,
                 c.content_hash,
                 now_ms() as i64
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
@@ -1536,11 +1809,12 @@ impl<'a> Writer<'a> {
     /// made before it started.
     pub fn mark_pending(&self, paths: &[WorkspacePath], token: u64) -> StoreResult<usize> {
         let mut n = 0;
+        let mut stmt = self.tx.prepare_cached(
+            "UPDATE coverage SET pending = ?4 WHERE path >= ?1 AND path < ?3 AND (path = ?1 OR path >= ?2)",
+        )?;
         for p in paths {
-            n += self.tx.execute(
-                "UPDATE coverage SET pending = ?3 WHERE path = ?1 OR path LIKE ?2 ESCAPE '\\'",
-                params![p.as_str(), format!("{}/%", escape_like(p.as_str())), token as i64],
-            )?;
+            let (low, high) = under(p);
+            n += stmt.execute(params![p.as_str(), low, high, token as i64])?;
         }
         Ok(n)
     }
@@ -1554,12 +1828,13 @@ impl<'a> Writer<'a> {
                     .execute("UPDATE coverage SET pending = 0 WHERE pending > 0 AND pending <= ?1", [token as i64])?;
             }
             Some(prefixes) => {
+                let mut stmt = self.tx.prepare_cached(
+                    "UPDATE coverage SET pending = 0 WHERE pending > 0 AND pending <= ?4
+                     AND path >= ?1 AND path < ?3 AND (path = ?1 OR path >= ?2)",
+                )?;
                 for p in prefixes {
-                    self.tx.execute(
-                        "UPDATE coverage SET pending = 0 WHERE pending > 0 AND pending <= ?3
-                         AND (path = ?1 OR path LIKE ?2 ESCAPE '\\')",
-                        params![p.as_str(), format!("{}/%", escape_like(p.as_str())), token as i64],
-                    )?;
+                    let (low, high) = under(p);
+                    stmt.execute(params![p.as_str(), low, high, token as i64])?;
                 }
             }
         }
@@ -1567,7 +1842,7 @@ impl<'a> Writer<'a> {
     }
 
     pub fn remove_coverage(&self, path: &WorkspacePath) -> StoreResult<()> {
-        self.tx.execute("DELETE FROM coverage WHERE path = ?1", [path.as_str()])?;
+        self.tx.prepare_cached("DELETE FROM coverage WHERE path = ?1")?.execute([path.as_str()])?;
         Ok(())
     }
 
@@ -1580,10 +1855,9 @@ impl<'a> Writer<'a> {
         modified_ms: Option<u64>,
         identity: Option<&str>,
     ) -> StoreResult<()> {
-        self.tx.execute(
-            "UPDATE coverage SET size = ?2, modified_ms = ?3, file_identity = ?4 WHERE path = ?1",
-            params![path.as_str(), size.map(|s| s as i64), modified_ms.map(|m| m as i64), identity],
-        )?;
+        self.tx
+            .prepare_cached("UPDATE coverage SET size = ?2, modified_ms = ?3, file_identity = ?4 WHERE path = ?1")?
+            .execute(params![path.as_str(), size.map(|s| s as i64), modified_ms.map(|m| m as i64), identity])?;
         Ok(())
     }
 
@@ -1593,12 +1867,13 @@ impl<'a> Writer<'a> {
         }
         check_field(Some(&record.content_hash), MAX_SHORT_FIELD, "a content hash")?;
         check_field(Some(&record.extractor), MAX_SHORT_FIELD, "an extractor name")?;
-        self.tx.execute(
-            "INSERT INTO source_index (path, content_hash, extractor, body) VALUES (?1, ?2, ?3, ?4)
+        self.tx
+            .prepare_cached(
+                "INSERT INTO source_index (path, content_hash, extractor, body) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(path) DO UPDATE SET content_hash = excluded.content_hash, extractor = excluded.extractor,
              body = excluded.body",
-            params![record.path.as_str(), record.content_hash, record.extractor, record.body],
-        )?;
+            )?
+            .execute(params![record.path.as_str(), record.content_hash, record.extractor, record.body])?;
         Ok(())
     }
 
@@ -1606,15 +1881,14 @@ impl<'a> Writer<'a> {
     /// key>`, `path:<workspace path>`), so it is resolved again only when one
     /// of them appears.
     pub fn set_index_wanted(&self, path: &WorkspacePath, wanted: &[String]) -> StoreResult<()> {
-        self.tx.execute(
-            "UPDATE source_index SET wanted = ?2 WHERE path = ?1",
-            params![path.as_str(), serde_json::to_string(wanted)?],
-        )?;
+        self.tx
+            .prepare_cached("UPDATE source_index SET wanted = ?2 WHERE path = ?1")?
+            .execute(params![path.as_str(), serde_json::to_string(wanted)?])?;
         Ok(())
     }
 
     pub fn remove_source_index(&self, path: &WorkspacePath) -> StoreResult<()> {
-        self.tx.execute("DELETE FROM source_index WHERE path = ?1", [path.as_str()])?;
+        self.tx.prepare_cached("DELETE FROM source_index WHERE path = ?1")?.execute([path.as_str()])?;
         Ok(())
     }
 
@@ -1630,18 +1904,17 @@ impl<'a> Writer<'a> {
         let revision = self.revision()? + 1;
         delta.revision = revision;
         set_meta(&self.tx, "revision", &revision.to_string())?;
-        self.tx.execute(
-            "INSERT INTO changes (revision, at, origin, summary, delta) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
+        self.tx
+            .prepare_cached("INSERT INTO changes (revision, at, origin, summary, delta) VALUES (?1, ?2, ?3, ?4, ?5)")?
+            .execute(params![
                 revision as i64,
                 now_ms() as i64,
                 serde_json::to_string(origin)?,
                 truncate(summary, 2000),
                 serde_json::to_string(delta)?
-            ],
-        )?;
+            ])?;
         // Keep the journal bounded (the latest 10 000 changes).
-        self.tx.execute("DELETE FROM changes WHERE revision <= ?1", [revision as i64 - 10_000])?;
+        self.tx.prepare_cached("DELETE FROM changes WHERE revision <= ?1")?.execute([revision as i64 - 10_000])?;
         Ok(revision)
     }
 }
@@ -1687,6 +1960,44 @@ const ENTITY_COLUMNS: &str =
 const BINDING_COLUMNS: &str =
     "entity_id, path, selector, range_start, range_end, content_hash, revision, saved, fingerprint, state, detail";
 const RELATION_COLUMNS: &str = "id, kind, from_id, to_id, origin, status, evidence_kind, evidence, from_version, to_version, note, revision, created_at, updated_at, reviewed_statement";
+
+/// Rows one complete relation read can return: the table's row limit.
+const RELATION_ROWS: usize = 2_000_000;
+
+/// The lookup of one relation by kind and endpoints, seeking from the end
+/// that has few relations: a container holds many things (seek by the
+/// contained item); for every other kind it is the target that many
+/// relations share (a file its declarations are anchored in, a result many
+/// others depend on), so the source is the seek. Without this the planner
+/// may walk every relation of the busy end for each lookup. The row found
+/// is the same either way (the earliest such relation).
+fn find_relation_sql(kind: RelationKind) -> String {
+    let ends = match kind {
+        RelationKind::Contains => "+from_id = ?2 AND to_id = ?3",
+        _ => "from_id = ?2 AND +to_id = ?3",
+    };
+    format!("SELECT {RELATION_COLUMNS} FROM relations WHERE kind = ?1 AND {ends} LIMIT 1")
+}
+
+/// Which end of a relation an entity is looked up at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Endpoint {
+    From,
+    To,
+}
+
+impl Endpoint {
+    fn select(self) -> &'static str {
+        match self {
+            Endpoint::From => {
+                "SELECT id, kind, from_id, to_id, origin, status, evidence_kind, evidence, from_version, to_version, note, revision, created_at, updated_at, reviewed_statement FROM relations WHERE from_id = ?1 ORDER BY kind, id LIMIT ?2"
+            }
+            Endpoint::To => {
+                "SELECT id, kind, from_id, to_id, origin, status, evidence_kind, evidence, from_version, to_version, note, revision, created_at, updated_at, reviewed_statement FROM relations WHERE to_id = ?1 ORDER BY kind, id LIMIT ?2"
+            }
+        }
+    }
+}
 
 type Decoded<T> = StoreResult<T>;
 
@@ -1852,12 +2163,16 @@ fn read_coverage_stored(r: &rusqlite::Row<'_>) -> rusqlite::Result<Decoded<Resou
 }
 
 fn set_meta(tx: &Transaction<'_>, key: &str, value: &str) -> StoreResult<()> {
-    tx.execute(
+    tx.prepare_cached(
         "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![key, value],
-    )?;
+    )?
+    .execute(params![key, value])?;
     Ok(())
 }
+
+/// Prepared statements kept per connection (bounded, least recently used
+/// first out; freed with the connection).
+const STATEMENT_CACHE: usize = 128;
 
 /// Defensive connection settings for a database that may be hostile.
 fn harden(conn: &Connection) -> StoreResult<()> {
@@ -1873,6 +2188,9 @@ fn harden(conn: &Connection) -> StoreResult<()> {
     conn.pragma_update(None, "journal_mode", "DELETE")?;
     conn.pragma_update(None, "synchronous", "FULL")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    // The store keeps more distinct statements than rusqlite's default
+    // cache (16) holds; a miss compiles the statement again.
+    conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
     Ok(())
 }
 
@@ -1905,6 +2223,17 @@ fn verify_schema_objects(conn: &Connection, version: u32) -> StoreResult<()> {
         }
     }
     Ok(())
+}
+
+/// The key range of the paths beneath folder `prefix`: `prefix/` <= path <
+/// `prefix0` (`0` follows `/`), compared bytewise as the path columns are.
+/// Unlike a `LIKE 'prefix/%'` pattern it is answered from the path index, and
+/// it needs no escaping of `%` and `_`. The statements that also match
+/// the path itself seek one range, `prefix` <= path < `prefix0`, and keep
+/// the path and what is beneath it (a sibling such as `prefix.tex` falls in
+/// the range and is filtered out).
+fn under(prefix: &WorkspacePath) -> (String, String) {
+    (format!("{}/", prefix.as_str()), format!("{}0", prefix.as_str()))
 }
 
 fn escape_like(s: &str) -> String {
@@ -2099,6 +2428,79 @@ mod tests {
         // The database still opens.
         drop(store);
         GraphStore::open(&path, false).unwrap();
+    }
+
+    /// The row budget refuses exactly what counting every table refuses:
+    /// across commits, right after a refused transaction, for rows written
+    /// outside the write helpers, and after rows were deleted.
+    #[test]
+    fn the_row_budget_never_lets_a_table_pass_its_limit() {
+        let (_dir, path) = temp_db();
+        let mut store = GraphStore::open(&path, true).unwrap();
+        let limit = row_limit("meta");
+        let rows = |store: &GraphStore| -> i64 {
+            store.connection().query_row("SELECT count(*) FROM meta", [], |r| r.get(0)).unwrap()
+        };
+        let add = |store: &mut GraphStore, from: i64, n: i64| -> StoreResult<()> {
+            let w = store.writer()?;
+            for i in from..from + n {
+                w.tx.execute("INSERT INTO meta (key, value) VALUES (?1, 'v')", [format!("k{i}")])?;
+            }
+            w.commit()
+        };
+        // Up to 100 rows below the limit, over two commits.
+        let room = limit - rows(&store);
+        add(&mut store, 0, room - 300).unwrap();
+        add(&mut store, 1_000_000, 200).unwrap();
+        assert_eq!(rows(&store), limit - 100);
+        // 101 more rows would pass the limit: refused, nothing written.
+        assert!(matches!(add(&mut store, 2_000_000, 101), Err(StoreError::Limit(_))));
+        assert!(store.meta("k2000000").unwrap().is_none());
+        assert_eq!(rows(&store), limit - 100);
+        // Right after the refusal, rows that fit are accepted.
+        add(&mut store, 3_000_000, 60).unwrap();
+        // Rows written outside the helpers use up the table too.
+        for i in 0..40 {
+            store.connection().execute("INSERT INTO meta (key, value) VALUES (?1, 'v')", [format!("raw{i}")]).unwrap();
+        }
+        assert_eq!(rows(&store), limit);
+        assert!(matches!(add(&mut store, 4_000_000, 1), Err(StoreError::Limit(_))));
+        // A change that adds no row is still accepted in a full table.
+        let w = store.writer().unwrap();
+        w.set_meta("k0", "changed").unwrap();
+        w.commit().unwrap();
+        assert_eq!(store.meta("k0").unwrap().as_deref(), Some("changed"));
+        // Deleted rows make room again, and no more than that.
+        store.connection().execute("DELETE FROM meta WHERE key LIKE 'raw%'", []).unwrap();
+        add(&mut store, 5_000_000, 40).unwrap();
+        assert!(matches!(add(&mut store, 6_000_000, 1), Err(StoreError::Limit(_))));
+        assert_eq!(rows(&store), limit);
+        // The database the budget allowed is one the validated open accepts.
+        drop(store);
+        GraphStore::open(&path, false).unwrap();
+    }
+
+    /// A commit through the store's writer counts a table only when the rows
+    /// changed since its last count could have filled it.
+    #[test]
+    fn a_small_commit_does_not_count_the_tables() {
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let commit = |store: &mut GraphStore, key: &str| {
+            let w = store.writer().unwrap();
+            w.set_meta(key, "v").unwrap();
+            w.commit().unwrap();
+        };
+        commit(&mut store, "first");
+        let counted = |store: &GraphStore| store.budget.state.get().map(|s| s.headroom).unwrap();
+        let before = counted(&store);
+        commit(&mut store, "second");
+        let after = counted(&store);
+        // Every table's headroom went down by the one changed row: none was
+        // recounted (a recount of `meta` would show the same value here, a
+        // recount of an empty table its full limit).
+        for (i, (table, _)) in ROW_LIMITS.iter().enumerate() {
+            assert_eq!(after[i], before[i] - 1, "{table}");
+        }
     }
 
     #[test]

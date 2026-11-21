@@ -67,18 +67,21 @@ impl Planner<'_> {
         Ok(out)
     }
 
-    fn label_exists(&self, label: &str, body: &IndexBody) -> bool {
+    fn label_exists(&self, label: &str, body: &IndexBody) -> StoreResult<bool> {
         if body.extraction.labels.iter().any(|l| l == label) {
-            return true;
+            return Ok(true);
         }
         if self.planned_labels.get(label).is_some_and(|paths| !paths.is_empty()) {
-            return true;
+            return Ok(true);
         }
-        self.index.labels.get(label).is_some_and(|paths| {
-            paths.iter().any(|p| {
-                self.resources.contains_key(p) && !self.index_records.contains_key(p) && !self.remove_index.contains(p)
-            })
-        })
+        let Some(paths) = self.index.labels.get(label) else { return Ok(false) };
+        for p in paths {
+            if !self.index_records.contains_key(p) && !self.remove_index.contains(p) && self.resources.get(p)?.is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn resolve_label(&self, name: &str, body: &IndexBody) -> StoreResult<Target> {
@@ -100,7 +103,7 @@ impl Planner<'_> {
         })?;
         match elsewhere.len() {
             1 => Ok(Target::Entity(elsewhere[0].id.clone())),
-            0 if self.label_exists(name, body) => Ok(Target::NotAnEntity),
+            0 if self.label_exists(name, body)? => Ok(Target::NotAnEntity),
             0 => Ok(Target::Missing),
             n => Ok(Target::Ambiguous(n)),
         }
@@ -131,8 +134,8 @@ impl Planner<'_> {
     /// artifact explicitly when `admit_generated`.
     fn resolve_path(&mut self, candidates: &[WorkspacePath], admit_generated: bool) -> StoreResult<Option<EntityId>> {
         for c in candidates {
-            if let Some(id) = self.resources.get(c) {
-                return Ok(Some(id.clone()));
+            if let Some(id) = self.resources.get(c)? {
+                return Ok(Some(id));
             }
         }
         if !admit_generated {
@@ -236,7 +239,7 @@ impl Planner<'_> {
     /// Resolve every observed link of `path` and replace its observed
     /// relations by the result (diffed: unchanged relations keep their ids).
     pub(crate) fn resolve_links(&mut self, path: &WorkspacePath) -> StoreResult<()> {
-        let Some(resource_id) = self.resources.get(path).cloned() else { return Ok(()) };
+        let Some(resource_id) = self.resources.get(path)? else { return Ok(()) };
         let Some(resource) = self.entity(&resource_id)? else { return Ok(()) };
         let body: std::sync::Arc<IndexBody> = match self.index_records.get(path) {
             Some(b) => std::sync::Arc::clone(b),
@@ -383,7 +386,14 @@ impl Planner<'_> {
             self.relate(kind, &fe, &te, &link_extractor)?;
         }
         self.finish_coverage(path, &resource, &body, unresolved)?;
-        self.wanted.insert(path.clone(), wanted.into_iter().take(200).collect());
+        // More targets than a stored list names: wait for any target, so
+        // none of them is dropped (the file is resolved again more often).
+        let wanted: Vec<String> = if wanted.len() > super::engine::MAX_WANTED {
+            vec![super::engine::ANY_TARGET.to_owned()]
+        } else {
+            wanted.into_iter().collect()
+        };
+        self.wanted.insert(path.clone(), wanted);
         Ok(())
     }
 

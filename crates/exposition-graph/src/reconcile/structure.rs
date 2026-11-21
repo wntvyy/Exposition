@@ -33,8 +33,12 @@ impl Planner<'_> {
         else {
             return Ok(());
         };
+        // Everything that can contain (any lifecycle): the project, research
+        // spaces and folders. Their outgoing relations hold every `contains`.
+        let mut containers: Vec<EntityId> = vec![project.id.clone()];
         let mut spaces: BTreeMap<WorkspacePath, EntityId> = BTreeMap::new();
         for e in self.store.all_of_kind(EntityKind::ResearchSpace)? {
+            containers.push(e.id.clone());
             if e.lifecycle == Lifecycle::Tombstoned {
                 continue;
             }
@@ -45,6 +49,7 @@ impl Planner<'_> {
         let mut folders: BTreeMap<WorkspacePath, Entity> = BTreeMap::new();
         let mut folder_tombs: HashMap<WorkspacePath, Vec<Entity>> = HashMap::new();
         for e in self.store.all_of_kind(EntityKind::Folder)? {
+            containers.push(e.id.clone());
             let e = self.entity(&e.id)?.unwrap_or(e);
             let Some(p) = e.key.as_deref().and_then(|k| WorkspacePath::parse(k).ok()) else { continue };
             if e.lifecycle == Lifecycle::Tombstoned {
@@ -53,9 +58,11 @@ impl Planner<'_> {
                 folders.entry(p).or_insert(e);
             }
         }
+        // Containment is derived from every live resource.
+        self.resources.load_all()?;
         // Folders that must exist: ancestors of live resources.
         let mut required: BTreeSet<WorkspacePath> = BTreeSet::new();
-        for path in self.resources.keys() {
+        for (path, _) in self.resources.live() {
             let mut dir = path.parent();
             while let Some(d) = dir {
                 if structural(&d) && !spaces.contains_key(&d) {
@@ -164,15 +171,21 @@ impl Planner<'_> {
             project.id.clone()
         };
         let mut children: Vec<(EntityId, EntityId)> = Vec::new();
-        for (path, id) in &self.resources {
+        for (path, id) in self.resources.live() {
             children.push((id.clone(), container_of(path)));
         }
         for (path, e) in &folders {
             children.push((e.id.clone(), container_of(path)));
         }
         let mut contains_to: HashMap<EntityId, Vec<crate::model::Relation>> = HashMap::new();
-        for r in self.store.relations_of_kind(RelationKind::Contains)? {
-            contains_to.entry(r.to.clone()).or_default().push(r);
+        // Read from the containers (the endpoint rule allows no other
+        // source), not by scanning every relation of the project.
+        for container in &containers {
+            for r in self.store.relations_from(container)? {
+                if r.kind == RelationKind::Contains {
+                    contains_to.entry(r.to.clone()).or_default().push(r);
+                }
+            }
         }
         for (child, parent) in children {
             let existing = contains_to.get(&child).cloned().unwrap_or_default();

@@ -122,8 +122,14 @@ pub struct Scale {
     pub hub_degree: usize,
 }
 
-pub const SMALL: Scale =
-    Scale { name: "small", files: 1_000, big_file_declarations: 300, lemmas: 5_000, relations: 20_000, hub_degree: 2_000 };
+pub const SMALL: Scale = Scale {
+    name: "small",
+    files: 1_000,
+    big_file_declarations: 300,
+    lemmas: 5_000,
+    relations: 20_000,
+    hub_degree: 2_000,
+};
 pub const LARGE: Scale = Scale {
     name: "large",
     files: 18_000,

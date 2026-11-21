@@ -232,6 +232,7 @@ describe("Agents page filters and kept work", () => {
         },
       ],
       relations: [],
+      relationsTruncated: false,
       truncated: false,
       total: 1,
       coverage: context.coverage,

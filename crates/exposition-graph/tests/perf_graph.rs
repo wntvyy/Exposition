@@ -118,9 +118,8 @@ fn graph_costs() {
     }
 
     // Commit of a small curated write.
+    let mut base = svc.status().revision;
     let (samples, work) = measure(7, |i| {
-        let base = svc.status().revision;
-        take();
         let (_, out) = svc
             .propose_and_apply(
                 Origin::User,
@@ -139,7 +138,8 @@ fn graph_costs() {
                 },
             )
             .unwrap();
-        assert!(matches!(out, ApplyOutcome::Applied { .. }), "{out:?}");
+        let ApplyOutcome::Applied { revision, .. } = out else { panic!("{out:?}") };
+        base = revision;
     });
     report("graph.commit_small_write", &scale, &samples, &work.json());
 
@@ -148,11 +148,17 @@ fn graph_costs() {
         svc.mark_pending(&[path(EDITED_FILE)]).unwrap();
     });
     report("graph.mark_pending_one", &scale, &samples, &work.json());
-    let batch: Vec<WorkspacePath> = (0..scale.files * 12 / 100).map(|i| path(&format!("chapters/c{}/ch{i}.tex", i % 20))).collect();
+    let batch: Vec<WorkspacePath> =
+        (0..scale.files * 12 / 100).map(|i| path(&format!("chapters/c{}/ch{i}.tex", i % 20))).collect();
     let (samples, work) = measure(5, |_| {
         svc.mark_pending(&batch).unwrap();
     });
-    report("graph.mark_pending_batch", &scale, &samples, &format!("{{\"paths\":{},\"sql\":{}}}", batch.len(), work.json()));
+    report(
+        "graph.mark_pending_batch",
+        &scale,
+        &samples,
+        &format!("{{\"paths\":{},\"sql\":{}}}", batch.len(), work.json()),
+    );
     svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: false }).unwrap();
 
     // Reads.

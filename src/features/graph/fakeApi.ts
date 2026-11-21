@@ -225,6 +225,7 @@ export function createFakeGraph(seed: { entities?: Entity[]; relations?: Relatio
         revision,
         entities: shown,
         relations: relations.filter((r) => ids.has(r.from) && ids.has(r.to)),
+        relationsTruncated: false,
         truncated: list.length > limit,
         total: list.length,
         coverage,
@@ -251,6 +252,9 @@ export function createFakeGraph(seed: { entities?: Entity[]; relations?: Relatio
         evidenceFreshness: [],
         importedEvidence: [],
         coverage: null,
+        relationsTruncated: false,
+        neighborsTruncated: false,
+        evidenceTruncated: false,
         graphRevision: revision,
       };
     },
@@ -270,9 +274,11 @@ export function createFakeGraph(seed: { entities?: Entity[]; relations?: Relatio
             entity: e,
             binding: { entity: e.id, path: request.path, selector: { kind: "region" }, range: { start: 0, end: 10 }, version: null, fingerprint: null, state: "resolved", detail: null },
             relations: rels,
+            relationsTruncated: false,
             related: entities.filter((x) => relatedIds.has(x.id) && x.id !== e.id),
           };
         }),
+        entitiesTruncated: false,
         coverage: { path: request.path, extractor: "latex/1", state: "partial", unresolved: 0, detail: "Labels and theorem environments only", contentHash: null },
         freshness,
         graphRevision: revision,
@@ -395,6 +401,7 @@ export function createFakeGraph(seed: { entities?: Entity[]; relations?: Relatio
       return {
         rows: mathRows,
         relations: relations.filter((r) => ids.has(r.from) && ids.has(r.to)),
+        relationsTruncated: false,
         truncated: false,
         coverage,
         graphRevision: revision,

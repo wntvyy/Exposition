@@ -34,7 +34,7 @@ use crate::model::{
     AssertionStatus, BindingState, GraphState, Lifecycle, Origin, SourceBinding, SourceSelector, SourceVersion,
 };
 use crate::service::{GraphError, GraphResult, GraphService};
-use crate::store::{GraphStore, Writer, now_ms};
+use crate::store::{GraphStore, now_ms};
 use crate::validate::{BatchRef, EntityUpsert, RelationUpsert, ServiceBatch};
 use crate::vocabulary::{EntityKind, RelationKind};
 use crate::workflow::{DraftState, SaveWorkflowRequest, ValidationContext};
@@ -1056,7 +1056,7 @@ fn build_batch(
 /// missed, with the exact rules the real application uses.
 pub(super) fn dry_run_graph(bp: &ProjectBlueprint, files: &BTreeMap<String, WorkspacePath>) -> Result<(), String> {
     let mut store = GraphStore::open_in_memory().map_err(|e| e.to_string())?;
-    let w = Writer::new(store.transaction().map_err(|e| e.to_string())?);
+    let w = store.writer().map_err(|e| e.to_string())?;
     let origin = blueprint_origin(bp);
     let mut prefix = vec![EntityUpsert {
         id: None,

@@ -64,6 +64,10 @@ pub struct GraphSnapshot {
     pub entities: Vec<Entity>,
     /// Relations among the returned entities.
     pub relations: Vec<Relation>,
+    /// More relations exist among the returned entities than `relations`
+    /// lists (never read the list as complete then).
+    #[serde(default)]
+    pub relations_truncated: bool,
     /// More entities matched than were returned.
     pub truncated: bool,
     /// Matching entities in total.
@@ -91,6 +95,9 @@ pub struct InspectedEntity {
     pub entity: Entity,
     pub binding: SourceBinding,
     pub relations: Vec<Relation>,
+    /// The entity has more relations than `relations` lists.
+    #[serde(default)]
+    pub relations_truncated: bool,
     /// Other endpoints of `relations`.
     pub related: Vec<Entity>,
 }
@@ -108,6 +115,9 @@ pub struct SourceInspection {
     pub resource: Option<Entity>,
     /// Entities bound at the offset, innermost first.
     pub entities: Vec<InspectedEntity>,
+    /// More entities are bound there than `entities` lists.
+    #[serde(default)]
+    pub entities_truncated: bool,
     pub coverage: Option<ResourceCoverage>,
     pub freshness: GraphFreshness,
     pub graph_revision: u64,
@@ -289,6 +299,10 @@ pub struct MathOverview {
     /// Mathematical relations among the rows (dependsOn, assumes, proofOf,
     /// formalizes, references, evidenceFor).
     pub relations: Vec<Relation>,
+    /// More relations exist among the rows than `relations` lists. Each
+    /// row's own state is computed from all of them regardless.
+    #[serde(default)]
+    pub relations_truncated: bool,
     pub truncated: bool,
     pub coverage: CoverageSummary,
     pub graph_revision: u64,

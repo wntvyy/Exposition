@@ -5,6 +5,10 @@ import type { SourceBinding } from "./SourceBinding";
 
 export type InspectedEntity = { entity: Entity, binding: SourceBinding, relations: Array<Relation>, 
 /**
+ * The entity has more relations than `relations` lists.
+ */
+relationsTruncated: boolean, 
+/**
  * Other endpoints of `relations`.
  */
 related: Array<Entity>, };

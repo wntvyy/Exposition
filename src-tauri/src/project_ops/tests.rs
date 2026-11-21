@@ -1160,6 +1160,9 @@ mod source_items {
             evidence_freshness: Vec::new(),
             imported_evidence: Vec::new(),
             coverage: None,
+            relations_truncated: false,
+            neighbors_truncated: false,
+            evidence_truncated: false,
             graph_revision: 1,
         }
     }
