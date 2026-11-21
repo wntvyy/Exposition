@@ -458,3 +458,119 @@ async fn detail_reads_are_bounded_and_a_partial_read_is_the_tail_of_a_full_one()
     // From before everything: the whole transcript again.
     assert_eq!(h.service.task_detail_from(&task.id, Some(0)).unwrap().transcript, full.transcript);
 }
+
+/// The graph context blocks of a task's conversation, in order.
+fn graph_blocks(h: &Harness, id: &TaskId) -> Vec<String> {
+    let store = exposition_agents::store::Store::open(&h._data.path().join("agents.sqlite3")).unwrap();
+    store
+        .messages(id)
+        .unwrap()
+        .iter()
+        .flat_map(|(_, content)| content.iter())
+        .filter_map(|block| block["text"].as_str())
+        .filter(|text| text.starts_with("<graph_context>"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// AGENTS-5. A follow-up on an unchanged graph says the earlier context
+/// still holds instead of sending it again; any change to what the context
+/// says sends the whole context; the task-context update is sent every time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_follow_up_does_not_repeat_an_unchanged_graph_context() {
+    use exposition_graph::{ChangeRequest, EntityKind, GraphConfig, GraphOperation, GraphService, GraphState, Origin};
+
+    let project = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(project.path()).unwrap();
+    std::fs::write(root.join("main.typ"), MAIN).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let graph = GraphService::new(GraphConfig { data_dir: data.path().join("graph") });
+    assert!(matches!(graph.attach(&root).state, GraphState::Attached));
+    graph.ensure_resource(&p("main.typ"), None, false, "test").unwrap();
+    let documents = Arc::new(DocumentService::new());
+    let service = AgentService::new(AgentConfig {
+        database: Some(data.path().join("agents.sqlite3")),
+        documents: Arc::clone(&documents),
+        workspace: None,
+        credentials: Arc::new(MemoryStore::default()),
+        services: Arc::new(UnavailableServices),
+        runtime: tokio::runtime::Handle::current(),
+        allow_scripted: true,
+        anthropic_base_url: None,
+        retry: None,
+        graph: Some(Arc::clone(&graph)),
+    })
+    .unwrap();
+    service
+        .update_settings(ProviderSettings { provider: ProviderKind::Scripted, ..ProviderSettings::default() })
+        .unwrap();
+    let h = Harness { service, documents, project, _data: data };
+
+    let answers: Vec<Value> =
+        (0..5).map(|i| json!({"steps": [{"text": format!("Answer {i}.")}], "chunkDelayMs": 0})).collect();
+    let mut req = request(&h, PermissionProfile::ReadOnly);
+    req.workspace_root = root.display().to_string();
+    let task = run(&h, json!({"turns": answers}), req).await;
+    assert_eq!(task.status, TaskStatus::Completed);
+    let follow_up = |prompt: &'static str| {
+        let h = &h;
+        let id = task.id.clone();
+        async move {
+            h.service.continue_task(&id, prompt, None).unwrap();
+            tokio::time::timeout(Duration::from_secs(30), h.service.join(&id)).await.expect("task finished");
+            assert_eq!(h.service.task(&id).unwrap().status, TaskStatus::Completed);
+        }
+    };
+    let whole = |block: &str| block.contains("\"entities\"");
+    let revision = graph.status().revision;
+
+    // Two follow-ups on the unchanged graph: one whole context, then short statements.
+    follow_up("Second question").await;
+    follow_up("Third question").await;
+    let blocks = graph_blocks(&h, &task.id);
+    assert_eq!(blocks.len(), 3, "every run still gets a graph context block");
+    assert!(whole(&blocks[0]));
+    for short in &blocks[1..] {
+        assert!(!whole(short) && short.len() < 400, "{short}");
+        assert!(short.contains("unchanged") && short.contains(&format!("revision {revision}")), "{short}");
+        assert!(short.ends_with("</graph_context>"));
+    }
+
+    // The graph changes: the next follow-up carries the whole new context.
+    let request = ChangeRequest {
+        base_revision: revision,
+        operations: vec![GraphOperation::CreateEntity {
+            temp_id: "q".into(),
+            kind: EntityKind::Question,
+            roles: vec![],
+            label: "A NEW-QUESTION-MARK".into(),
+            key: None,
+            attributes: std::collections::BTreeMap::new(),
+            binding: None,
+        }],
+        summary: None,
+    };
+    graph.propose_and_apply(Origin::User, &request).unwrap();
+    follow_up("Fourth question").await;
+    follow_up("Fifth question").await;
+    let blocks = graph_blocks(&h, &task.id);
+    assert_eq!(blocks.len(), 5);
+    assert!(whole(&blocks[3]), "a changed context is sent whole: {}", blocks[3]);
+    assert_ne!(blocks[3], blocks[0]);
+    assert!(!whole(&blocks[4]) && blocks[4].contains("unchanged"), "{}", blocks[4]);
+
+    // The task context (approvals, files' saved and review state) is sent with every follow-up.
+    let store = exposition_agents::store::Store::open(&h._data.path().join("agents.sqlite3")).unwrap();
+    let updates = store
+        .messages(&task.id)
+        .unwrap()
+        .iter()
+        .flat_map(|(_, content)| content.iter())
+        .filter(|block| block["text"].as_str().is_some_and(|text| text.starts_with("<task_context")))
+        .count();
+    assert_eq!(updates, 5);
+    // Every run's context is recorded with the task, and the detail shows the latest.
+    let detail = h.service.task_detail(&task.id).unwrap();
+    assert_eq!(detail.graph.contexts, 5);
+    assert_eq!(detail.graph.context.unwrap().revision, graph.status().revision);
+}

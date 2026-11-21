@@ -1124,7 +1124,9 @@ impl AgentService {
         };
         let target = switched.clone().unwrap_or_else(|| row.spec.provider.clone());
         let _reserved = self.inner.reserve(&attachments);
-        let (all, bytes) = self.inner.history_attachments(id, &attachments)?;
+        // The stored conversation, read once for everything below.
+        let history = self.inner.store.messages(id)?;
+        let (all, bytes) = self.inner.history_attachments(&history, &attachments);
         preflight(&target, &all, self.inner.known_model(&target).as_ref()).map_err(|e| match &switched {
             Some(_) => AgentError::new(
                 &e.code,
@@ -1188,7 +1190,7 @@ impl AgentService {
                 ),
             )?;
         }
-        let mut content = self.inner.dangling_tool_results(id)?;
+        let mut content = self.inner.dangling_tool_results(id, &history)?;
         // The approvals and the files' saved and review state as they are
         // now (the user may have approved, revoked, saved, kept, or reverted
         // since the last run): the model must not infer them from the graph.
@@ -1200,8 +1202,17 @@ impl AgentService {
             "text": prompt::context_update(&row.spec, &self.inner.documents, &authority, &outlook, &changed),
         }));
         if let Some(graph_context) = &graph_context {
+            // When the latest context block the conversation holds carries
+            // this very context (judged from the stored conversation itself),
+            // say that it still holds instead of sending a second copy.
+            let held = last_graph_context(&history).is_some_and(|sent| graph::context::same(&sent, graph_context));
             self.inner.store.insert_graph_context(id, graph_context)?;
-            content.push(json!({"type": "text", "text": graph::context::block(graph_context)}));
+            let text = if held {
+                graph::context::unchanged_block(graph_context)
+            } else {
+                graph::context::block(graph_context)
+            };
+            content.push(json!({"type": "text", "text": text}));
         }
         content.push(json!({"type": "text", "text": if prompt.is_empty() { ATTACHMENTS_ONLY } else { prompt }}));
         content.extend(attachments.iter().map(att::reference_block));
@@ -2444,9 +2455,13 @@ impl Inner {
     }
 
     /// Every attachment in a task's history plus `extra`, and their encoded size.
-    fn history_attachments(&self, id: &TaskId, extra: &[AttachmentInfo]) -> Result<(Vec<AttachmentInfo>, u64)> {
+    fn history_attachments(
+        &self,
+        history: &[(String, Vec<Value>)],
+        extra: &[AttachmentInfo],
+    ) -> (Vec<AttachmentInfo>, u64) {
         let mut all: Vec<AttachmentInfo> = extra.to_vec();
-        for (_, content) in self.store.messages(id)? {
+        for (_, content) in history {
             for block in content.iter().filter(|b| block_type(b) == "exposition_attachment") {
                 if let Some(aid) = block.get("attachment_id").and_then(Value::as_str)
                     && let Ok(Some(info)) = self.store.attachment(&AttachmentId(aid.to_owned()))
@@ -2456,7 +2471,7 @@ impl Inner {
             }
         }
         let bytes = all.iter().map(|a| encoded_size(a.size_bytes)).sum();
-        Ok((all, bytes))
+        (all, bytes)
     }
 
     /// The history as a provider receives it: attachment references become
@@ -2831,9 +2846,9 @@ impl Inner {
         Ok(items)
     }
 
-    /// Results for tool calls left unanswered by an interrupted run.
-    fn dangling_tool_results(&self, id: &TaskId) -> Result<Vec<Value>> {
-        let messages = self.store.messages(id)?;
+    /// Results for tool calls left unanswered by an interrupted run
+    /// (`messages`: the task's stored conversation).
+    fn dangling_tool_results(&self, id: &TaskId, messages: &[(String, Vec<Value>)]) -> Result<Vec<Value>> {
         let Some((role, content)) = messages.last() else { return Ok(Vec::new()) };
         if role != "assistant" {
             return Ok(Vec::new());
@@ -2991,6 +3006,19 @@ impl Inner {
         self.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
         self.emit(AgentEvent::ReviewChanged { task_id: id.clone() });
     }
+}
+
+/// The graph context of the latest whole context block the application put
+/// into a conversation (the short "unchanged" form carries none).
+fn last_graph_context(history: &[(String, Vec<Value>)]) -> Option<graph::GraphContext> {
+    history
+        .iter()
+        .rev()
+        .filter(|(role, _)| role == "user")
+        .flat_map(|(_, content)| content.iter().rev())
+        .filter(|block| block_type(block) == "text")
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .find_map(graph::context::parse_block)
 }
 
 /// The record of a graph proposal whose approval can no longer be given.
