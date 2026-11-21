@@ -287,6 +287,15 @@ export const AREAS = [
     e2e: [],
     note: "The impact selector: its own tests (scripts/impact/*.test.mjs) cover planning and execution.",
   },
+  {
+    // Measurement tooling (timing harness, scale fixtures, app measurements).
+    // Nothing in a validation plan runs it: a measurement is run on purpose.
+    id: "perf-tooling",
+    paths: ["scripts/perf/**"],
+    level: "local",
+    e2e: [],
+    note: "Performance measurement scripts: not part of any validation plan; rerun the measurement they belong to (docs/performance.md).",
+  },
 
   // ---- End-to-end harness
   {

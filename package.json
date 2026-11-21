@@ -26,6 +26,8 @@
     "check:affected": "node scripts/impact.mjs run",
     "check:full": "node scripts/impact.mjs run --full",
     "e2e": "node scripts/e2e/run.mjs",
+    "perf:rust": "node scripts/perf/rust-bench.mjs",
+    "perf:app": "node scripts/perf/app-bench.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
