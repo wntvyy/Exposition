@@ -9,4 +9,11 @@ export type ExperimentDetail = { summary: ExperimentSummary, procedure: Experime
  * Runs of the procedure and runs that produced its outcomes (operational
  * history, newest first; not research entities).
  */
-attempts: Array<RunSummary>, graphRevision: number, };
+attempts: Array<RunSummary>, 
+/**
+ * The procedure's runs were looked for among the most recent runs only
+ * (the project holds more than were examined): older runs of the
+ * procedure may be missing from `attempts`. Runs that produced an
+ * outcome are always listed.
+ */
+attemptsIncomplete: boolean, graphRevision: number, };

@@ -30,7 +30,7 @@ import { commands, errorMessage } from "../../lib/ipc";
 import { Button, Dialog, Spinner, StatusText } from "../../ui/components";
 import { PromotionControls } from "../research/Promotion";
 import { revealInResearch } from "../research/space";
-import { useResearch } from "../research/store";
+import { useRun } from "../research/store";
 import "../research/research.css";
 import "./agents.css";
 
@@ -100,7 +100,7 @@ export function FigureCard({ task, figure }: { task: TaskId; figure: FigureRef }
   const [expanded, setExpanded] = useState(false);
   const supported = FIGURE_MEDIA_TYPES.has(figure.mediaType.toLowerCase());
   // Research's record of the run: "Insert" reuses its promotion flow.
-  const run = useResearch((s) => s.runs.find((r) => r.id === figure.runId));
+  const run = useRun(figure.runId);
   const artifact = run?.outputs.find((a) => a.id === figure.artifactId);
 
   useEffect(() => {

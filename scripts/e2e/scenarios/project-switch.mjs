@@ -317,7 +317,7 @@ export default async function projectSwitch({ launchApp, artifactsDir, assert, f
       const betaResearch = await invoke(page, "research_workspace");
       const record = await waitFor(
         async () => {
-          const runs = await invoke(page, "research_runs");
+          const { runs } = await invoke(page, "research_runs");
           const found = runs.find((r) => r.id === run.id);
           return found && found.status.kind !== "running" ? found : null;
         },

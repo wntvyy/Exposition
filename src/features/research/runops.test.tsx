@@ -23,7 +23,7 @@ vi.hoisted(() => {
 const ops = vi.hoisted(() => ({ runUserOperation: vi.fn(async () => null), listeners: [] as ((r: unknown) => void)[] }));
 
 vi.mock("../../lib/ipc", () => ({
-  commands: { researchRuns: vi.fn(async () => []), researchRun: vi.fn(async () => null) },
+  commands: { researchRuns: vi.fn(async () => ({ runs: [], next: null, hasMore: false, total: 0, unreadable: 0 })), researchRun: vi.fn(async () => null) },
   events: { research: vi.fn(async () => () => {}), researchResync: vi.fn(async () => () => {}), trustChanged: vi.fn(async () => () => {}) },
   errorMessage: (e: unknown) => String(e),
   isCommandError: () => false,
@@ -152,5 +152,61 @@ describe("run history as an operation surface", () => {
     );
     fireEvent.click(row);
     expect(useResearch.getState().selectedRun).toBe("run-2");
+  });
+});
+
+describe("run history longer than the rows shown", () => {
+  const many = (n: number) => Array.from({ length: n }, (_, i) => run(`run-${String(n - i).padStart(4, "0")}`, { startedAtMs: n - i }));
+  afterEach(() => {
+    cleanup();
+    useResearch.setState({ runs: [], runsNext: null, runsRemaining: 0, runsUnreadable: 0, runsLoadingMore: false, selectedRun: null });
+  });
+
+  it("shows nothing but the runs when all of them are listed", () => {
+    useResearch.setState({ runs: many(3), runsNext: null, runsRemaining: 0 });
+    render(<RunHistory />);
+    expect(screen.queryByTestId("research-history-count")).toBeNull();
+    expect(screen.queryByTestId("research-history-more")).toBeNull();
+    expect(screen.queryByTestId("research-history-unreadable")).toBeNull();
+  });
+
+  it("says how many are listed of how many exist and shows more on request", async () => {
+    const page = { runs: many(1_000).slice(500), next: null, hasMore: false, total: 1_000, unreadable: 2 };
+    const { commands } = await import("../../lib/ipc");
+    (commands.researchRuns as ReturnType<typeof vi.fn>).mockResolvedValueOnce(page);
+    useResearch.setState({ runs: many(1_000).slice(0, 500), runsNext: "next", runsRemaining: 500, selectedRun: "run-0990" });
+    render(<RunHistory />);
+    const rows = () => screen.getByTestId("research-history").querySelectorAll("[data-op-item]").length;
+    expect(rows()).toBe(200);
+    expect(screen.getByTestId("research-history-count").textContent).toBe("200 of 1,000");
+    const more = () => screen.getByTestId("research-history-more");
+    expect(within(more()).getByText("Show more runs")).toBeTruthy();
+    expect(within(more()).getByText("800 not shown")).toBeTruthy();
+    // 400 rows are loaded already: no request.
+    await act(async () => {
+      fireEvent.click(more());
+    });
+    expect(rows()).toBe(400);
+    expect(commands.researchRuns).not.toHaveBeenCalledWith({ after: "next" });
+    // 600 rows need the next page.
+    await act(async () => {
+      fireEvent.click(more());
+    });
+    expect(commands.researchRuns).toHaveBeenCalledWith({ after: "next" });
+    expect(rows()).toBe(600);
+    expect(screen.getByTestId("research-history-count").textContent).toBe("600 of 1,000");
+    expect(useResearch.getState().selectedRun).toBe("run-0990");
+    for (let i = 0; i < 2; i += 1) {
+      await act(async () => {
+        fireEvent.click(more());
+      });
+    }
+    expect(rows()).toBe(1_000);
+    expect(screen.queryByTestId("research-history-count")).toBeNull();
+    expect(screen.queryByTestId("research-history-more")).toBeNull();
+    expect(within(screen.getByTestId("research-history-unreadable")).getByText("2 run records cannot be read")).toBeTruthy();
+    // The last row is a run like the first: selecting it shows it.
+    const last = screen.getByTestId("research-history").querySelector('[data-op-item="run-0001"]')!;
+    expect(within(last as HTMLElement).getByText(/import numpy/)).toBeTruthy();
   });
 });

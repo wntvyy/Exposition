@@ -25,8 +25,6 @@ const EXPOSITION_DIR: &str = ".exposition";
 const RUNS_DIR: &str = "runs";
 const ARTIFACTS_DIR: &str = "artifacts";
 const TRANSCRIPT: &str = "transcript.json";
-/// Manifests read when listing history.
-const HISTORY_LIMIT: usize = 500;
 
 pub fn valid_run_id(id: &str) -> bool {
     !id.is_empty()
@@ -99,25 +97,10 @@ pub fn read_manifest(root: &Path, run_id: &str) -> Result<RunManifest, ResearchE
     Ok(manifest)
 }
 
-/// Most recent manifests (by file modification time), newest first.
-pub fn list_manifests(root: &Path) -> Vec<RunManifest> {
-    let dir = root.join(EXPOSITION_DIR).join(RUNS_DIR);
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
-    let mut files: Vec<(std::time::SystemTime, String)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let id = name.strip_suffix(".json")?.to_owned();
-            if !valid_run_id(&id) {
-                return None;
-            }
-            let modified = entry.metadata().and_then(|m| m.modified()).ok()?;
-            Some((modified, id))
-        })
-        .collect();
-    files.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-    files.truncate(HISTORY_LIMIT);
-    files.into_iter().filter_map(|(_, id)| read_manifest(root, &id).ok()).collect()
+/// Ids of every run record of `root`, most recently modified first. Reads
+/// the folder listing only (see [`crate::history`] for the paged history).
+pub fn record_ids(root: &Path) -> Vec<String> {
+    crate::history::scan(root).into_iter().map(|file| file.id).collect()
 }
 
 pub fn write_transcript(root: &Path, run_id: &str, entries: &[OutputEntry]) -> Result<(), ResearchError> {

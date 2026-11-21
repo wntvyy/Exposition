@@ -16,7 +16,7 @@ use super::space::experiment_summary;
 use super::types::{ExperimentDetail, ExperimentFile, ExperimentInput};
 use super::{ResearchProject, label};
 use crate::error::ResearchError;
-use crate::types::CodeOrigin;
+use crate::types::{CodeOrigin, RunHistoryRequest, RunSummary};
 
 const MAX_INPUTS: usize = 32;
 const MAX_OUTCOMES: usize = 64;
@@ -249,27 +249,43 @@ impl ResearchProject {
             }
         }
         let outcome_runs: BTreeSet<String> = outcomes.iter().filter_map(|o| o.run_id.clone()).collect();
-        let attempts = match self.research.runs() {
-            Ok(runs) => runs
-                .into_iter()
-                .filter(|run| {
-                    let of_procedure = match (&run.origin, &summary.procedure) {
-                        (CodeOrigin::File { path, .. }, Some(p)) => path == p,
-                        (CodeOrigin::Selection { path: Some(path), .. }, Some(p)) => path == p,
-                        _ => false,
-                    };
-                    of_procedure || outcome_runs.contains(&run.id.0)
-                })
-                .take(MAX_ATTEMPTS)
-                .collect(),
-            Err(_) => Vec::new(),
+        // The procedure's runs are looked for in the first page of the run
+        // history; the runs behind the outcomes are known by id and read
+        // directly, wherever they stand in the history.
+        let (mut attempts, attempts_incomplete) = match self.research.run_history(&RunHistoryRequest::default()) {
+            Ok(page) => {
+                let recent: Vec<RunSummary> = page
+                    .runs
+                    .into_iter()
+                    .filter(|run| {
+                        let of_procedure = match (&run.origin, &summary.procedure) {
+                            (CodeOrigin::File { path, .. }, Some(p)) => path == p,
+                            (CodeOrigin::Selection { path: Some(path), .. }, Some(p)) => path == p,
+                            _ => false,
+                        };
+                        of_procedure || outcome_runs.contains(&run.id.0)
+                    })
+                    .collect();
+                (recent, page.has_more && summary.procedure.is_some())
+            }
+            Err(_) => (Vec::new(), false),
         };
+        for id in &outcome_runs {
+            if !attempts.iter().any(|run| &run.id.0 == id)
+                && let Ok(run) = self.research.run_summary(id)
+            {
+                attempts.push(run);
+            }
+        }
+        attempts.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms).then_with(|| b.id.0.cmp(&a.id.0)));
+        attempts.truncate(MAX_ATTEMPTS);
         Ok(ExperimentDetail {
             summary,
             procedure,
             inputs,
             outcomes,
             attempts,
+            attempts_incomplete,
             graph_revision: self.graph.with_store(|s| Ok(s.revision()?))?,
         })
     }

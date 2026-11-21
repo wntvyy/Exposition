@@ -268,7 +268,7 @@ export default async function reviewA1({ launchApp, artifactsDir, assert }) {
       note("A-webview-cannot-forge-run-authorization", !!forgedAuth.error && !!forgedRequester.error, { authorization: forgedAuth.error, requester: forgedRequester.error });
       const userRun = await call("research_execute", { request: { sessionId: userSession.id, source: { kind: "input", code: "print('user run')" } } });
       const userFinished = await waitFor(async () => {
-        const runs = await call("research_runs");
+        const { runs } = await call("research_runs");
         const r = runs.find((x) => x.id === userRun.id);
         return r && r.status.kind !== "running" ? r : null;
       }, { timeout: 60_000, message: "user run finishes" });

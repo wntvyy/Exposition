@@ -25,8 +25,8 @@ use exposition_research::project::types::{RetainRequest, RetainState};
 use exposition_research::store::{write_manifest, write_transcript};
 use exposition_research::types::{
     Availability, CodeOrigin, CodeProvenance, ExecuteRequest, InterpreterProvenance, KernelDescriptor, OutputEntry,
-    OutputItem, OutputSummary, ResearchEvent, RunManifest, RunSource, RuntimeLanguage, SessionOwner, SessionProvenance,
-    StreamName,
+    OutputItem, OutputSummary, ResearchEvent, RunHistoryRequest, RunManifest, RunSource, RuntimeLanguage, SessionOwner,
+    SessionProvenance, StreamName,
 };
 use exposition_research::{ResearchConfig, ResearchProject, ResearchService, StartSessionRequest};
 use exposition_workspace::DocumentService;
@@ -186,19 +186,53 @@ fn run_history() {
         ));
         service.set_workspace(&root, true).unwrap();
         let manifest_bytes = dir_bytes(&root.join(".exposition/runs"));
+        // The first page: what the history shows when it opens.
         let mut listed = 0;
+        let before = service.history_counters();
         let samples = sample(5, || listed = service.runs().unwrap().len());
+        let after = service.history_counters();
         let scale =
             serde_json::json!({"runs_on_disk": runs, "code_bytes": code_bytes, "transcript_bytes": transcript_bytes});
+        // Every page to the end: the runs the interface can reach.
+        let (mut reached, mut pages, mut total) = (0usize, 0u32, 0u32);
+        let all_before = service.history_counters();
+        let all = sample(2, || {
+            reached = 0;
+            pages = 0;
+            let mut next = None;
+            loop {
+                let page = service.run_history(&RunHistoryRequest { after: next, limit: None }).unwrap();
+                reached += page.runs.len();
+                pages += 1;
+                total = page.total;
+                next = page.next;
+                if next.is_none() {
+                    break;
+                }
+            }
+        });
+        let all_after = service.history_counters();
         perf(
             "research.history.list",
             scale.clone(),
             &samples,
             serde_json::json!({
                 "listed": listed,
-                "unreachable_runs": runs - listed,
+                "manifests_read_per_listing": (after.manifests_read - before.manifests_read) / 6,
+                "total_reported": total,
+                "unreachable_runs": runs - reached,
                 "manifest_bytes_on_disk": manifest_bytes,
                 "mean_manifest_bytes": manifest_bytes / runs as u64,
+            }),
+        );
+        perf(
+            "research.history.all_pages",
+            scale.clone(),
+            &all,
+            serde_json::json!({
+                "pages": pages,
+                "reached": reached,
+                "manifests_read_per_walk": (all_after.manifests_read - all_before.manifests_read) / 3,
             }),
         );
         // The record listing behind Storage & History (sizes and output files

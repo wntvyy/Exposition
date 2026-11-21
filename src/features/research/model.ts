@@ -4,6 +4,7 @@ import { formatDuration as formatElapsed } from "../../lib/format";
 import type { ArtifactRecord } from "../../bindings/ArtifactRecord";
 import type { OutputEntry } from "../../bindings/OutputEntry";
 import type { ResearchEvent } from "../../bindings/ResearchEvent";
+import type { RunManifest } from "../../bindings/RunManifest";
 import type { RunSummary } from "../../bindings/RunSummary";
 import type { SessionInfo } from "../../bindings/SessionInfo";
 import type { Status } from "../../ui/components";
@@ -116,6 +117,51 @@ export function mergeSnapshot<T>(
     if (changedDuringFetch(id) && !merged.some((m) => idOf(m) === id)) merged.push(item);
   }
   return merged;
+}
+
+/** History order: newest start first, then id (descending), as the service lists a page. */
+function byStartDescending(a: RunSummary, b: RunSummary): number {
+  if (a.startedAtMs !== b.startedAtMs) return b.startedAtMs - a.startedAtMs;
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+}
+
+/**
+ * Add a further page of the run history to the runs already listed. A run
+ * listed already keeps the version held here (an event may have changed it
+ * since the page was read); the result is in history order.
+ */
+export function appendRunPage(current: RunSummary[], page: RunSummary[]): RunSummary[] {
+  const listed = new Set(current.map((r) => r.id));
+  const added = page.filter((r) => !listed.has(r.id));
+  if (added.length === 0) return current;
+  return [...current, ...added].sort(byStartDescending);
+}
+
+/**
+ * The history entry of a stored run read on its own (`research_run`), for a
+ * run that is on a page of the history not loaded here. Mirrors the summary
+ * the service lists for a stored run.
+ */
+export function summaryOfManifest(manifest: RunManifest): RunSummary {
+  const text = manifest.code.text;
+  const codePreview =
+    text === null || text === undefined
+      ? `sha256:${manifest.code.sha256.slice(0, 12)}`
+      : Array.from(text.split(/\r?\n/).find((line) => line.trim() !== "") ?? "").slice(0, 120).join("");
+  return {
+    id: manifest.record.id,
+    sessionId: manifest.session.sessionId,
+    owner: manifest.session.owner,
+    status: manifest.record.status,
+    queued: false,
+    origin: manifest.code.origin,
+    codePreview,
+    executionCount: manifest.executionCount,
+    startedAtMs: manifest.record.startedAtMs,
+    finishedAtMs: manifest.record.finishedAtMs,
+    outputs: manifest.record.outputs,
+    error: manifest.error,
+  };
 }
 
 export function applyEvent(model: ResearchModel, event: ResearchEvent): ResearchModel {

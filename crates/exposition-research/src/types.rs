@@ -436,6 +436,47 @@ pub struct RunSummary {
     pub error: Option<RunErrorInfo>,
 }
 
+/// Which part of the run history to list. Nothing set asks for the first
+/// page.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunHistoryRequest {
+    /// The `next` of the page before the one wanted.
+    #[serde(default)]
+    #[ts(optional)]
+    pub after: Option<String>,
+    /// Stored runs wanted (1 to 500; 500 when absent).
+    #[serde(default)]
+    #[ts(optional)]
+    pub limit: Option<u32>,
+}
+
+/// One page of the run history, newest first by start time. Pages follow the
+/// records' modification times (newest first); the first page also holds
+/// every run of this session.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct RunHistoryPage {
+    pub runs: Vec<RunSummary>,
+    /// Continues the listing after this page (`after` of the next request);
+    /// absent on the last page.
+    #[serde(default)]
+    pub next: Option<String>,
+    /// Whether stored runs exist that no page up to this one examined.
+    #[serde(default)]
+    pub has_more: bool,
+    /// Runs of the project: this session's and every stored record,
+    /// including the records counted in `unreadable`.
+    #[serde(default)]
+    pub total: u32,
+    /// Stored records found so far that cannot be read as a run (damaged or
+    /// naming another run); they are in no page.
+    #[serde(default)]
+    pub unreadable: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]

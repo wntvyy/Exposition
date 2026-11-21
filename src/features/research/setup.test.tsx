@@ -30,7 +30,7 @@ const ipc = vi.hoisted(() => ({
   researchEnvironments: vi.fn(),
   researchWorkspace: vi.fn(),
   researchSessions: vi.fn(async () => []),
-  researchRuns: vi.fn(async () => []),
+  researchRuns: vi.fn(async () => ({ runs: [], next: null, hasMore: false, total: 0, unreadable: 0 })),
   researchRun: vi.fn(),
   researchRunCancel: vi.fn(),
   researchExecute: vi.fn(),

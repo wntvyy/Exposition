@@ -69,6 +69,8 @@ import type { RecoveryEntry } from "../bindings/RecoveryEntry";
 import type { ResearchEvent } from "../bindings/ResearchEvent";
 import type { ResearchExecuteRequest } from "../bindings/ResearchExecuteRequest";
 import type { ResearchStartRequest } from "../bindings/ResearchStartRequest";
+import type { RunHistoryPage } from "../bindings/RunHistoryPage";
+import type { RunHistoryRequest } from "../bindings/RunHistoryRequest";
 import type { RestoreOutcome } from "../bindings/RestoreOutcome";
 import type { ReviewActionResult } from "../bindings/ReviewActionResult";
 import type { RunManifest } from "../bindings/RunManifest";
@@ -267,7 +269,8 @@ export const commands = {
   researchSessionShutdown: (sessionId: string) => invoke<void>("research_session_shutdown", { sessionId }),
   researchExecute: (request: ResearchExecuteRequest) => invoke<RunSummary>("research_execute", { request }),
   researchRunCancel: (runId: string) => invoke<void>("research_run_cancel", { runId }),
-  researchRuns: () => invoke<RunSummary[]>("research_runs"),
+  /** One page of the run history; `request.after` (a page's `next`) continues it. */
+  researchRuns: (request?: RunHistoryRequest) => invoke<RunHistoryPage>("research_runs", { request: request ?? null }),
   researchRun: (runId: string) => invoke<RunManifest>("research_run", { runId }),
   /** Retained output entries after sequence number `after` (exclusive). */
   researchRunOutput: (runId: string, after: number | null, limit?: number) =>

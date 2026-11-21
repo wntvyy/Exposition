@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { OutputEntry } from "../../bindings/OutputEntry";
+import type { RunManifest } from "../../bindings/RunManifest";
 import type { RunSummary } from "../../bindings/RunSummary";
 import type { SessionInfo } from "../../bindings/SessionInfo";
 import {
@@ -8,7 +9,9 @@ import {
   MAX_ENTRIES,
   MAX_RETAINED_CHARS,
   appendEntries,
+  appendRunPage,
   applyEvent,
+  summaryOfManifest,
   KEPT_FINISHED_OUTPUTS,
   pruneOutputs,
   attachmentKeys,
@@ -235,5 +238,65 @@ describe("output retention in the webview", () => {
     // A run that is executing, or not known yet, still accumulates its output.
     model = applyEvent(model, { kind: "output", runId: "run-new", entry: stream(1, "a\n") });
     expect(model.outputs["run-new"]?.entries).toHaveLength(1);
+  });
+});
+
+describe("run history pages", () => {
+  const at = (id: string, startedAtMs: number, patch: Partial<RunSummary> = {}) => run({ id, startedAtMs, status: { kind: "succeeded" }, ...patch });
+
+  it("adds a page to the runs listed, in history order, without repeating a run", () => {
+    const listed = [at("run-9", 90), at("run-8", 80), at("run-7", 70, { codePreview: "changed here" })];
+    const page = [at("run-7", 70, { codePreview: "as read" }), at("run-6", 60), at("run-5", 50)];
+    const next = appendRunPage(listed, page);
+    expect(next.map((r) => r.id)).toEqual(["run-9", "run-8", "run-7", "run-6", "run-5"]);
+    // The version held here wins over the page's (an event may have changed it).
+    expect(next[2]!.codePreview).toBe("changed here");
+    // Nothing new: the same list (no re-render).
+    expect(appendRunPage(next, page)).toBe(next);
+  });
+
+  it("orders by start time, then id, like a page from the service", () => {
+    // Pages follow the records' modification times; a later page may hold a
+    // run that started after one already listed.
+    const next = appendRunPage([at("run-b", 50), at("run-a", 50), at("run-c", 10)], [at("run-d", 70), at("run-e", 50)]);
+    expect(next.map((r) => r.id)).toEqual(["run-d", "run-e", "run-b", "run-a", "run-c"]);
+  });
+
+  it("derives the history entry of a stored run from its manifest", () => {
+    const manifest = {
+      format: "exposition.run/1",
+      record: {
+        id: "run-old",
+        producer: { kind: "kernelSession", sessionId: "s-1", runtime: "python" },
+        inputs: [],
+        environment: [],
+        outputs: [{ id: "run-old/output-1.png", kind: "figure", path: ".exposition/artifacts/run-old/output-1.png", scratchPath: null, mediaType: "image/png", sizeBytes: 3, contentHash: "sha256:00" }],
+        status: { kind: "failed", message: "boom" },
+        startedAtMs: 10,
+        finishedAtMs: 20,
+      },
+      session: { sessionId: "s-1", owner: { kind: "agent", taskId: "t-1" } },
+      code: { origin: { kind: "file", path: "fit.py", revision: null }, sha256: "abcdef0123456789", bytes: 9, text: "\r\n  \n  fit(x)  \r\nrest" },
+      executionCount: 4,
+      error: { ename: "ValueError", evalue: "boom" },
+    } as unknown as RunManifest;
+    expect(summaryOfManifest(manifest)).toEqual({
+      id: "run-old",
+      sessionId: "s-1",
+      owner: { kind: "agent", taskId: "t-1" },
+      status: { kind: "failed", message: "boom" },
+      queued: false,
+      origin: { kind: "file", path: "fit.py", revision: null },
+      codePreview: "  fit(x)  ",
+      executionCount: 4,
+      startedAtMs: 10,
+      finishedAtMs: 20,
+      outputs: manifest.record.outputs,
+      error: { ename: "ValueError", evalue: "boom" },
+    });
+    const long = summaryOfManifest({ ...manifest, code: { ...manifest.code, text: "x".repeat(300) } });
+    expect(long.codePreview).toHaveLength(120);
+    // Code recorded by hash only.
+    expect(summaryOfManifest({ ...manifest, code: { ...manifest.code, text: null } }).codePreview).toBe("sha256:abcdef012345");
   });
 });

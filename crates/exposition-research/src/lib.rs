@@ -28,6 +28,7 @@ pub mod batch;
 pub mod discovery;
 pub mod error;
 pub mod helper;
+mod history;
 pub mod launcher;
 pub mod project;
 pub mod protocol;
@@ -41,8 +42,10 @@ pub mod store;
 pub mod types;
 
 pub use error::ResearchError;
+pub use history::{HISTORY_CHANGED, HistoryCounters};
 pub use project::ResearchProject;
 pub use runs::media_type_for;
 pub use service::{
-    ResearchConfig, ResearchService, ResolvedSource, RetainedRuns, SourceReader, StartSessionRequest, hash_file,
+    HISTORY_PAGE, ResearchConfig, ResearchService, ResolvedSource, RetainedRuns, SourceReader, StartSessionRequest,
+    hash_file,
 };

@@ -45,7 +45,7 @@ import {
   useSpace,
   type ResearchItem,
 } from "./space";
-import { runFile, selectRun, useResearch } from "./store";
+import { runFile, selectRun, useResearch, useRun } from "./store";
 import { authorizationText } from "./runloop";
 
 const subscribe = (l: () => void) => registry.subscribe(l);
@@ -160,11 +160,13 @@ function DeclaredInFile({ path, revision }: { path: string; revision: number | n
 
 /** The run behind an item (its state and a way to show its output), then its provenance. */
 function RunSections({ runId }: { runId: string }) {
-  const run = useResearch((s) => s.runs.find((r) => r.id === runId));
+  const run = useRun(runId);
   if (!run) {
     return (
       <Section title="Run">
-        <p className="ui-meta">Run {runId} is not in the run history of this project.</p>
+        <p className="ui-meta">
+          {run === undefined ? `Reading run ${runId}…` : `Run ${runId} is not in the run history of this project.`}
+        </p>
       </Section>
     );
   }
@@ -187,7 +189,7 @@ function RunSections({ runId }: { runId: string }) {
 function ResultInspector({ entity }: { entity: EntityId }) {
   const listing = useSpace((s) => s.listing);
   const result = listing?.results.find((r) => r.entity === entity);
-  const run = useResearch((s) => s.runs.find((r) => r.id === result?.runId));
+  const run = useRun(result?.runId);
   const artifact = run?.outputs.find((a) => a.id === result?.artifactId);
   if (!result) return <EmptyState title="Result not found" description="It may have been removed from the project graph." />;
   const pill = lifecyclePill(result);
@@ -365,6 +367,11 @@ function ExperimentEditor({ entity }: { entity: EntityId | null }) {
                   />
                 ))}
               </ul>
+            )}
+            {detail.attemptsIncomplete && (
+              <p className="ui-meta" data-testid="research-attempts-incomplete">
+                Only the most recent runs of the project were examined; older runs of the procedure may not be listed.
+              </p>
             )}
           </Section>
           <GraphDependencies entity={detail.summary.entity} revision={detail.graphRevision} />

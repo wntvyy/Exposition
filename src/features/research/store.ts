@@ -8,11 +8,14 @@ import type { ArtifactRecord } from "../../bindings/ArtifactRecord";
 import type { DocumentId } from "../../bindings/DocumentId";
 import type { EnvironmentReport } from "../../bindings/EnvironmentReport";
 import type { ResearchEvent } from "../../bindings/ResearchEvent";
+import type { RunHistoryPage } from "../../bindings/RunHistoryPage";
 import type { RunSource } from "../../bindings/RunSource";
 import type { RunSummary } from "../../bindings/RunSummary";
 import type { SessionInfo } from "../../bindings/SessionInfo";
 import type { TextRange } from "../../bindings/TextRange";
 import type { WorkspaceStatus } from "../../bindings/WorkspaceStatus";
+import { useEffect } from "react";
+
 import { commands, errorMessage, events, isCommandError } from "../../lib/ipc";
 import { activeHandle, handleForPath } from "../editor";
 import { requestWorkspaceTrust } from "../jobs/trust";
@@ -22,8 +25,10 @@ import {
   EMPTY_RUN_OUTPUT,
   applyEvent,
   appendEntries,
+  appendRunPage,
   mergeSnapshot,
   pruneOutputs,
+  summaryOfManifest,
   type RunOutput,
 } from "./model";
 import { activeUserRunId, lastUserRun, pickEnvironment } from "./runloop";
@@ -35,7 +40,24 @@ export interface ResearchState {
   environmentsError: string | null;
   selectedEnvironment: string | null;
   sessions: SessionInfo[];
+  /**
+   * The run history as far as it is loaded: this session's runs and the
+   * pages of stored runs read so far (`loadMoreRuns` reads the next one).
+   */
   runs: RunSummary[];
+  /** Continues the history after the pages loaded; null when all of it is loaded. */
+  runsNext: string | null;
+  /** Stored runs on the pages not loaded yet. */
+  runsRemaining: number;
+  /** Stored run records found that cannot be read as runs (listed nowhere). */
+  runsUnreadable: number;
+  /** The next page is being read. */
+  runsLoadingMore: boolean;
+  /**
+   * Runs read on their own because the loaded pages do not list them (null:
+   * the project has no such run). See `useRun`.
+   */
+  lookups: Record<string, RunSummary | null>;
   outputs: Record<string, RunOutput>;
   selectedRun: string | null;
   starting: boolean;
@@ -51,6 +73,11 @@ export const useResearch = create<ResearchState>(() => ({
   selectedEnvironment: null,
   sessions: [],
   runs: [],
+  runsNext: null,
+  runsRemaining: 0,
+  runsUnreadable: 0,
+  runsLoadingMore: false,
+  lookups: {},
   outputs: {},
   selectedRun: null,
   starting: false,
@@ -156,6 +183,10 @@ export function startResearchTracking(): void {
     );
     const touchesRuns = runs.size > 0 || result.outcomes.some((o) => o.target.kind === "recoverable");
     if (!touchesRuns) return;
+    // A run read on its own is read again when it is next asked for.
+    useResearch.setState((state) => ({
+      lookups: Object.fromEntries(Object.entries(state.lookups).filter(([id]) => !runs.has(id))),
+    }));
     void refreshRuns().then(() => {
       const { selectedRun, runs: listed } = useResearch.getState();
       if (selectedRun && runs.has(selectedRun) && !listed.some((r) => r.id === selectedRun)) {
@@ -201,8 +232,21 @@ export async function refreshAll(): Promise<void> {
     useResearch.setState((state) =>
       state.workspace?.root === workspace?.root
         ? { workspace, sessions: mergeSnapshot(state.sessions, sessions, (s) => s.id, changedSince("session", since)) }
-        : { workspace, sessions, runs: [], outputs: {}, selectedRun: null, environments: null, selectedEnvironment: null },
+        : {
+            workspace,
+            sessions,
+            runs: [],
+            runsNext: null,
+            runsRemaining: 0,
+            runsUnreadable: 0,
+            lookups: {},
+            outputs: {},
+            selectedRun: null,
+            environments: null,
+            selectedEnvironment: null,
+          },
     );
+    if (switched) historyPages = 1;
     if (reload) void loadEnvironments(false);
     if (workspace) await refreshRuns();
   } catch (e) {
@@ -210,14 +254,180 @@ export async function refreshAll(): Promise<void> {
   }
 }
 
-export async function refreshRuns(): Promise<void> {
-  try {
-    const since = eventSerial;
-    const runs = await commands.researchRuns();
-    useResearch.setState((state) => ({ runs: mergeSnapshot(state.runs, runs, (r) => r.id, changedSince("run", since)) }));
-  } catch (e) {
-    if (!(isCommandError(e) && e.code === "research.noWorkspace")) useResearch.setState({ error: errorMessage(e) });
+/** Pages of stored runs held in `runs`: what a refresh reads again. */
+let historyPages = 1;
+
+// History reads run one after another: a refresh never overtakes the page
+// being added, and a page is never added to a list read before a refresh.
+let historyQueue: Promise<void> = Promise.resolve();
+
+function queueHistory(task: () => Promise<void>): Promise<void> {
+  const result = historyQueue.then(task);
+  historyQueue = result.catch(() => undefined);
+  return result;
+}
+
+const HISTORY_CHANGED = "research.historyChanged";
+
+interface HistoryRead {
+  runs: RunSummary[];
+  /** Runs the service returned (before a run listed twice is merged). */
+  returned: number;
+  last: RunHistoryPage;
+  pages: number;
+}
+
+/**
+ * The first `pages` pages of the history. A continuation the service refuses
+ * (a record was rewritten so that it would be listed twice or not at all) is
+ * never patched over: the listing is read again from its start.
+ */
+async function readHistory(pages: number): Promise<HistoryRead> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      let last = await commands.researchRuns();
+      let runs = last.runs;
+      let returned = last.runs.length;
+      let read = 1;
+      while (read < pages && last.next) {
+        last = await commands.researchRuns({ after: last.next });
+        runs = appendRunPage(runs, last.runs);
+        returned += last.runs.length;
+        read += 1;
+      }
+      return { runs, returned, last, pages: read };
+    } catch (e) {
+      if (attempt < 2 && isCommandError(e) && e.code === HISTORY_CHANGED) continue;
+      throw e;
+    }
   }
+}
+
+/** Stored runs on the pages after `last`, of a listing that returned `returned` runs so far. */
+function remainingAfter(last: RunHistoryPage, returned: number): number {
+  return last.next ? Math.max(0, last.total - last.unreadable - returned) : 0;
+}
+
+/** Runs the service returned on the pages held in `runs` (for `runsRemaining`). */
+let historyReturned = 0;
+
+async function reloadHistory(): Promise<void> {
+  const since = eventSerial;
+  const root = useResearch.getState().workspace?.root ?? null;
+  const history = await readHistory(historyPages);
+  // Another project was opened meanwhile: its own read follows.
+  if ((useResearch.getState().workspace?.root ?? null) !== root) return;
+  historyPages = history.pages;
+  historyReturned = history.returned;
+  useResearch.setState((state) => ({
+    runs: mergeSnapshot(state.runs, history.runs, (r) => r.id, changedSince("run", since)),
+    runsNext: history.last.next ?? null,
+    runsRemaining: remainingAfter(history.last, history.returned),
+    runsUnreadable: history.last.unreadable,
+  }));
+}
+
+/**
+ * Re-read the run history as far as it is loaded (every page loaded so far,
+ * so a refresh never drops the runs of later pages).
+ */
+export function refreshRuns(): Promise<void> {
+  return queueHistory(async () => {
+    try {
+      await reloadHistory();
+    } catch (e) {
+      if (!(isCommandError(e) && e.code === "research.noWorkspace")) useResearch.setState({ error: errorMessage(e) });
+    }
+  });
+}
+
+/** Read the next page of the run history and add its runs to the list. */
+export function loadMoreRuns(): Promise<void> {
+  return queueHistory(async () => {
+    const after = useResearch.getState().runsNext;
+    if (!after) return;
+    const root = useResearch.getState().workspace?.root ?? null;
+    useResearch.setState({ runsLoadingMore: true });
+    try {
+      const page = await commands.researchRuns({ after });
+      if ((useResearch.getState().workspace?.root ?? null) !== root) return;
+      historyPages += 1;
+      historyReturned += page.runs.length;
+      useResearch.setState((state) => ({
+        runs: appendRunPage(state.runs, page.runs),
+        runsNext: page.next ?? null,
+        runsRemaining: remainingAfter(page, historyReturned),
+        runsUnreadable: page.unreadable,
+      }));
+    } catch (e) {
+      if (isCommandError(e) && e.code === HISTORY_CHANGED) {
+        // The pages loaded no longer line up with the rest: read them again
+        // together with the page asked for.
+        historyPages += 1;
+        try {
+          await reloadHistory();
+        } catch (again) {
+          historyPages -= 1;
+          useResearch.setState({ error: errorMessage(again) });
+        }
+      } else {
+        useResearch.setState({ error: errorMessage(e) });
+      }
+    } finally {
+      useResearch.setState({ runsLoadingMore: false });
+    }
+  });
+}
+
+/** A run by id: listed in the loaded history, or read on its own (`lookupRun`). */
+export function findRun(state: ResearchState, runId: string | null | undefined): RunSummary | undefined {
+  if (!runId) return undefined;
+  return state.runs.find((r) => r.id === runId) ?? state.lookups[runId] ?? undefined;
+}
+
+const lookingUp = new Set<string>();
+
+/**
+ * Read one run that the loaded pages of the history do not list. "Not
+ * loaded" is not "does not exist": the run is asked for by id, and only the
+ * service's answer that there is no such run records it as missing.
+ */
+export async function lookupRun(runId: string): Promise<void> {
+  const state = useResearch.getState();
+  if (state.runs.some((r) => r.id === runId) || runId in state.lookups || lookingUp.has(runId)) return;
+  const root = state.workspace?.root ?? null;
+  lookingUp.add(runId);
+  try {
+    const run = summaryOfManifest(await commands.researchRun(runId));
+    if ((useResearch.getState().workspace?.root ?? null) !== root) return;
+    useResearch.setState((s) => ({ lookups: { ...s.lookups, [runId]: run } }));
+  } catch (e) {
+    if ((useResearch.getState().workspace?.root ?? null) !== root) return;
+    if (isCommandError(e) && e.code === "research.unknownRun") {
+      useResearch.setState((s) => ({ lookups: { ...s.lookups, [runId]: null } }));
+    }
+  } finally {
+    lookingUp.delete(runId);
+  }
+}
+
+/**
+ * The run with `runId` for a view that shows one run (an inspector, a figure
+ * card): `undefined` while it is not known yet, `null` when the project has
+ * no such run. A run the loaded pages do not list is read on its own.
+ */
+export function useRun(runId: string | null | undefined): RunSummary | null | undefined {
+  const listed = useResearch((s) => (runId ? s.runs.find((r) => r.id === runId) : undefined));
+  const lookedUp = useResearch((s) => (runId ? s.lookups[runId] : undefined));
+  // With every page loaded the list is the whole history.
+  const more = useResearch((s) => s.runsNext !== null);
+  useEffect(() => {
+    if (runId && !listed && more) void lookupRun(runId);
+  }, [runId, listed, more, lookedUp]);
+  if (!runId) return null;
+  if (listed) return listed;
+  if (lookedUp !== undefined) return lookedUp;
+  return more ? undefined : null;
 }
 
 /** Increases with every environment load; an older load's result is dropped. */
