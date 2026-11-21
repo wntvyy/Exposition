@@ -4,6 +4,7 @@
 // plans and applies at once, the paste destination is shown, and a
 // right-click on an unselected row selects it alone.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { Children, type ReactElement, type ReactNode } from "react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { FileEntry } from "../../bindings/FileEntry";
@@ -45,7 +46,7 @@ import { registry } from "../../app/registry";
 import { ConfirmHost } from "../../ui/components";
 import { opHistory } from "../operations/client";
 import { operationCommands, resetSurfacesForTests } from "../operations/surfaces";
-import { FilesView } from "./FilesView";
+import { FilesView, renderEntries } from "./FilesView";
 import { useWorkspace } from "./store";
 
 const entry = (path: string, kind: "file" | "directory" = "file"): FileEntry => ({
@@ -154,6 +155,32 @@ describe("Files explorer operations", () => {
   });
 
   // UI-8: Discard removes the only copy of recovered text; the banner says so.
+  it("builds rows only for expanded folders and keeps the rows of unchanged files (perf FE-5)", () => {
+    const dirs = useWorkspace.getState().dirs;
+    const root = dirs[""]!.entries!;
+    const rows = (expanded: string[]) => renderEntries(root, dirs, new Set(expanded)) as ReactElement<{ children?: ReactNode }>[];
+    const collapsed = rows([]);
+    // The loaded listing of a collapsed folder is not built into the tree.
+    expect(Children.toArray(collapsed[0]!.props.children)).toHaveLength(0);
+    const open = rows(["chapters"]);
+    expect(Children.toArray(open[0]!.props.children)).toHaveLength(1);
+    // A file's row is the same element as long as its entry object is.
+    expect(open[1]).toBe(collapsed[1]);
+    expect(open[2]).toBe(collapsed[2]);
+    const changed = [root[0]!, { ...root[1]!, size: 99 }, root[2]!];
+    const next = renderEntries(changed, dirs, new Set()) as ReactElement[];
+    expect(next[1]).not.toBe(collapsed[1]);
+    expect(next[2]).toBe(collapsed[2]);
+
+    // In the tree: expanding shows the folder's files, collapsing removes them.
+    render(<FilesView />);
+    expect(screen.getByTestId("file-tree").querySelector('[data-path="chapters/one.typ"]')).toBeNull();
+    act(() => useWorkspace.setState({ expanded: new Set(["chapters"]) } as never));
+    expect(row("chapters/one.typ")).toBeTruthy();
+    act(() => useWorkspace.setState({ expanded: new Set() } as never));
+    expect(screen.getByTestId("file-tree").querySelector('[data-path="chapters/one.typ"]')).toBeNull();
+  });
+
   it("states that discarded recovered changes cannot be restored", () => {
     useWorkspace.setState({
       recovery: [{ id: "r1", path: "main.typ", savedAt: 0, length: 3, disk: "unchanged", problem: null, location: null }],

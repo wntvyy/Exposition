@@ -49,7 +49,8 @@ vi.mock("../editor/documentClient", () => ({ disposeAllHandles: vi.fn(), fileKey
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ setTitle: async () => {} }) }));
 
-const { forgetRecent, openWorkspace, reopenLastProject, samePath, startWorkspaceEvents, useWorkspace } = await import("./store");
+const { forgetRecent, loadDir, openWorkspace, reopenLastProject, samePath, shareEntries, startWorkspaceEvents, useWorkspace } =
+  await import("./store");
 const { resetAppSettingsForTests } = await import("../editor/settings");
 const { resetSettingsWarnings } = await import("../settings/warnings");
 
@@ -202,5 +203,87 @@ describe("opening another folder while one is open (project switch)", () => {
     expect(notifications.notify).toHaveBeenCalledWith(
       expect.objectContaining({ tone: "warning", title: "Did not open beta", body: "Not saved: main.tex. thesis is still open." }),
     );
+  });
+});
+
+describe("folder listings (perf FE-5 / WS-7)", () => {
+  const entry = (path: string, size: number | null = 1) => ({
+    name: path.split("/").pop() ?? path,
+    path,
+    kind: "file" as const,
+    size,
+    link: false,
+    unavailable: null,
+  });
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => (resolve = r));
+    return { promise, resolve };
+  };
+
+  it("lists a folder with one request at a time; requests made meanwhile share one more listing", async () => {
+    const first = deferred<unknown[]>();
+    const second = deferred<unknown[]>();
+    const answers = [first.promise, second.promise];
+    ipc.commands.workspaceListDir.mockReset();
+    ipc.commands.workspaceListDir.mockImplementation(((path: string | null) =>
+      path === "flat" ? answers.shift() : Promise.resolve([])) as never);
+    const flatCalls = () => (ipc.commands.workspaceListDir.mock.calls as unknown[][]).filter((call) => call[0] === "flat");
+    const a = loadDir("flat");
+    // A burst of change notifications while the listing is in flight.
+    const b = loadDir("flat");
+    const c = loadDir("flat");
+    void loadDir("other");
+    expect(flatCalls()).toHaveLength(1);
+    first.resolve([entry("flat/a.txt")]);
+    await Promise.resolve();
+    await Promise.resolve();
+    // The listing that was running may predate the changes: one more, not two.
+    await vi.waitFor(() => expect(flatCalls()).toHaveLength(2));
+    second.resolve([entry("flat/a.txt"), entry("flat/b.txt")]);
+    await Promise.all([a, b, c]);
+    expect(flatCalls()).toHaveLength(2);
+    expect(useWorkspace.getState().dirs.flat?.entries?.map((e) => e.path)).toEqual(["flat/a.txt", "flat/b.txt"]);
+    // Idle again: the next request lists again.
+    ipc.commands.workspaceListDir.mockResolvedValue([entry("flat/a.txt")] as never);
+    await loadDir("flat");
+    expect(useWorkspace.getState().dirs.flat?.entries?.map((e) => e.path)).toEqual(["flat/a.txt"]);
+  });
+
+  it("an unchanged listing changes nothing; a changed one keeps the objects of unchanged entries", async () => {
+    ipc.commands.workspaceListDir.mockResolvedValue([entry("a.txt"), entry("b.txt")] as never);
+    await loadDir("");
+    const before = useWorkspace.getState().dirs;
+    const updates = vi.fn();
+    const off = useWorkspace.subscribe(updates);
+    ipc.commands.workspaceListDir.mockResolvedValue([entry("a.txt"), entry("b.txt")] as never);
+    await loadDir("");
+    expect(updates).not.toHaveBeenCalled();
+    expect(useWorkspace.getState().dirs).toBe(before);
+
+    ipc.commands.workspaceListDir.mockResolvedValue([entry("a.txt"), entry("b.txt", 2), entry("c.txt")] as never);
+    await loadDir("");
+    off();
+    expect(updates).toHaveBeenCalledTimes(1);
+    const after = useWorkspace.getState().dirs[""]?.entries ?? [];
+    expect(after.map((e) => e.path)).toEqual(["a.txt", "b.txt", "c.txt"]);
+    expect(after[0]).toBe(before[""]?.entries?.[0]);
+    expect(after[1]).not.toBe(before[""]?.entries?.[1]);
+    expect(after[1]?.size).toBe(2);
+    expect(shareEntries([], [])).toEqual([]);
+  });
+
+  it("drops the answer of a listing that was requested for a folder that is no longer open", async () => {
+    const slow = deferred<unknown[]>();
+    ipc.commands.workspaceListDir.mockReset();
+    ipc.commands.workspaceListDir.mockReturnValueOnce(slow.promise as never).mockResolvedValue([entry("new.txt")] as never);
+    const stale = loadDir("");
+    ipc.commands.settingsGet.mockResolvedValue({ settings: settings(false), warning: null });
+    ipc.commands.workspaceOpen.mockResolvedValue({ root: "C:\other", name: "other", recovery: [] });
+    expect(await openWorkspace("C:\other")).toBe(true);
+    await vi.waitFor(() => expect(useWorkspace.getState().dirs[""]?.entries?.map((e) => e.path)).toEqual(["new.txt"]));
+    slow.resolve([entry("old-project.txt")]);
+    await stale;
+    expect(useWorkspace.getState().dirs[""]?.entries?.map((e) => e.path)).toEqual(["new.txt"]);
   });
 });

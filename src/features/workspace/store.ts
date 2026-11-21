@@ -57,14 +57,76 @@ const setDir = (path: string, patch: Partial<DirState>) =>
     dirs: { ...s.dirs, [path]: { entries: null, loading: false, error: null, ...s.dirs[path], ...patch } },
   }));
 
-export async function loadDir(path: string): Promise<void> {
-  setDir(path, { loading: true });
+const sameEntry = (a: FileEntry, b: FileEntry) =>
+  a.name === b.name && a.kind === b.kind && a.size === b.size && a.link === b.link && a.unavailable === b.unavailable;
+
+/**
+ * A new listing with the previous entry objects kept wherever an entry did
+ * not change, and the previous array itself when nothing changed: the tree
+ * renders per entry object, so an unchanged listing renders nothing and a
+ * listing with one new file renders one row.
+ */
+export function shareEntries(previous: FileEntry[] | null | undefined, next: FileEntry[]): FileEntry[] {
+  if (!previous) return next;
+  const known = new Map(previous.map((entry) => [entry.path, entry]));
+  let unchanged = previous.length === next.length;
+  const shared = next.map((entry, index) => {
+    const old = known.get(entry.path);
+    const kept = old && sameEntry(old, entry) ? old : entry;
+    if (kept !== previous[index]) unchanged = false;
+    return kept;
+  });
+  return unchanged ? previous : shared;
+}
+
+/**
+ * Folder listings in flight. A folder is listed by one request at a time;
+ * requests made meanwhile (a burst of watcher batches, an operation and its
+ * watcher event) are answered by one more listing after it, which sees
+ * everything that changed before it started.
+ */
+const listings = new Map<string, { again: boolean; done: Promise<void> }>();
+/** Bumped whenever the listings are reset (another folder, or none): answers of earlier requests are dropped. */
+let listingEpoch = 0;
+
+function resetListings() {
+  listingEpoch += 1;
+  listings.clear();
+}
+
+async function listOnce(path: string, epoch: number): Promise<void> {
+  // A folder that is already listed keeps showing its entries while it is listed again.
+  if (!useWorkspace.getState().dirs[path]?.entries) setDir(path, { loading: true });
   try {
     const entries = await commands.workspaceListDir(path === ROOT ? null : path);
-    setDir(path, { entries, loading: false, error: null });
+    if (epoch !== listingEpoch) return;
+    const current = useWorkspace.getState().dirs[path];
+    const shared = shareEntries(current?.entries, entries);
+    if (current && current.entries === shared && !current.loading && current.error === null) return;
+    setDir(path, { entries: shared, loading: false, error: null });
   } catch (error) {
+    if (epoch !== listingEpoch) return;
     setDir(path, { loading: false, error: errorMessage(error) });
   }
+}
+
+export function loadDir(path: string): Promise<void> {
+  const active = listings.get(path);
+  if (active) {
+    active.again = true;
+    return active.done;
+  }
+  const epoch = listingEpoch;
+  const listing = { again: false, done: Promise.resolve() };
+  listings.set(path, listing);
+  listing.done = (async () => {
+    do {
+      listing.again = false;
+      await listOnce(path, epoch);
+    } while (listing.again && epoch === listingEpoch);
+    if (listings.get(path) === listing) listings.delete(path);
+  })();
+  return listing.done;
 }
 
 export function setExpanded(keys: Set<string>) {
@@ -115,6 +177,7 @@ function setWindowTitle(name: string | null) {
 function applyInfo(info: WorkspaceInfo) {
   // Undo of project operations is kept per project (across restarts).
   opHistory.setScope(info.root);
+  resetListings();
   useWorkspace.setState({
     info,
     dirs: {},
@@ -270,6 +333,7 @@ export async function openFolderDialog(): Promise<void> {
 export async function closeWorkspace(): Promise<void> {
   if (!(await closeFileEditors())) return;
   await commands.workspaceClose();
+  resetListings();
   useWorkspace.setState({ info: null, dirs: {}, expanded: new Set(), recovery: [] });
   setWindowTitle(null);
   void refreshRecent();
@@ -385,6 +449,7 @@ export function startWorkspaceEvents() {
         // recovery journals); tabs of its files no longer refer to anything.
         dropFileTabs();
         opHistory.setScope(null);
+        resetListings();
         useWorkspace.setState({ info: null, dirs: {}, expanded: new Set(), recovery: [] });
         setWindowTitle(null);
         break;
