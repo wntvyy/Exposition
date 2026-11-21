@@ -245,6 +245,26 @@ describe("PreviewController", () => {
     controller.dispose();
   });
 
+  it("subscribes again with the next controller when the subscription failed", async () => {
+    ipc.workspace.mockReset();
+    ipc.workspace.mockImplementationOnce(async () => {
+      throw new Error("event system not ready");
+    });
+    ipc.workspace.mockImplementation(async () => ipc.workspaceOff);
+    const first = await setup("x", () => []);
+    expect(ipc.workspace).toHaveBeenCalledTimes(1);
+    // The first controller is still there; the second one subscribes anyway.
+    const second = await setup("![a](a.png)", () => [found("a.png", 0)]);
+    expect(ipc.workspace).toHaveBeenCalledTimes(2);
+    const deliver = ipc.workspace.mock.calls[1]![0] as (event: unknown) => void;
+    const before = second.query.mock.calls.length;
+    deliver({ kind: "filesChanged", rescan: false, changes: [{ path: "a.png", kind: "modified" }] });
+    await vi.waitFor(() => expect(second.query.mock.calls.length).toBe(before + 1));
+    first.controller.dispose();
+    second.controller.dispose();
+    await vi.waitFor(() => expect(ipc.workspaceOff).toHaveBeenCalledTimes(1));
+  });
+
   it("shares one workspace-event subscription among all controllers (perf FE-8)", async () => {
     const answer = vi.fn(() => [found("a.png", 0)]);
     const first = await setup("![a](a.png) one", answer);

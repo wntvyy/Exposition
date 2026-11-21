@@ -531,7 +531,12 @@ export function dispatchWorkspaceEvent(event: WorkspaceEvent): void {
 function watchWorkspace() {
   if (workspaceWatch) return;
   try {
-    workspaceWatch = events.workspace(dispatchWorkspaceEvent);
+    const pending = events.workspace(dispatchWorkspaceEvent);
+    workspaceWatch = pending;
+    // A subscription that failed is forgotten, so the next controller tries again.
+    pending.catch(() => {
+      if (workspaceWatch === pending) workspaceWatch = null;
+    });
   } catch {
     // Not running inside the desktop shell (unit tests).
   }
