@@ -12,6 +12,14 @@
 //! transformed down the stack when they happen; a group such a change overlaps
 //! is blocked, and undoing it is refused rather than guessed.
 //!
+//! Both histories of a document are bounded by count and by bytes. Over the
+//! undo budget, whole steps are dropped: the oldest undo steps first, then
+//! the redo steps furthest from the current text; the step made last always
+//! stays. The rebase history keeps where each patch of a revision was and how
+//! long its text is, never the text; over its budget the oldest revisions are
+//! dropped, and an edit based on a dropped revision is refused
+//! (`HistoryUnavailable`) exactly like one older than the revision window.
+//!
 //! A document whose text mixes line endings (LF, CRLF, lone CR) is read-only
 //! for every origin until it is normalized: a change (edit, undo, or redo) is
 //! accepted only when its result no longer mixes them, or when it restores
@@ -31,10 +39,65 @@ use exposition_core::path::WorkspacePath;
 use exposition_core::text::{TextRange, utf16_len};
 use tokio::sync::broadcast;
 
-/// Revisions retained for rebasing stale edits and undo groups.
+/// Revisions retained for rebasing stale edits.
 const HISTORY_LIMIT: usize = 2048;
 /// Undo groups retained per document.
 const UNDO_LIMIT: usize = 1000;
+/// Bytes the undo and redo stacks of one document may hold together (the
+/// texts their patches put back, and their records: [`held`]). Four times the
+/// largest file that can be opened, and 1 MiB for records and the small steps
+/// in between: four full replacements of a 10 MiB document stay undoable, and
+/// a thousand steps that each put back less than 41 KiB reach the count limit
+/// first. The step made last is kept even when it alone is larger.
+pub const UNDO_BYTE_BUDGET: usize = 4 * crate::encoding::MAX_TEXT_BYTES as usize + 1024 * 1024;
+/// Bytes the rebase history of one document may hold (records only: [`held`]).
+/// The full window of 2,048 revisions of typing holds about 0.2 MiB; the
+/// budget is reached only by revisions of thousands of patches (replace all:
+/// a revision of 20,000 patches holds 0.23 MiB, so the 17 newest stay). The
+/// newest revision is kept even when it alone is larger.
+pub const HISTORY_BYTE_BUDGET: usize = 4 * 1024 * 1024;
+
+/// Bytes charged for the records of the histories, next to the text bytes of
+/// undo and redo patches. Their heap sizes are constants, so a history of
+/// many small patches is bounded like one of few large ones.
+#[doc(hidden)]
+pub mod held {
+    use super::{HistoryEntry, PatchShape, TextPatch, TextRange, UndoGroup};
+
+    /// One undo or redo step.
+    pub const UNDO_STEP: usize = size_of::<UndoGroup>();
+    /// One patch of a step, without its text.
+    pub const UNDO_PATCH: usize = size_of::<TextPatch>();
+    /// One range of the selections a step restores.
+    pub const SELECTION_RANGE: usize = size_of::<TextRange>();
+    /// One revision of the rebase history.
+    pub const REVISION: usize = size_of::<HistoryEntry>();
+    /// One patch of a revision.
+    pub const REVISION_PATCH: usize = size_of::<PatchShape>();
+}
+
+/// The bounds of the histories of each document of a service. The shipped
+/// values are the default; tests lower them to reach the bounds with small
+/// texts.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryLimits {
+    pub undo_groups: usize,
+    pub undo_bytes: usize,
+    pub history_entries: usize,
+    pub history_bytes: usize,
+}
+
+impl Default for HistoryLimits {
+    fn default() -> Self {
+        Self {
+            undo_groups: UNDO_LIMIT,
+            undo_bytes: UNDO_BYTE_BUDGET,
+            history_entries: HISTORY_LIMIT,
+            history_bytes: HISTORY_BYTE_BUDGET,
+        }
+    }
+}
 
 /// Deterministic work counters: bytes of document text copied and scanned by
 /// the service on the calling thread. For the scale benchmarks
@@ -70,17 +133,27 @@ pub mod work {
     }
 }
 
-/// Text bytes retained by the histories of one document (see
-/// [`DocumentService::retained`]).
+/// What the histories of one document hold (see
+/// [`DocumentService::retained`]). Every field but the two running totals is
+/// recounted from the histories when asked.
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RetainedHistory {
     pub undo_groups: usize,
+    /// Text bytes of the undo patches.
     pub undo_bytes: usize,
     pub redo_groups: usize,
+    /// Text bytes of the redo patches.
     pub redo_bytes: usize,
     pub history_entries: usize,
+    /// Bytes of the rebase history (records; it holds no text).
     pub history_bytes: usize,
+    /// Bytes of the undo and redo stacks: their text bytes and their records.
+    pub undo_redo_held: usize,
+    /// The running total the undo budget is compared with; equals `undo_redo_held`.
+    pub undo_redo_charged: usize,
+    /// The running total the history budget is compared with; equals `history_bytes`.
+    pub history_charged: usize,
 }
 
 /// Parameters for opening a document.
@@ -113,6 +186,7 @@ pub struct DocumentService {
 struct Inner {
     next_id: u64,
     documents: HashMap<DocumentId, DocState>,
+    limits: HistoryLimits,
 }
 
 struct DocState {
@@ -125,17 +199,66 @@ struct DocState {
     revision: u64,
     saved_revision: Option<u64>,
     text: Arc<str>,
-    /// Applied patches for each recent revision, relative to the revision before it.
+    /// The patches of each recent revision, relative to the revision before it.
     history: VecDeque<HistoryEntry>,
-    undo: Vec<UndoGroup>,
-    redo: Vec<UndoGroup>,
+    /// Bytes held by `history` ([`HistoryEntry::held`] of each entry).
+    history_held: usize,
+    /// Oldest step first; the next step to undo or redo is at the back.
+    undo: VecDeque<UndoGroup>,
+    redo: VecDeque<UndoGroup>,
+    /// Bytes held by `undo` and by `redo` ([`UndoGroup::held`] of each group).
+    undo_held: usize,
+    redo_held: usize,
 }
 
 struct HistoryEntry {
     revision: u64,
-    patches: Vec<TextPatch>,
+    patches: Vec<PatchShape>,
     /// Who made the change (for an undo or redo: who stepped the history).
     origin: EditOrigin,
+}
+
+impl HistoryEntry {
+    fn held(&self) -> usize {
+        held::REVISION + self.patches.len() * held::REVISION_PATCH
+    }
+}
+
+/// A patch as rebasing needs it: the range it replaced and the UTF-16 length
+/// of the text it put there.
+#[derive(Debug, Clone, Copy)]
+struct PatchShape {
+    range: TextRange,
+    inserted: u32,
+}
+
+/// What mapping a range through a patch reads of the patch.
+trait Shaped {
+    fn range(&self) -> TextRange;
+    /// UTF-16 length of the patch's text.
+    fn inserted(&self) -> u32;
+}
+
+impl Shaped for PatchShape {
+    fn range(&self) -> TextRange {
+        self.range
+    }
+    fn inserted(&self) -> u32 {
+        self.inserted
+    }
+}
+
+impl Shaped for TextPatch {
+    fn range(&self) -> TextRange {
+        self.range
+    }
+    fn inserted(&self) -> u32 {
+        utf16_len(&self.text) as u32
+    }
+}
+
+fn shapes(patches: &[TextPatch]) -> Vec<PatchShape> {
+    patches.iter().map(|p| PatchShape { range: p.range, inserted: p.inserted() }).collect()
 }
 
 struct UndoGroup {
@@ -153,6 +276,16 @@ struct UndoGroup {
     selection_after: Option<Vec<TextRange>>,
 }
 
+impl UndoGroup {
+    /// Bytes this group holds: the texts of its patches and its records.
+    fn held(&self) -> usize {
+        let ranges = |selection: &Option<Vec<TextRange>>| selection.as_ref().map_or(0, Vec::len);
+        held::UNDO_STEP
+            + self.inverse.iter().map(|p| held::UNDO_PATCH + p.text.len()).sum::<usize>()
+            + (ranges(&self.selection_before) + ranges(&self.selection_after)) * held::SELECTION_RANGE
+    }
+}
+
 impl Default for DocumentService {
     fn default() -> Self {
         Self::new()
@@ -161,8 +294,14 @@ impl Default for DocumentService {
 
 impl DocumentService {
     pub fn new() -> Self {
+        Self::with_limits(HistoryLimits::default())
+    }
+
+    /// A service whose documents keep their histories within `limits`.
+    #[doc(hidden)]
+    pub fn with_limits(limits: HistoryLimits) -> Self {
         let (events, _) = broadcast::channel(4096);
-        Self { inner: Mutex::new(Inner::default()), events }
+        Self { inner: Mutex::new(Inner { limits, ..Inner::default() }), events }
     }
 
     /// Subscribe to document events. Events for one document arrive in revision order.
@@ -205,8 +344,11 @@ impl DocumentService {
             saved_revision: Some(1),
             text: Arc::from(spec.text),
             history: VecDeque::new(),
-            undo: Vec::new(),
-            redo: Vec::new(),
+            history_held: 0,
+            undo: VecDeque::new(),
+            redo: VecDeque::new(),
+            undo_held: 0,
+            redo_held: 0,
         };
         let info = state.info();
         inner.documents.insert(id, state);
@@ -243,7 +385,7 @@ impl DocumentService {
         Ok(DocumentState { info: doc.info(), text: doc.text.to_string() })
     }
 
-    /// Text bytes held by the undo, redo, and rebase histories of a document.
+    /// What the undo, redo, and rebase histories of a document hold.
     #[doc(hidden)]
     pub fn retained(&self, id: &DocumentId) -> Result<RetainedHistory, TransactionError> {
         let inner = self.lock();
@@ -255,7 +397,10 @@ impl DocumentService {
             redo_groups: doc.redo.len(),
             redo_bytes: doc.redo.iter().map(|g| bytes(&g.inverse)).sum(),
             history_entries: doc.history.len(),
-            history_bytes: doc.history.iter().map(|e| bytes(&e.patches)).sum(),
+            history_bytes: doc.history.iter().map(HistoryEntry::held).sum(),
+            undo_redo_held: doc.undo.iter().chain(&doc.redo).map(UndoGroup::held).sum(),
+            undo_redo_charged: doc.undo_held + doc.redo_held,
+            history_charged: doc.history_held,
         })
     }
 
@@ -361,15 +506,24 @@ impl DocumentService {
         }
 
         // Phase 2: commit.
+        let limits = inner.limits;
         let mut applied = Vec::with_capacity(planned.len());
         for plan in planned {
             let doc = get_mut(&mut inner, &plan.document).expect("validated above");
             let previous_revision = doc.revision;
-            let inverse = inverse_patches(&doc.text, &plan.spans, &plan.patches);
-            let line_ending_changed =
-                doc.commit(plan.text, plan.patches.clone(), request.origin.clone(), plan.line_ending);
+            let shapes = shapes(&plan.patches);
+            let inverse = inverse_patches(&doc.text, &plan.spans, &shapes);
+            let line_ending_changed = doc.commit(plan.text, shapes, request.origin.clone(), plan.line_ending, &limits);
             doc.redo.clear();
-            record_undo(doc, &request, inverse, &plan.patches, &plan.spans, previous_revision, &plan.before_text);
+            doc.redo_held = 0;
+            let edit = RecordedEdit {
+                inverse,
+                applied: &plan.patches,
+                spans: &plan.spans,
+                previous_revision,
+                before_text: &plan.before_text,
+            };
+            record_undo(doc, &request, edit, &limits);
             let event = DocumentChanged {
                 document: doc.id.clone(),
                 transaction: Some(request.id.clone()),
@@ -414,12 +568,13 @@ impl DocumentService {
         kind: ChangeKind,
     ) -> Result<DocumentChanged, TransactionError> {
         let mut inner = self.lock();
+        let limits = inner.limits;
         let doc = get_mut(&mut inner, id)?;
         if let Some(reason) = &doc.read_only {
             return Err(TransactionError::ReadOnly { document: id.clone(), reason: reason.clone() });
         }
         let stack = if kind == ChangeKind::Undo { &doc.undo } else { &doc.redo };
-        let Some(group) = stack.last() else {
+        let Some(group) = stack.back() else {
             let action = if kind == ChangeKind::Undo { "undo" } else { "redo" };
             return Err(TransactionError::NothingToUndo { document: id.clone(), action: action.into() });
         };
@@ -439,10 +594,19 @@ impl DocumentService {
         if doc.line_ending == LineEnding::Mixed && line_ending == LineEnding::Mixed {
             return Err(TransactionError::MixedLineEndings { document: id.clone() });
         }
-        let group = if kind == ChangeKind::Undo { doc.undo.pop() } else { doc.redo.pop() }.expect("checked above");
+        let group = if kind == ChangeKind::Undo {
+            let group = doc.undo.pop_back().expect("checked above");
+            doc.undo_held -= group.held();
+            group
+        } else {
+            let group = doc.redo.pop_back().expect("checked above");
+            doc.redo_held -= group.held();
+            group
+        };
         let previous_revision = doc.revision;
-        let inverse = inverse_patches(&doc.text, &spans, &patches);
-        let line_ending_changed = doc.commit(text, patches.clone(), origin.clone(), line_ending);
+        let shapes = shapes(&patches);
+        let inverse = inverse_patches(&doc.text, &spans, &shapes);
+        let line_ending_changed = doc.commit(text, shapes, origin.clone(), line_ending, &limits);
         let selection =
             if kind == ChangeKind::Undo { group.selection_before.clone() } else { group.selection_after.clone() };
         // The opposite group keeps the original selections: undo restores
@@ -456,10 +620,16 @@ impl DocumentService {
             selection_before: group.selection_before,
             selection_after: group.selection_after,
         };
+        // The stacks hold at most the group limit together: this group came
+        // off the other stack.
         if kind == ChangeKind::Undo {
-            doc.redo.push(opposite);
+            doc.redo_held += opposite.held();
+            doc.redo.push_back(opposite);
+            doc.trim_undo(Newest::Redo, &limits);
         } else {
-            doc.undo.push(opposite);
+            doc.undo_held += opposite.held();
+            doc.undo.push_back(opposite);
+            doc.trim_undo(Newest::Undo, &limits);
         }
         let event = DocumentChanged {
             document: doc.id.clone(),
@@ -510,18 +680,59 @@ impl DocState {
     /// Record a new revision whose text has the line-ending convention
     /// `line_ending`. Returns true when that convention changed (the caller
     /// announces the new info).
-    fn commit(&mut self, text: String, patches: Vec<TextPatch>, origin: EditOrigin, line_ending: LineEnding) -> bool {
+    fn commit(
+        &mut self,
+        text: String,
+        patches: Vec<PatchShape>,
+        origin: EditOrigin,
+        line_ending: LineEnding,
+        limits: &HistoryLimits,
+    ) -> bool {
         self.revision += 1;
         work::copied(text.len());
         self.text = Arc::from(text);
-        self.history.push_back(HistoryEntry { revision: self.revision, patches, origin });
-        while self.history.len() > HISTORY_LIMIT {
-            self.history.pop_front();
+        let entry = HistoryEntry { revision: self.revision, patches, origin };
+        self.history_held += entry.held();
+        self.history.push_back(entry);
+        // Oldest revisions first; the newest one always stays. An edit based
+        // on a revision dropped here is refused by `rebase`.
+        while self.history.len() > limits.history_entries
+            || (self.history_held > limits.history_bytes && self.history.len() > 1)
+        {
+            let Some(dropped) = self.history.pop_front() else { break };
+            self.history_held -= dropped.held();
         }
         let changed = line_ending != self.line_ending;
         self.line_ending = line_ending;
         changed
     }
+
+    /// Bring the undo and redo stacks back within the byte budget by dropping
+    /// whole groups: the oldest undo groups first, then the redo groups
+    /// furthest from the current text (the bottom of each stack, which no
+    /// other group is relative to). The group made last, on top of the
+    /// `newest` stack, always stays, so the last step can be taken back even
+    /// when it alone exceeds the budget. Costs the dropped groups only.
+    fn trim_undo(&mut self, newest: Newest, limits: &HistoryLimits) {
+        while self.undo_held + self.redo_held > limits.undo_bytes {
+            if self.undo.len() > usize::from(newest == Newest::Undo) {
+                let Some(dropped) = self.undo.pop_front() else { break };
+                self.undo_held -= dropped.held();
+            } else if self.redo.len() > usize::from(newest == Newest::Redo) {
+                let Some(dropped) = self.redo.pop_front() else { break };
+                self.redo_held -= dropped.held();
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/// The stack whose top group is the step made last.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Newest {
+    Undo,
+    Redo,
 }
 
 struct PlannedEdit {
@@ -730,18 +941,17 @@ fn apply_patches(text: &str, patches: &[TextPatch]) -> Result<String, TextRange>
     Ok(splice(text, &locate(text, patches)?, patches))
 }
 
-/// Patches that undo `patches` (sorted, relative to `old`, at byte `spans`),
-/// relative to the new text.
-fn inverse_patches(old: &str, spans: &[Span], patches: &[TextPatch]) -> Vec<TextPatch> {
+/// Patches that undo the patches of shape `patches` (sorted, relative to
+/// `old`, at byte `spans`), relative to the new text.
+fn inverse_patches(old: &str, spans: &[Span], patches: &[PatchShape]) -> Vec<TextPatch> {
     let mut shift: i64 = 0;
     spans
         .iter()
         .zip(patches)
         .map(|(&(from, to), patch)| {
             let start = (i64::from(patch.range.start) + shift) as u32;
-            let inserted = utf16_len(&patch.text) as u32;
-            shift += i64::from(inserted) - i64::from(patch.range.len());
-            TextPatch { range: TextRange::new(start, start + inserted), text: old[from..to].to_owned() }
+            shift += i64::from(patch.inserted) - i64::from(patch.range.len());
+            TextPatch { range: TextRange::new(start, start + patch.inserted), text: old[from..to].to_owned() }
         })
         .collect()
 }
@@ -772,7 +982,7 @@ fn rebase(doc: &DocState, base_revision: u64, patches: &[TextPatch]) -> Result<V
 ///
 /// A concurrent insertion at the start of `range` lands before it; one at the
 /// end of a non-empty range lands after it; one strictly inside conflicts.
-fn map_range(range: TextRange, concurrent: &[TextPatch]) -> Option<TextRange> {
+fn map_range(range: TextRange, concurrent: &[impl Shaped]) -> Option<TextRange> {
     map_range_biased(range, concurrent, true)
 }
 
@@ -780,10 +990,11 @@ fn map_range(range: TextRange, concurrent: &[TextPatch]) -> Option<TextRange> {
 /// concurrent insertion at exactly the point of an empty `range` (another
 /// insertion) lands before it. Transforming two edits against each other must
 /// use opposite rules so both agree on the order.
-fn map_range_biased(range: TextRange, concurrent: &[TextPatch], ties_before: bool) -> Option<TextRange> {
+fn map_range_biased(range: TextRange, concurrent: &[impl Shaped], ties_before: bool) -> Option<TextRange> {
     let mut shift: i64 = 0;
     for q in concurrent {
-        let delta = utf16_len(&q.text) as i64 - i64::from(q.range.len());
+        let q = PatchShape { range: q.range(), inserted: q.inserted() };
+        let delta = i64::from(q.inserted) - i64::from(q.range.len());
         if q.range.is_empty() {
             let at = q.range.start;
             if at < range.start || (at == range.start && (ties_before || !range.is_empty())) {
@@ -804,28 +1015,31 @@ fn map_range_biased(range: TextRange, concurrent: &[TextPatch], ties_before: boo
     Some(TextRange::new(u32::try_from(start).ok()?, u32::try_from(end).ok()?))
 }
 
-fn map_patches(patches: &[TextPatch], through: &[TextPatch], ties_before: bool) -> Option<Vec<TextPatch>> {
-    patches
-        .iter()
-        .map(|p| map_range_biased(p.range, through, ties_before).map(|range| TextPatch { range, text: p.text.clone() }))
-        .collect()
+/// The ranges of `patches` mapped through `through`; `None` when any overlaps.
+fn map_ranges(patches: &[impl Shaped], through: &[impl Shaped], ties_before: bool) -> Option<Vec<TextRange>> {
+    patches.iter().map(|p| map_range_biased(p.range(), through, ties_before)).collect()
 }
 
 /// Re-express an undo stack after an unrecorded change `applied` (relative to
 /// the text before it). Each group's inverse is relative to the text with every
 /// group above it undone, so the change is transformed down the stack alongside
 /// the groups. The first group it overlaps is blocked; groups below a blocked
-/// group are unreachable by linear undo and are left as they are.
-fn transform_stack(stack: &mut [UndoGroup], applied: &[TextPatch]) {
-    let mut concurrent = applied.to_vec();
+/// group are unreachable by linear undo and are left as they are. Only ranges
+/// move: no text is copied and no group changes the bytes it holds.
+fn transform_stack(stack: &mut VecDeque<UndoGroup>, applied: &[TextPatch]) {
+    let mut concurrent = shapes(applied);
     for group in stack.iter_mut().rev() {
         if group.blocked {
             return;
         }
-        match (map_patches(&group.inverse, &concurrent, true), map_patches(&concurrent, &group.inverse, false)) {
+        match (map_ranges(&group.inverse, &concurrent, true), map_ranges(&concurrent, &group.inverse, false)) {
             (Some(inverse), Some(next)) => {
-                group.inverse = inverse;
-                concurrent = next;
+                for (patch, range) in group.inverse.iter_mut().zip(inverse) {
+                    patch.range = range;
+                }
+                for (shape, range) in concurrent.iter_mut().zip(next) {
+                    shape.range = range;
+                }
             }
             _ => {
                 group.blocked = true;
@@ -835,15 +1049,19 @@ fn transform_stack(stack: &mut [UndoGroup], applied: &[TextPatch]) {
     }
 }
 
-fn record_undo(
-    doc: &mut DocState,
-    request: &TransactionRequest,
+/// An edit that was just committed, as the undo stack records it.
+struct RecordedEdit<'a> {
+    /// Restores the text before the edit; relative to the new text.
     inverse: Vec<TextPatch>,
-    applied: &[TextPatch],
-    spans: &[Span],
+    /// The edit's patches, at byte `spans` of `before_text`.
+    applied: &'a [TextPatch],
+    spans: &'a [Span],
     previous_revision: u64,
-    before_text: &Arc<str>,
-) {
+    before_text: &'a Arc<str>,
+}
+
+fn record_undo(doc: &mut DocState, request: &TransactionRequest, edit: RecordedEdit<'_>, limits: &HistoryLimits) {
+    let RecordedEdit { inverse, applied, spans, previous_revision, before_text } = edit;
     let (key, merge) = match &request.undo {
         UndoBehavior::Skip => {
             transform_stack(&mut doc.undo, applied);
@@ -855,7 +1073,7 @@ fn record_undo(
     let selection_before = request.selection.as_ref().map(|s| s.before.clone());
     let selection_after = request.selection.as_ref().map(|s| s.after.clone());
     if merge
-        && let Some(top) = doc.undo.last_mut()
+        && let Some(top) = doc.undo.back_mut()
         && top.key == key
         && !top.blocked
         && std::mem::discriminant(&top.origin) == std::mem::discriminant(&request.origin)
@@ -863,13 +1081,17 @@ fn record_undo(
     {
         // The merged group's inverse is the single patch from the new text
         // to the group's start text.
+        let held_before = top.held();
         top.inverse = merged_inverse(before_text, &doc.text, &top.inverse, applied, spans)
             .unwrap_or_else(|| merged_inverse_by_rebuilding(before_text, &doc.text, &top.inverse));
         top.end_revision = doc.revision;
         top.selection_after = selection_after;
+        doc.undo_held = doc.undo_held - held_before + top.held();
+        // A group that grows is never cut: older groups make room for it.
+        doc.trim_undo(Newest::Undo, limits);
         return;
     }
-    doc.undo.push(UndoGroup {
+    let group = UndoGroup {
         key,
         origin: request.origin.clone(),
         inverse,
@@ -877,10 +1099,15 @@ fn record_undo(
         blocked: false,
         selection_before,
         selection_after,
-    });
-    if doc.undo.len() > UNDO_LIMIT {
-        doc.undo.remove(0);
+    };
+    doc.undo_held += group.held();
+    doc.undo.push_back(group);
+    if doc.undo.len() > limits.undo_groups
+        && let Some(dropped) = doc.undo.pop_front()
+    {
+        doc.undo_held -= dropped.held();
     }
+    doc.trim_undo(Newest::Undo, limits);
 }
 
 /// The inverse of an undo group after one more edit merged into it, the

@@ -243,11 +243,28 @@ impl Pair {
             assert_eq!((&shared_info, &*shared_text), (&a.info, a.text.as_str()), "{}", self.fail("shared_state"));
             let ra = self.new.retained(id).unwrap();
             let rb = self.base.retained(id).unwrap();
+            // These sequences stay far below the byte budgets, so the same
+            // groups and revisions are kept and the undo and redo stacks hold
+            // the same text. The bytes of the rebase history are not compared:
+            // the base keeps the text of every patch there, the service keeps
+            // each patch's range and length only (`tests/undo_budget.rs`
+            // covers what it holds and what the budgets drop).
             assert_eq!(
-                (ra.undo_groups, ra.undo_bytes, ra.redo_groups, ra.redo_bytes, ra.history_entries, ra.history_bytes),
-                (rb.undo_groups, rb.undo_bytes, rb.redo_groups, rb.redo_bytes, rb.history_entries, rb.history_bytes),
+                (ra.undo_groups, ra.undo_bytes, ra.redo_groups, ra.redo_bytes, ra.history_entries),
+                (rb.undo_groups, rb.undo_bytes, rb.redo_groups, rb.redo_bytes, rb.history_entries),
                 "{}",
                 self.fail(&format!("retained histories differ ({what})"))
+            );
+            assert_eq!(
+                (ra.undo_redo_charged, ra.history_charged),
+                (ra.undo_redo_held, ra.history_bytes),
+                "{}",
+                self.fail(&format!("running totals differ from a recount ({what})"))
+            );
+            assert!(
+                ra.undo_redo_held < new::UNDO_BYTE_BUDGET / 100 && ra.history_bytes < new::HISTORY_BYTE_BUDGET / 4,
+                "{}",
+                self.fail("the comparison is exact only below the budgets")
             );
             let since = a.info.revision.saturating_sub(3);
             assert_eq!(
