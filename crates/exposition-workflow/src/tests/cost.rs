@@ -101,3 +101,28 @@ fn the_service_listing_shows_every_state_change_of_a_run() {
     assert!(listed.iter().all(|s| s.state == WorkflowRunState::Succeeded && s.steps_done == s.steps_total));
     assert_eq!(f.service.store_counters().bodies_decoded - before, 1, "only the new record is decoded");
 }
+
+/// The listing's rows come from its index alone: it never reads a run's row,
+/// whose `deleted_at` lies behind the whole record text.
+#[test]
+fn a_listing_is_answered_from_its_index_without_reading_the_rows() {
+    let f = fixture();
+    let (_store, key, _) = store_with(&f, 3);
+    let conn = rusqlite::Connection::open(&f.db).unwrap();
+    for workflow in [None, Some("wf-x")] {
+        let plan: Vec<String> = conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", crate::store::LIST_SQL))
+            .unwrap()
+            .query_map(rusqlite::params![key, workflow, 100], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(plan.iter().any(|step| step.contains("USING COVERING INDEX runs_listing")), "{plan:?}");
+        assert!(!plan.iter().any(|step| step.contains("TEMP B-TREE")), "no separate sort: {plan:?}");
+    }
+    // A history written before the index existed gets it when it is opened.
+    conn.execute_batch("DROP INDEX runs_listing;").unwrap();
+    drop(conn);
+    let reopened = RunStore::open(Some(&f.db)).unwrap();
+    assert_eq!(reopened.list(&key, None, 100).unwrap().len(), 3);
+}

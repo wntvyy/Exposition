@@ -66,6 +66,13 @@ struct ListedSummaries {
     by_row: std::collections::HashMap<i64, (String, String, WorkflowRunSummary)>,
 }
 
+/// The rows of a listing, answered from the `runs_listing` index alone (a
+/// row without record text is skipped when its text is read).
+pub(crate) const LIST_SQL: &str =
+    "SELECT rowid, CAST(id AS TEXT), CAST(state AS TEXT) FROM runs INDEXED BY runs_listing
+     WHERE project = ?1 AND (?2 IS NULL OR workflow = ?2) AND deleted_at IS NULL
+     ORDER BY started_at DESC, id LIMIT ?3";
+
 /// At most this many decoded summaries are kept ([`ListedSummaries`]).
 const MAX_LISTED_SUMMARIES: usize = 2048;
 
@@ -153,6 +160,16 @@ impl RunStore {
         )
         .map_err(store_error)?;
         migrate(&conn)?;
+        // Everything a listing filters and orders by, so that it never
+        // touches the rows themselves: `deleted_at` is stored after the
+        // record text, and reading it from a row means walking the whole
+        // text (hundreds of pages for a large record) for every listed run.
+        // An extra index does not change what older versions read.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS runs_listing
+                 ON runs(project, started_at DESC, id, workflow, state, deleted_at);",
+        )
+        .map_err(store_error)?;
         Ok(Self { conn, path: path.map(Path::to_path_buf), counters: Default::default(), listed: Default::default() })
     }
 
@@ -240,22 +257,10 @@ impl RunStore {
         let _snapshot = self.conn.unchecked_transaction().map_err(store_error)?;
         // The index columns only; a record's text is read and decoded when
         // its summary is not already known.
-        let mut stmt = self
-            .conn
-            .prepare_cached(
-                "SELECT rowid, CAST(id AS TEXT), CAST(state AS TEXT), body IS NOT NULL FROM runs
-                 WHERE project = ?1 AND (?2 IS NULL OR workflow = ?2) AND deleted_at IS NULL
-                 ORDER BY started_at DESC, id LIMIT ?3",
-            )
-            .map_err(store_error)?;
+        let mut stmt = self.conn.prepare_cached(LIST_SQL).map_err(store_error)?;
         let rows: Vec<_> = stmt
             .query_map(params![project, workflow.map(|w| w.as_str()), limit.min(MAX_LIST) as i64], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, Option<String>>(1)?,
-                    r.get::<_, Option<String>>(2)?,
-                    r.get::<_, bool>(3)?,
-                ))
+                Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))
             })
             .map_err(store_error)?
             .collect();
@@ -274,7 +279,7 @@ impl RunStore {
         let mut out = Vec::new();
         for row in rows {
             // A malformed row is skipped, never fatal.
-            let Ok((rowid, Some(id), Some(state), true)) = row else { continue };
+            let Ok((rowid, Some(id), Some(state))) = row else { continue };
             if let Some((_, _, known)) =
                 self.listed.borrow().by_row.get(&rowid).filter(|(i, s, _)| *i == id && *s == state)
             {
