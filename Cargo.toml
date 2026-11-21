@@ -94,6 +94,17 @@ unsafe_code = "deny"
 # fast to rebuild.
 [profile.dev.package."*"]
 opt-level = 2
+# No debug info for dependencies: nobody steps through them here, and their
+# debug info was most of every link (see docs/performance.md for the numbers).
+debug = false
+
+# Workspace crates keep file and line numbers for panics and backtraces but not
+# variable-level debug info. Measured on the workspace test build: cold build
+# 20 min -> 14 min, peak build memory 15 GB -> 5 GB, artifacts 40 GB -> 12 GB,
+# rebuild after touching one mid-graph crate 174 s -> 51 s. For a debugger
+# session set CARGO_PROFILE_DEV_DEBUG=full for that build.
+[profile.dev]
+debug = "line-tables-only"
 
 # Release builds favour predictable build memory over the last few percent of
 # runtime: LTO across the Typst/PDF dependency graph exhausted memory on a
