@@ -26,8 +26,8 @@ use exposition_agents::tools::services::{
 };
 use exposition_agents::*;
 use exposition_agents::{attachments, prompt, tools};
-use exposition_core::document::EditOrigin;
 use exposition_core::artifact::{ArtifactId, ArtifactKind, ArtifactRecord};
+use exposition_core::document::EditOrigin;
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::TextRange;
 use exposition_graph::{
@@ -148,6 +148,7 @@ const LEMMA_A: &str = "Lemma (Mixing). The walk mixes in logarithmic time.";
 const LEMMA_B: &str = "Lemma (Cheeger). The conductance bounds the gap from below.";
 const LEAN: &str = "theorem spectral_gap : 1 = 1 := rfl\n";
 const CHAPTERS: usize = 20;
+const FIGURE: &str = "PNG!";
 
 fn filler(paragraph: usize) -> String {
     format!(
@@ -181,7 +182,11 @@ fn manuscript(bytes: usize) -> String {
 }
 
 fn chapter(i: usize) -> String {
-    if i == 3 { format!("= Chapter {i}\n\n{LEMMA_B}\n\n{}", filler(i)) } else { format!("= Chapter {i}\n\n{}", filler(i)) }
+    if i == 3 {
+        format!("= Chapter {i}\n\n{LEMMA_B}\n\n{}", filler(i))
+    } else {
+        format!("= Chapter {i}\n\n{}", filler(i))
+    }
 }
 
 struct Ids {
@@ -205,6 +210,8 @@ fn project(sizes: &Sizes) -> Project {
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let paper = manuscript(sizes.manuscript);
     write(&root, "paper.typ", &paper);
+    // The figure the recorded experiment produces.
+    write(&root, ".exposition/artifacts/run-1/fig.png", FIGURE);
     for i in 0..CHAPTERS {
         write(&root, &format!("chapters/ch{i:02}.typ"), &chapter(i));
     }
@@ -308,7 +315,7 @@ impl ToolServices for Recorder {
             scratch_path: None,
             media_type: "image/png".into(),
             size_bytes: 4,
-            content_hash: "sha256:00".into(),
+            content_hash: format!("sha256:{}", sha(FIGURE)),
         })
     }
 }
@@ -681,7 +688,10 @@ async fn b1_locate_a_theorem_and_its_dependencies() {
                 query("near", "neighborhood", "", theorem, "", 1),
                 tool("read", tools::READ_FILE, json!({"path": "paper.typ"})),
             ];
-            (script(calls, "The theorem is in paper.typ and depends on two lemmas."), request(&f.root, PermissionProfile::ReadOnly))
+            (
+                script(calls, "The theorem is in paper.typ and depends on two lemmas."),
+                request(&f.root, PermissionProfile::ReadOnly),
+            )
         },
         |f, h, ran| {
             // The graph's own answer, and the theorem's text, reached the agent.
@@ -709,12 +719,20 @@ async fn b2_edit_and_build_a_manuscript() {
         |f| {
             let calls = vec![
                 tool("r1", tools::READ_FILE, json!({"path": "paper.typ"})),
-                tool("e1", tools::EDIT_DOCUMENT, json!({"path": "paper.typ", "base_revision": "$ref:r1/revision",
-                    "edits": [{"old_text": "at least one half", "new_text": "at least one third"}]})),
+                tool(
+                    "e1",
+                    tools::EDIT_DOCUMENT,
+                    json!({"path": "paper.typ", "base_revision": "$ref:r1/revision",
+                    "edits": [{"old_text": "at least one half", "new_text": "at least one third"}]}),
+                ),
                 tool("b1", tools::BUILD_DOCUMENT, json!({"entry": "paper.typ", "engine": "auto"})),
                 tool("r2", tools::READ_FILE, json!({"path": "paper.typ"})),
-                tool("e2", tools::EDIT_DOCUMENT, json!({"path": "paper.typ", "base_revision": "$ref:r2/revision",
-                    "edits": [{"old_text": "mixes in logarithmic time", "new_text": "mixes in polylogarithmic time"}]})),
+                tool(
+                    "e2",
+                    tools::EDIT_DOCUMENT,
+                    json!({"path": "paper.typ", "base_revision": "$ref:r2/revision",
+                    "edits": [{"old_text": "mixes in logarithmic time", "new_text": "mixes in polylogarithmic time"}]}),
+                ),
                 tool("b2", tools::BUILD_DOCUMENT, json!({"entry": "paper.typ", "engine": "auto"})),
             ];
             (script(calls, "Edited twice; both builds succeeded."), request(&f.root, PermissionProfile::AutoApply))
@@ -762,8 +780,12 @@ async fn b3_run_an_experiment_and_insert_its_figure() {
         let version = h.service.project_permissions(&root).unwrap().permissions.unwrap().version;
         let calls = vec![
             tool("py", tools::RUN_PYTHON, json!({"code": "import fit\nfit.plot()\n"})),
-            tool("ins", tools::INSERT_ARTIFACT, json!({"path": "chapters/ch00.typ", "run_id": "$ref:py/run",
-                "artifact_id": "$ref:py/artifacts/0/id", "after_text": "", "caption": "Fit", "update_key": ""})),
+            tool(
+                "ins",
+                tools::INSERT_ARTIFACT,
+                json!({"path": "chapters/ch00.typ", "run_id": "$ref:py/run",
+                "artifact_id": "$ref:py/artifacts/0/id", "after_text": "", "caption": "Fit", "update_key": ""}),
+            ),
             tool("build", tools::BUILD_DOCUMENT, json!({"entry": "chapters/ch00.typ", "engine": "auto"})),
         ];
         let mut req = request(&f.root, PermissionProfile::AutoApply);
@@ -887,16 +909,24 @@ async fn b6_review_changes() {
         let mut calls = Vec::new();
         for (n, path) in files.iter().enumerate() {
             calls.push(tool(&format!("r{n}"), tools::READ_FILE, json!({"path": path})));
-            calls.push(tool(&format!("e{n}"), tools::EDIT_DOCUMENT, json!({"path": path,
+            calls.push(tool(
+                &format!("e{n}"),
+                tools::EDIT_DOCUMENT,
+                json!({"path": path,
                 "base_revision": format!("$ref:r{n}/revision"),
-                "edits": [{"old_text": "routine computation", "new_text": "short computation"}]})));
+                "edits": [{"old_text": "routine computation", "new_text": "short computation"}]}),
+            ));
         }
         // The same script serves the follow-up: its turns come after the first run's.
         let mut turns = script(calls, "Edited three files.")["turns"].as_array().unwrap().clone();
         for (n, path) in files.iter().enumerate() {
-            turns.push(json!({"steps": [tool(&format!("v{n}"), tools::READ_FILE, json!({"path": path}))], "chunkDelayMs": 0}));
+            turns.push(
+                json!({"steps": [tool(&format!("v{n}"), tools::READ_FILE, json!({"path": path}))], "chunkDelayMs": 0}),
+            );
         }
-        turns.push(json!({"steps": [{"text": "Three files have unsaved agent changes awaiting review."}], "chunkDelayMs": 0}));
+        turns.push(
+            json!({"steps": [{"text": "Three files have unsaved agent changes awaiting review."}], "chunkDelayMs": 0}),
+        );
         // Each chapter has the phrase once; the manuscript has it in every paragraph.
         let mut first_script = json!({"turns": turns});
         first_script["turns"][1]["steps"][0]["toolUse"]["input"]["edits"] =
@@ -1007,7 +1037,12 @@ async fn streaming_a_long_answer() {
             assert_eq!(ran.events.text, answer, "the streamed text is complete and in order");
         }
         let detail = h.service.task_detail(&ran.id).unwrap();
-        assert!(detail.transcript.iter().any(|item| matches!(item, TranscriptItem::AssistantText { text, .. } if *text == answer)));
+        assert!(
+            detail
+                .transcript
+                .iter()
+                .any(|item| matches!(item, TranscriptItem::AssistantText { text, .. } if *text == answer))
+        );
         if i > 0 {
             samples.push(ran.ms);
         }
@@ -1094,9 +1129,13 @@ async fn task_list_with_many_changed_files() {
             .collect();
         let edits: Vec<Value> = (0..sizes.files_per_task)
             .map(|k| {
-                tool(&format!("e{k}"), tools::EDIT_DOCUMENT, json!({"path": format!("work/t{t:03}/f{k}.typ"),
+                tool(
+                    &format!("e{k}"),
+                    tools::EDIT_DOCUMENT,
+                    json!({"path": format!("work/t{t:03}/f{k}.typ"),
                     "base_revision": format!("$ref:r{k}/revision"),
-                    "edits": [{"old_text": "MARKER-OLD", "new_text": "MARKER-NEW"}]}))
+                    "edits": [{"old_text": "MARKER-OLD", "new_text": "MARKER-NEW"}]}),
+                )
             })
             .collect();
         let script = json!({"turns": [
@@ -1171,8 +1210,9 @@ async fn follow_ups_repeat_the_graph_context() {
     let sizes = sizes();
     let f = project(&sizes);
     let mut h = bench(&f);
-    let turns: Vec<Value> =
-        (0..=sizes.followups).map(|i| json!({"steps": [{"text": format!("Answer {i}.")}], "chunkDelayMs": 0})).collect();
+    let turns: Vec<Value> = (0..=sizes.followups)
+        .map(|i| json!({"steps": [{"text": format!("Answer {i}.")}], "chunkDelayMs": 0}))
+        .collect();
     let first = run(&mut h, json!({"turns": turns}), request(&f.root, PermissionProfile::ReadOnly)).await;
     assert_eq!(first.summary.status, TaskStatus::Completed);
     let mut samples = Vec::new();
@@ -1204,7 +1244,16 @@ async fn follow_ups_repeat_the_graph_context() {
             ("conversationBytes", json!(total)),
             ("graphContextBytes", json!(block_bytes("<graph_context>"))),
             ("taskContextBytes", json!(block_bytes("<task_context>"))),
-            ("graphContextBlocks", json!(messages.iter().flat_map(|(_, c)| c.iter()).filter(|b| b["text"].as_str().is_some_and(|t| t.starts_with("<graph_context>"))).count())),
+            (
+                "graphContextBlocks",
+                json!(
+                    messages
+                        .iter()
+                        .flat_map(|(_, c)| c.iter())
+                        .filter(|b| b["text"].as_str().is_some_and(|t| t.starts_with("<graph_context>")))
+                        .count()
+                ),
+            ),
             ("detailResponseBytes", json!(detail)),
         ]),
     );
@@ -1260,9 +1309,10 @@ fn tool_definitions_size_and_build_time() {
     let mut per_tool = Map::new();
     let mut strict = 0;
     for d in tools::task_definitions(true) {
-        let bytes = json!({"name": d.name, "description": d.description, "input_schema": d.input_schema, "strict": d.strict})
-            .to_string()
-            .len();
+        let bytes =
+            json!({"name": d.name, "description": d.description, "input_schema": d.input_schema, "strict": d.strict})
+                .to_string()
+                .len();
         if d.strict {
             strict += d.input_schema.to_string().len();
         }
