@@ -283,8 +283,10 @@ file is kept aside, never deleted), or retry. Nothing replaces a damaged
 graph automatically. Consistent backups are kept in
 `.exposition/graph-backups/` (the newest 8): one after the first
 reconciliation of an open when the newest is more than a day old, and one
-before a schema upgrade. Recovery performs only an option the app offered,
-and never through a link. A folder that
+before a schema upgrade. There is no command to take a backup on request or
+to make Exposition read the whole project again on request: reconciliation
+and backups happen by themselves. Recovery performs only an option the app
+offered, and never through a link. A folder that
 cannot hold the graph (for example a read-only one, or a graph on read-only
 storage) gets a temporary graph: it is indexed and readable, but nothing
 curated persists and the Graph page offers no changes or saved layouts.
@@ -427,9 +429,13 @@ not change, and a `/1` definition that names one is refused.
 - **Conditions.** A step can run only when a fixed predicate on an earlier
   step's validated output holds; there is no expression language. The
   predicates: the Lean audit's verdict is one of a chosen set (Checked,
-  Checked with nonstandard axioms, Incomplete, Relies on compiled code,
-  Partially checked, Unverified, Errors; an overall verdict such as
-  "Errors (2)" counts as its class); a value at a JSON pointer (RFC 6901)
+  Checked with axioms, Incomplete (sorry), Relies on compiled code,
+  Partially checked, Not verified, Errors; an overall verdict such as
+  "Errors (2)" counts as its class). The editor and the run view show
+  verdicts in these words, the Lean view's; a definition file stores three
+  of them under older names ("Checked with nonstandard axioms",
+  "Incomplete", "Unverified"), and a condition described in a plan quotes
+  the stored name; a value at a JSON pointer (RFC 6901)
   in a JSON dataset of at most 1 MiB compared with a number (=, ≠, <, ≤, >,
   ≥) or with text or true/false (equal or not equal); or an optional output
   was produced. Each can be negated. A step that runs only when an output
@@ -1570,7 +1576,10 @@ otherwise. A third, `npm run e2e -- live-graph`, has the model read the project 
 Text files in UTF-8 (with or without BOM) and UTF-16 (with BOM) are edited
 byte-exactly, including CRLF line endings; files with mixed line endings open
 read-only until you normalize them. Saves are atomic and never touch the
-original on failure; unsaved work is recovered after a crash. Binary and
+original on failure; unsaved work is recovered after a crash: the Files view
+lists it as "Unsaved changes from a previous session" with Restore and
+Discard for each file, and says that discarded changes cannot be restored
+(Discard applies at once; the file on disk stays as it is). Binary and
 legacy-encoded files are not opened as text. **Save a Copy…** writes an
 open document's current text, unsaved edits included, to a new file; it
 never replaces an existing one.
@@ -1632,8 +1641,9 @@ actions, forms, and links in the PDF do nothing, nothing is loaded from the
 network, and text cannot be selected or searched. The first 2,000
 pages of a longer PDF are shown, and a page is drawn with at most about 16
 million pixels (a very large page or a high zoom is drawn at a lower
-resolution). A page that is being drawn cannot be interrupted. Password-protected PDFs (and other unsupported
-encryption), damaged or empty files, and files that are too large show one
+resolution). A page that is being drawn cannot be interrupted.
+Password-protected PDFs (and other unsupported encryption), damaged or empty
+files, and files that are too large show one
 short state; a page that cannot be drawn says so in its place. The tab follows
 the file when it is replaced on disk and when it is renamed in the explorer;
 after it is deleted or renamed outside the application the tab shows "PDF not
