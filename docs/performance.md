@@ -103,6 +103,7 @@ host at the `large` scale unless a row says otherwise; release-profile figures f
 |---|---|---|
 | One typed character, merged undo group | at most 2 copies of the text and 1 bytewise seek to the edit; no line-ending scan | 1 MiB: 40.3 → 2.0 ms; 10 MiB: 398 → 20 ms |
 | Undo | proportional to the touched region plus one copy | 10 MiB: 105 → 19.7 ms |
+| Undo and rebase history of a document | undo and redo steps together hold at most 41 MiB (the text they put back and their records); the rebase history holds patch ranges and lengths, no text, at most 4 MiB; trimming costs the dropped steps only | 50 full rewrites of a 2 MiB document: 209.7 → 41.9 MB retained (undo 104.9 → 41.9 MB in 20 steps, rebase history 104.9 MB → 3.8 KB); after undoing every step: 314.6 → 41.9 MB |
 | Recovery journal tick | no in-memory copy of the text; the I/O lock is held for validation and rename when the document did not change during the write | 10 MiB: 44 MB → 69 KB allocated per tick; bytes written unchanged |
 | Own-save disk check | read and hash; decode only when the hash differs | 10 MiB: 74 → 6.6 ms |
 | Changed-documents scan | O(documents × path depth) | 50 documents × 100k changes: 515 → 17 ms |
@@ -226,6 +227,8 @@ Adding one means adding a row here and a differential test.
 | Watcher backlog | workspace intake | — | drained each batch | 16,384 signals, then rescan |
 | Explorer listings in flight | workspace store | folder path | removed when the listing finishes; cleared on project change | folders in flight |
 | Sorted commands | command registry | registry version | any registration change | one array |
+| Undo and redo steps | `DocumentService`, per document | — | redo cleared by a new edit; all dropped when the document closes | 1,000 steps and 41 MiB (text put back and records); over it whole steps go, oldest undo steps first, then the furthest redo steps; the step made last always stays |
+| Rebase history | `DocumentService`, per document | revision | dropped when the document closes | 2,048 revisions and 4 MiB of patch ranges and lengths (no text); oldest first, the newest always stays; an edit based on a dropped revision is refused |
 
 The source index of a typesetting map and the per-file LaTeX offset index live
 for one extraction or one build and are not caches.
@@ -235,9 +238,6 @@ for one extraction or one build and are not caches.
 Measured and left for a decision, because the fix changes a format, a contract
 or product behaviour:
 
-- **Undo and rebase history have no byte bound.** Fifty external rewrites of a
-  2 MiB document retain 210 MB; only the counts (1,000 groups, 2,048 revisions)
-  limit it.
 - **Folders of 10,000 files.** Expanding one takes about 12 s; the shared tree
   needs virtualization.
 - **Workflow run records store the plan with every write.** A 97-step plan
