@@ -56,6 +56,8 @@ use crate::workspace::{self, FileError, ProjectFiles};
 /// Largest file text sent to the model in one read.
 pub const MAX_READ_BYTES: usize = 512 * 1024;
 const LIST_LIMIT: usize = 500;
+/// Entries a listing walks at most to serve a later page (`offset`).
+const LIST_SCAN_LIMIT: usize = 50_000;
 
 /// Document texts the agent has seen, by (document, revision). `edit_document`
 /// resolves `old_text` against the exact revision the agent read.
@@ -2185,6 +2187,7 @@ fn list_with_workspace(
     workspace: &WorkspaceService,
     dir: Option<&WorkspacePath>,
     recursive: bool,
+    limit: usize,
 ) -> Result<workspace::Listing, ToolOutput> {
     use exposition_workspace::types::EntryKind;
     let mut entries = Vec::new();
@@ -2197,7 +2200,7 @@ fn list_with_workspace(
             if item.unavailable.is_some() || item.kind == EntryKind::Other {
                 continue;
             }
-            if entries.len() >= LIST_LIMIT {
+            if entries.len() >= limit {
                 truncated = true;
                 break 'walk;
             }
@@ -2220,10 +2223,22 @@ fn list_with_workspace(
 
 fn list_files(env: &ToolEnv<'_>, input: ListFilesInput) -> Result<ToolOutput, ToolOutput> {
     let dir = parse_dir(&input.path)?;
-    let listing = match env.workspace {
-        Some(workspace) => list_with_workspace(workspace, dir.as_ref(), input.recursive)?,
-        None => env.files.list(dir.as_ref(), input.recursive, LIST_LIMIT).map_err(file_error)?,
+    // A later page walks the same deterministic order again and skips what
+    // the earlier pages held (`offset` counts entries of the walk, before the
+    // task's scope hides any, so it names no path).
+    let offset = usize::try_from(input.offset).unwrap_or(usize::MAX);
+    if offset > LIST_SCAN_LIMIT - LIST_LIMIT {
+        return Err(ToolOutput::error(format!(
+            "offset {} is beyond what one listing walks ({LIST_SCAN_LIMIT} entries). List a subfolder instead.",
+            input.offset
+        )));
+    }
+    let limit = offset + LIST_LIMIT;
+    let mut listing = match env.workspace {
+        Some(workspace) => list_with_workspace(workspace, dir.as_ref(), input.recursive, limit)?,
+        None => env.files.list(dir.as_ref(), input.recursive, limit).map_err(file_error)?,
     };
+    listing.entries.drain(..offset.min(listing.entries.len()));
     let open: HashMap<String, (u64, bool)> = env
         .documents
         .list()
@@ -2252,6 +2267,14 @@ fn list_files(env: &ToolEnv<'_>, input: ListFilesInput) -> Result<ToolOutput, To
         })
         .collect();
     let mut result = json!({"entries": entries, "truncated": listing.truncated});
+    if listing.truncated {
+        // Not the whole listing: say so and how to get the rest.
+        result["nextOffset"] = json!(limit);
+        result["note"] = json!(format!(
+            "More entries exist than are listed here. Call list_files again with offset {limit} for the next ones, \
+             or list a subfolder."
+        ));
+    }
     if let Some(graph) = env.graph {
         let status = graph.service.status();
         result["graph"] = crate::graph::header(&status);
@@ -2279,12 +2302,18 @@ fn read_file(env: &ToolEnv<'_>, seen: &mut SeenTexts, input: ReadFileInput) -> R
     let id = workspace::open_document_in(env.workspace, env.documents, env.files, &path).map_err(file_error)?;
     let snapshot = env.documents.snapshot(&id).map_err(|e| ToolOutput::error(e.to_string()))?;
     let info = env.documents.info(&id).map_err(|e| ToolOutput::error(e.to_string()))?;
-    if snapshot.text.len() > MAX_READ_BYTES {
+    let partial = input.start_line > 0 || input.max_lines > 0;
+    if !partial && snapshot.text.len() > MAX_READ_BYTES {
         return Err(ToolOutput::error(format!(
-            "{path} is {} bytes, more than the {MAX_READ_BYTES}-byte limit for sending a file to the model.",
-            snapshot.text.len()
+            "{path} is {} bytes, more than the {MAX_READ_BYTES}-byte limit for sending a file to the model. Read it \
+             in parts: it has {} lines; give start_line and max_lines.",
+            snapshot.text.len(),
+            snapshot.text.split_inclusive('\n').count()
         )));
     }
+    let lines = if partial { Some(excerpt(&snapshot.text, input.start_line, input.max_lines)?) } else { None };
+    // The whole revision is remembered either way: edit_document resolves
+    // old_text against the exact revision read, not against an excerpt.
     seen.insert(&id, snapshot.revision, Arc::clone(&snapshot.text));
     // The workspace snapshot reports the hash of the exact bytes a save or a
     // build would use (the buffer encoded in its encoding).
@@ -2302,12 +2331,75 @@ fn read_file(env: &ToolEnv<'_>, seen: &mut SeenTexts, input: ReadFileInput) -> R
         "revision": snapshot.revision,
         "unsavedChanges": unsaved,
         "contentHash": content_hash,
-        "text": &*snapshot.text,
+        "text": lines.as_ref().map_or(&*snapshot.text, |lines| lines.text),
     });
+    if let Some(lines) = &lines {
+        // A partial read always says what it holds and whether that is all.
+        result["startLine"] = json!(lines.start);
+        result["endLine"] = json!(lines.end);
+        result["totalLines"] = json!(lines.total);
+        result["complete"] = json!(lines.start == 1 && lines.end == lines.total);
+        if lines.end < lines.total {
+            result["nextStartLine"] = json!(lines.end + 1);
+        }
+        result["note"] = json!(format!(
+            "Lines {}–{} of {} at revision {}. contentHash is the whole file's. edit_document takes this revision \
+             and looks for old_text in the whole file, so old_text must be unique in all of it.",
+            lines.start, lines.end, lines.total, snapshot.revision
+        ));
+    }
     if let Some(graph) = graph_info {
         result["graph"] = graph;
     }
     Ok(ToolOutput::ok(result))
+}
+
+/// Lines of a file for a partial read.
+struct Excerpt<'a> {
+    text: &'a str,
+    /// First and last line returned (1-based).
+    start: u64,
+    end: u64,
+    /// Lines in the file.
+    total: u64,
+}
+
+/// Lines `start_line..` of `text` (1-based; 0 means 1), `max_lines` at most
+/// (0: to the end) and [`MAX_READ_BYTES`] at most, cut at a line end. A line
+/// keeps its line break, so excerpts joined in order give the file.
+fn excerpt(text: &str, start_line: u64, max_lines: u64) -> Result<Excerpt<'_>, ToolOutput> {
+    let total = text.split_inclusive('\n').count() as u64;
+    let start = start_line.max(1);
+    if start > total.max(1) {
+        return Err(ToolOutput::error_with(
+            format!("start_line {start} is past the end of the file: it has {total} lines."),
+            json!({"totalLines": total}),
+        ));
+    }
+    let max = if max_lines == 0 { u64::MAX } else { max_lines };
+    let (mut from, mut to, mut taken) = (0usize, 0usize, 0u64);
+    let mut offset = 0usize;
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        let number = index as u64 + 1;
+        if number == start {
+            from = offset;
+            to = offset;
+        }
+        if number >= start {
+            if taken == max || to - from + line.len() > MAX_READ_BYTES {
+                break;
+            }
+            to += line.len();
+            taken += 1;
+        }
+        offset += line.len();
+    }
+    if taken == 0 && total > 0 {
+        return Err(ToolOutput::error(format!(
+            "Line {start} alone is longer than the {MAX_READ_BYTES}-byte limit for sending text to the model."
+        )));
+    }
+    Ok(Excerpt { text: &text[from..to], start, end: (start + taken).saturating_sub(1).max(start.min(total)), total })
 }
 
 /// Where an applied edit or insertion is (in every such result).
