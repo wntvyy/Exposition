@@ -11,6 +11,7 @@ use exposition_agents::credentials::MemoryStore;
 use exposition_agents::store::StoreStats;
 use exposition_agents::tools::services::UnavailableServices;
 use exposition_agents::*;
+use exposition_agents::prompt;
 use exposition_core::document::{
     ConflictPolicy, DocumentEdit, EditOrigin, TextPatch, TransactionId, TransactionRequest, UndoBehavior,
 };
@@ -292,4 +293,84 @@ async fn held_text_is_sent_while_the_stream_is_quiet() {
     .expect("the burst's tail arrived while the stream was quiet");
     tokio::time::timeout(Duration::from_secs(30), h.service.join(&task.id)).await.expect("task finished");
     assert_eq!(h.service.task(&task.id).unwrap().status, TaskStatus::Completed);
+}
+
+/// What the scripted provider reports as input tokens for a request that
+/// carries exactly `messages` (it counts what it is sent).
+fn scripted_input_tokens(messages: &[(String, Vec<Value>)]) -> u64 {
+    let chars: usize = messages.iter().map(|(_, content)| serde_json::to_string(content).unwrap().len()).sum();
+    (chars / 4 + prompt::SYSTEM_PROMPT.len() / 4) as u64
+}
+
+/// AGENTS-4. A run reads and parses the stored conversation once, not once
+/// per model request, and every request still carries exactly the stored
+/// conversation up to that point.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_reads_the_conversation_once_and_sends_all_of_it_every_turn() {
+    let h = harness();
+    let big = "y".repeat(40_000);
+    std::fs::write(h.project.path().join("big.typ"), format!("= Big\n{big}\n")).unwrap();
+    let mut calls = vec![tool("read", "read_file", json!({"path": "big.typ"}))];
+    for i in 0..10 {
+        calls.push(tool(&format!("l{i}"), "list_files", json!({"path": "", "recursive": false})));
+    }
+    // One more turn in the script, for the follow-up below.
+    let mut script = turns(calls);
+    script["turns"].as_array_mut().unwrap().push(json!({"steps": [{"text": "More."}], "chunkDelayMs": 0}));
+    let before = h.service.store_stats();
+    let task = run(&h, script, request(&h, PermissionProfile::ReadOnly)).await;
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert_eq!(task.usage.turns, 12);
+    let parsed = since(&h, before).transcript_bytes;
+
+    let store = exposition_agents::store::Store::open(&h._data.path().join("agents.sqlite3")).unwrap();
+    let messages = store.messages(&task.id).unwrap();
+    let total: usize = messages.iter().map(|(_, content)| serde_json::to_string(content).unwrap().len()).sum();
+    assert!(total > 40_000);
+    // Twelve requests re-reading a 40 KB conversation would parse about 450 KB.
+    assert!((parsed as usize) < 2 * total, "the run parsed {parsed} bytes of a {total}-byte conversation");
+
+    // Each request carried the whole conversation stored before it.
+    let sent = |messages: &[(String, Vec<Value>)]| -> u64 {
+        let requests = messages.iter().enumerate().filter(|(_, (role, _))| role == "assistant");
+        requests.map(|(index, _)| scripted_input_tokens(&messages[..index])).sum()
+    };
+    assert_eq!(task.usage.input_tokens, sent(&messages));
+
+    // A follow-up is a new run: it reads the conversation again, the follow-up included.
+    h.service.continue_task(&task.id, "And then?", None).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), h.service.join(&task.id)).await.expect("task finished");
+    let task = h.service.task(&task.id).unwrap();
+    assert_eq!((task.status.clone(), task.usage.turns), (TaskStatus::Completed, 13));
+    let messages = store.messages(&task.id).unwrap();
+    assert_eq!(messages.len(), 26);
+    assert_eq!(task.usage.input_tokens, sent(&messages));
+}
+
+/// AGENTS-10. Attachments are converted for the provider once per run (with
+/// the conversation, which is read once), and every request of the run still
+/// carries them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_request_of_a_run_carries_the_attachments() {
+    let h = harness();
+    let text = "attached line\n".repeat(2_000);
+    let encoded = exposition_agents::attachments::base64_encode(text.as_bytes());
+    let id = match h.service.add_attachment_bytes(Some("notes.txt"), Some("text/plain"), &encoded) {
+        exposition_agents::attachments::IngestOutcome::Added { attachment } => attachment.id,
+        exposition_agents::attachments::IngestOutcome::Rejected { message, .. } => panic!("{message}"),
+    };
+    let calls = (0..5).map(|i| tool(&format!("l{i}"), "list_files", json!({"path": "", "recursive": false}))).collect();
+    let mut req = request(&h, PermissionProfile::ReadOnly);
+    req.attachments = Some(vec![id]);
+    let before = h.service.store_stats();
+    let task = run(&h, turns(calls), req).await;
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert_eq!(task.usage.turns, 6);
+    // The provider was sent the attachment text with each of the six requests.
+    assert!(task.usage.input_tokens >= 6 * (text.len() as u64 / 4), "{:?}", task.usage);
+    // The stored conversation (which refers to the attachment) was read once.
+    let store = exposition_agents::store::Store::open(&h._data.path().join("agents.sqlite3")).unwrap();
+    let stored: usize =
+        store.messages(&task.id).unwrap().iter().map(|(_, c)| serde_json::to_string(c).unwrap().len()).sum();
+    assert!((since(&h, before).transcript_bytes as usize) < 2 * stored);
 }

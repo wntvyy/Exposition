@@ -2450,13 +2450,15 @@ impl Inner {
     /// snapshot), and another provider's private state is dropped (OpenAI
     /// reasoning items are only replayed to OpenAI; the OpenAI adapter drops
     /// Anthropic thinking itself). A missing snapshot fails the request with
-    /// an explanation; nothing is silently omitted.
+    /// an explanation; nothing is silently omitted. `total` is the encoded
+    /// size of the attachments of the conversation so far (the per-request
+    /// limit counts all of them); it grows by what `messages` carry.
     fn provider_messages(
         &self,
         kind: ProviderKind,
         messages: Vec<(String, Vec<Value>)>,
+        total: &mut u64,
     ) -> std::result::Result<Vec<ProviderMessage>, String> {
-        let mut total = 0u64;
         let mut out = Vec::with_capacity(messages.len());
         for (role, content) in messages {
             let mut blocks = Vec::with_capacity(content.len());
@@ -2475,8 +2477,8 @@ impl Inner {
                             .attachments
                             .get(&info.sha256)
                             .ok_or_else(|| format!("The attachment “{name}” is missing from storage, so this conversation cannot be sent again."))?;
-                        total += encoded_size(bytes.len() as u64);
-                        if total > att::MAX_REQUEST_BYTES {
+                        *total += encoded_size(bytes.len() as u64);
+                        if *total > att::MAX_REQUEST_BYTES {
                             return Err(format!(
                                 "The conversation's attachments exceed {} per request; start a new task to continue.",
                                 att::human_size(att::MAX_REQUEST_BYTES)
@@ -2888,6 +2890,8 @@ impl Inner {
                         started: Instant::now(),
                         paused: Duration::ZERO,
                         seen: SeenTexts::default(),
+                        history: None,
+                        attachment_bytes: 0,
                         authorized: HashMap::new(),
                         granted: HashMap::new(),
                         files,
@@ -3195,6 +3199,14 @@ struct Run<'a> {
     paused: Duration,
     base_elapsed: u64,
     seen: SeenTexts,
+    /// The conversation as the provider receives it, kept between the
+    /// requests of this run: read and converted once (attachments encoded
+    /// once), then extended by what each turn stores. `None` until the first
+    /// request, and whenever it must be read again. Only this run appends
+    /// messages while it is active, so it always equals the stored history.
+    history: Option<Vec<ProviderMessage>>,
+    /// Encoded size of the attachments in `history`.
+    attachment_bytes: u64,
     /// How each call of this run that is about to run, or ran, was authorized.
     authorized: HashMap<String, AuthorizedBy>,
     /// What the approval of a call granted for the rest of the task.
@@ -3262,6 +3274,32 @@ impl Run<'_> {
         None
     }
 
+    /// The conversation for the next request: the run's own copy, or (first
+    /// request of the run) the stored history, converted for the provider.
+    fn take_history(&mut self, kind: ProviderKind) -> Result<Vec<ProviderMessage>, TaskStatus> {
+        if let Some(history) = self.history.take() {
+            return Ok(history);
+        }
+        let stored =
+            self.inner.store.messages(&self.id).map_err(|e| TaskStatus::Failed { message: e.to_string() })?;
+        self.attachment_bytes = 0;
+        self.inner
+            .provider_messages(kind, stored, &mut self.attachment_bytes)
+            .map_err(|message| TaskStatus::Failed { message })
+    }
+
+    /// Add a message this run just stored to its copy of the conversation,
+    /// converted exactly as a stored message is.
+    fn remember(&mut self, kind: ProviderKind, role: &str, content: &[Value]) {
+        let Some(history) = self.history.as_mut() else { return };
+        let message = vec![(role.to_owned(), content.to_vec())];
+        match self.inner.provider_messages(kind, message, &mut self.attachment_bytes) {
+            Ok(added) => history.extend(added),
+            // The next request reads the stored history again (and reports why it cannot).
+            Err(_) => self.history = None,
+        }
+    }
+
     async fn drive(&mut self, provider: &dyn Provider) -> TaskStatus {
         self.set_status(TaskStatus::Running);
         if let Err(e) = self.inner.checkpoint(&self.id) {
@@ -3274,12 +3312,9 @@ impl Run<'_> {
             if let Some(status) = self.budget_before_request() {
                 return status;
             }
-            let messages = match self.inner.store.messages(&self.id) {
-                Ok(m) => match self.inner.provider_messages(provider.kind(), m) {
-                    Ok(messages) => messages,
-                    Err(message) => return TaskStatus::Failed { message },
-                },
-                Err(e) => return TaskStatus::Failed { message: e.to_string() },
+            let messages = match self.take_history(provider.kind()) {
+                Ok(messages) => messages,
+                Err(status) => return status,
             };
             // One request asks for the remaining output budget, at most the
             // per-turn limit or the model's own smaller limit. Only a request
@@ -3305,6 +3340,8 @@ impl Run<'_> {
             };
             // Whatever the stream delivered is sent before anything else is.
             deltas.flush();
+            // The conversation goes back to the run for the next request.
+            self.history = Some(request.messages);
             let response = match result {
                 Err(Interrupt::Stop(status)) => return status,
                 Err(Interrupt::Canceled) | Ok(Err(ProviderError::Canceled)) => return TaskStatus::Canceled,
@@ -3346,6 +3383,7 @@ impl Run<'_> {
                 if let Err(e) = self.inner.store.append_message(&self.id, "assistant", &content) {
                     return TaskStatus::Failed { message: e.to_string() };
                 }
+                self.remember(provider.kind(), "assistant", &content);
                 self.inner.emit(AgentEvent::TranscriptChanged { task_id: self.id.clone() });
             }
             // Only a response that ended normally completes the task, and only
@@ -3514,6 +3552,7 @@ impl Run<'_> {
         if let Err(e) = self.inner.store.append_message(&self.id, "user", &results) {
             return Some(TaskStatus::Failed { message: e.to_string() });
         }
+        self.remember(provider.kind(), "user", &results);
         self.set_status(TaskStatus::Running);
         self.inner.emit(AgentEvent::TranscriptChanged { task_id: self.id.clone() });
         self.inner.emit(AgentEvent::ReviewChanged { task_id: self.id.clone() });
@@ -4092,7 +4131,7 @@ impl Run<'_> {
                 _ => messages.push((role, content)),
             }
         }
-        self.inner.provider_messages(kind, messages)
+        self.inner.provider_messages(kind, messages, &mut 0)
     }
 
     /// A tool call of a discussion turn: read-only tools under the gate, and
