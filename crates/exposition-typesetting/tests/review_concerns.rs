@@ -137,7 +137,10 @@ fn a_missing_file_that_appears_and_an_evicted_build_concern_the_entry() {
     let notes = open(&fx, "notes.typ");
     let failed = fx.build();
     assert_eq!(failed.result.status, BuildStatus::Failed, "the include is missing");
-    assert!(!fx.service.change_concerns(&entry, &notes, 2), "open and unread");
+    // A build with a read that failed is concerned by every open document it
+    // did not compile: the missing file may be one of them under a new name
+    // (review S2).
+    assert!(fx.service.change_concerns(&entry, &notes, 2), "open and unread, but an include was missing");
     // The file is created and opened.
     std::fs::write(fx.root.join("chapter.typ"), "Chapter.\n").unwrap();
     let chapter = open(&fx, "chapter.typ");
@@ -163,7 +166,6 @@ fn a_missing_file_that_appears_and_an_evicted_build_concern_the_entry() {
 /// still answers "open at that build and not read": only the file watcher's
 /// change event rebuilds the entry.
 #[test]
-#[ignore = "review: suspicion - after a rename onto a missing include, change_concerns says no; the app relies on the file watcher"]
 fn a_document_renamed_onto_a_missing_include_concerns_the_entry() {
     let dir = project(&[("main.typ", "= Title\n#include \"chapter.typ\"\n"), ("draft.typ", "Draft.\n")]);
     let fx = Fixture::open_dir(dir.path(), "main.typ");

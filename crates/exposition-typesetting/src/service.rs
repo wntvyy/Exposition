@@ -72,6 +72,11 @@ pub struct BuildRecord {
     /// was taken, read or not. One of these that is not in `texts` was
     /// available to the build and not read by it.
     pub open_documents: Vec<DocumentId>,
+    /// A read of the build failed (a file that is missing or refused). What
+    /// such a build would read once the file exists is not known from it: a
+    /// document renamed or saved onto the missing path changes the result
+    /// without having been read.
+    pub unresolved_reads: bool,
     pub timings: BuildTimings,
 }
 
@@ -256,6 +261,7 @@ impl TypesettingService {
             map: if failed { None } else { output.map },
             texts: snapshot.buffer_texts().into_iter().collect(),
             open_documents: snapshot.open_documents(),
+            unresolved_reads: snapshot.has_failed_reads(),
             timings: BuildTimings { snapshot_ms, compile_ms: output.compile_ms, map_ms: output.map_ms, total_ms },
         });
         if !retain {
@@ -313,12 +319,14 @@ impl TypesettingService {
     /// its snapshot, and what it reads is decided by the files read so far, so
     /// a buffer it did not read cannot change the next build. A document
     /// opened after the build is not known to it and counts as a concern, as
-    /// does everything when the latest build is no longer retained.
+    /// does everything when the latest build is no longer retained, and every
+    /// document the build did not compile when one of its reads failed: the
+    /// file it missed may be this document under a new name.
     pub fn change_concerns(&self, entry: &WorkspacePath, document: &DocumentId, revision: u64) -> bool {
         let Some(record) = self.latest(entry) else { return true };
         match record.revision_of(document) {
             Some(compiled) => compiled < revision,
-            None => !record.open_documents.contains(document),
+            None => record.unresolved_reads || !record.open_documents.contains(document),
         }
     }
 
