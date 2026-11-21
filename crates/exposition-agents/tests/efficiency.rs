@@ -18,6 +18,7 @@ use exposition_core::path::WorkspacePath;
 use exposition_workspace::DocumentService;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::sync::broadcast;
 
 const MAIN: &str = "= Notes\nThe cat sat on the mat.\n";
 
@@ -208,4 +209,87 @@ async fn recording_an_edit_reads_one_file_record() {
     // Only the third edit finds an existing record: main.typ's three small texts.
     let read = since(&h, before).review_text_bytes;
     assert!(read < 1_000, "edits to main.typ read {read} bytes of review texts (big.typ's were read too)");
+}
+
+/// Every event of a task's run, in order.
+async fn events_of_run(h: &Harness, script: Value) -> (TaskSummary, Vec<AgentEvent>) {
+    let mut events = h.service.subscribe();
+    let task = run(h, script, request(h, PermissionProfile::ReadOnly)).await;
+    let mut seen = Vec::new();
+    loop {
+        match events.try_recv() {
+            Ok(event) => seen.push(event),
+            Err(broadcast::error::TryRecvError::Lagged(n)) => panic!("{n} events were dropped"),
+            Err(_) => break,
+        }
+    }
+    (task, seen)
+}
+
+/// AGENTS-7. Streamed deltas reach the webview joined into few events, with
+/// every character, in order, and before the stored message is announced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stream_deltas_are_joined_complete_and_in_order() {
+    let h = harness();
+    let words = 600;
+    let body: String = (0..words).map(|i| format!("word{i} ")).collect();
+    let script = json!({"turns": [{"chunkDelayMs": 0, "steps": [
+        {"thinking": "First thoughts. "}, {"text": body}, {"thinking": "Second thoughts."}, {"text": "The end."}
+    ]}]});
+    let (task, events) = events_of_run(&h, script).await;
+    assert_eq!(task.status, TaskStatus::Completed);
+    // Consecutive deltas of one kind, joined: exactly what the model streamed.
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    let mut deltas = 0;
+    let mut last_delta = 0;
+    for (index, event) in events.iter().enumerate() {
+        let (thinking, text) = match event {
+            AgentEvent::TextDelta { text, turn, .. } => (false, (text, turn)),
+            AgentEvent::ThinkingDelta { text, turn, .. } => (true, (text, turn)),
+            _ => continue,
+        };
+        assert_eq!(*text.1, 1);
+        assert!(!text.0.is_empty(), "an empty delta was sent");
+        deltas += 1;
+        last_delta = index;
+        match runs.last_mut() {
+            Some((kind, joined)) if *kind == thinking => joined.push_str(text.0),
+            _ => runs.push((thinking, text.0.clone())),
+        }
+    }
+    let expected = vec![
+        (true, "First thoughts. ".to_owned()),
+        (false, body.clone()),
+        (true, "Second thoughts.".to_owned()),
+        (false, "The end.".to_owned()),
+    ];
+    assert_eq!(runs, expected);
+    assert!(deltas <= words / 10, "{deltas} delta events for {words} streamed words");
+    let stored = events.iter().position(|e| matches!(e, AgentEvent::TranscriptChanged { .. })).unwrap();
+    assert!(last_delta < stored, "a delta arrived after the stored message was announced");
+}
+
+/// AGENTS-7. Text held back to be joined is sent while the stream is quiet:
+/// the tail of a burst does not wait for the model's next delta.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn held_text_is_sent_while_the_stream_is_quiet() {
+    let h = harness();
+    let mut events = h.service.subscribe();
+    let script = json!({"turns": [{"chunkDelayMs": 0, "steps": [
+        {"text": "alpha beta gamma"}, {"delayMs": 3000}, {"text": " omega"}
+    ]}]});
+    h.service.load_script(script).unwrap();
+    let task = h.service.create_task(request(&h, PermissionProfile::ReadOnly)).unwrap();
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_millis(1500), async {
+        while text != "alpha beta gamma" {
+            if let Ok(AgentEvent::TextDelta { text: delta, .. }) = events.recv().await {
+                text.push_str(&delta);
+            }
+        }
+    })
+    .await
+    .expect("the burst's tail arrived while the stream was quiet");
+    tokio::time::timeout(Duration::from_secs(30), h.service.join(&task.id)).await.expect("task finished");
+    assert_eq!(h.service.task(&task.id).unwrap().status, TaskStatus::Completed);
 }

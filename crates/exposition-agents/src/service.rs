@@ -3087,6 +3087,102 @@ fn stop_message(stop_reason: &str, unrun_calls: usize, output_limit: u32) -> Str
     }
 }
 
+/// How long streamed text is held to be sent with what follows it. A model
+/// streams many small deltas per second; each event sent to the webview
+/// costs an IPC message and a render there.
+const DELTA_INTERVAL: Duration = Duration::from_millis(25);
+/// Held text is sent at this size whatever the time.
+const DELTA_MAX_BYTES: usize = 16 * 1024;
+
+/// The stream of one model request, forwarded to the task's events with
+/// consecutive text (or thinking) deltas joined: the first delta after a
+/// pause goes out at once; what arrives within [`DELTA_INTERVAL`] of the last
+/// event is held and sent together. Nothing is dropped or reordered: a delta
+/// of the other kind, a reset, or a fallback sends the held text first, a
+/// timer sends it while the stream is quiet, and the end of the stream sends
+/// it before any other event of the task.
+struct StreamDeltas {
+    events: broadcast::Sender<AgentEvent>,
+    task_id: TaskId,
+    turn: u32,
+    held: Mutex<HeldDelta>,
+}
+
+struct HeldDelta {
+    thinking: bool,
+    text: String,
+    /// When this stream last sent a delta event.
+    sent: Option<Instant>,
+}
+
+impl StreamDeltas {
+    fn push(&self, event: StreamEvent) {
+        let event = match event {
+            StreamEvent::TextDelta(text) => return self.delta(false, &text),
+            StreamEvent::ThinkingDelta(text) => return self.delta(true, &text),
+            StreamEvent::Reset { reason } => {
+                AgentEvent::StreamReset { task_id: self.task_id.clone(), turn: self.turn, reason }
+            }
+            StreamEvent::Fallback { from, to } => AgentEvent::Fallback { task_id: self.task_id.clone(), from, to },
+            StreamEvent::MessageStart { .. } | StreamEvent::ToolUseStart { .. } => return,
+        };
+        self.flush();
+        let _ = self.events.send(event);
+    }
+
+    fn delta(&self, thinking: bool, text: &str) {
+        let mut held = lock(&self.held);
+        if held.thinking != thinking {
+            self.send(&mut held);
+            held.thinking = thinking;
+        }
+        held.text.push_str(text);
+        let due = held.sent.is_none_or(|sent| sent.elapsed() >= DELTA_INTERVAL);
+        if due || held.text.len() >= DELTA_MAX_BYTES {
+            self.send(&mut held);
+        }
+    }
+
+    fn send(&self, held: &mut HeldDelta) {
+        if held.text.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut held.text);
+        let (task_id, turn) = (self.task_id.clone(), self.turn);
+        let event = if held.thinking {
+            AgentEvent::ThinkingDelta { task_id, turn, text }
+        } else {
+            AgentEvent::TextDelta { task_id, turn, text }
+        };
+        held.sent = Some(Instant::now());
+        let _ = self.events.send(event);
+    }
+
+    /// Send what is held.
+    fn flush(&self) {
+        self.send(&mut lock(&self.held));
+    }
+
+    /// Run the provider's stream to its end, sending held text while the
+    /// stream is quiet (so the tail of a burst never waits for the next
+    /// delta) and when it ends.
+    async fn drive<T>(&self, stream: impl Future<Output = T>) -> T {
+        tokio::pin!(stream);
+        let mut tick = tokio::time::interval(DELTA_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                biased;
+                out = &mut stream => {
+                    self.flush();
+                    return out;
+                }
+                _ = tick.tick() => self.flush(),
+            }
+        }
+    }
+}
+
 /// One run of the task loop.
 struct Run<'a> {
     inner: &'a Arc<Inner>,
@@ -3200,12 +3296,15 @@ impl Run<'_> {
             };
             let turn = self.usage.turns + 1;
             self.inner.emit(AgentEvent::StreamStarted { task_id: self.id.clone(), turn });
-            let sink = self.sink(turn);
+            let deltas = self.deltas(turn);
+            let sink = |event: StreamEvent| deltas.push(event);
             let result = tokio::select! {
-                r = provider.stream(&request, &sink, &self.cancel) => Ok(r),
+                r = deltas.drive(provider.stream(&request, &sink, &self.cancel)) => Ok(r),
                 _ = self.cancel.cancelled() => Err(Interrupt::Canceled),
                 _ = tokio::time::sleep(self.remaining_wall()) => Err(Interrupt::WallTime),
             };
+            // Whatever the stream delivered is sent before anything else is.
+            deltas.flush();
             let response = match result {
                 Err(Interrupt::Stop(status)) => return status,
                 Err(Interrupt::Canceled) | Ok(Err(ProviderError::Canceled)) => return TaskStatus::Canceled,
@@ -3648,19 +3747,13 @@ impl Run<'_> {
         Err((interrupt, Some(output)))
     }
 
-    /// Forward a model request's stream to the task's events.
-    fn sink(&self, turn: u32) -> impl Fn(StreamEvent) + Send + Sync + use<> {
-        let events = self.inner.events.clone();
-        let task_id = self.id.clone();
-        move |event: StreamEvent| {
-            let event = match event {
-                StreamEvent::TextDelta(text) => AgentEvent::TextDelta { task_id: task_id.clone(), turn, text },
-                StreamEvent::ThinkingDelta(text) => AgentEvent::ThinkingDelta { task_id: task_id.clone(), turn, text },
-                StreamEvent::Reset { reason } => AgentEvent::StreamReset { task_id: task_id.clone(), turn, reason },
-                StreamEvent::Fallback { from, to } => AgentEvent::Fallback { task_id: task_id.clone(), from, to },
-                StreamEvent::MessageStart { .. } | StreamEvent::ToolUseStart { .. } => return,
-            };
-            let _ = events.send(event);
+    /// Forwards a model request's stream to the task's events.
+    fn deltas(&self, turn: u32) -> StreamDeltas {
+        StreamDeltas {
+            events: self.inner.events.clone(),
+            task_id: self.id.clone(),
+            turn,
+            held: Mutex::new(HeldDelta { thinking: false, text: String::new(), sent: None }),
         }
     }
 
@@ -3852,12 +3945,14 @@ impl Run<'_> {
             };
             let turn = self.usage.turns + 1;
             self.inner.emit(AgentEvent::StreamStarted { task_id: self.id.clone(), turn });
-            let sink = self.sink(turn);
+            let deltas = self.deltas(turn);
+            let sink = |event: StreamEvent| deltas.push(event);
             // `abort` is a child of the task's token: Cancel ends it too.
             let result = tokio::select! {
-                r = provider.stream(&request, &sink, abort) => Some(r),
+                r = deltas.drive(provider.stream(&request, &sink, abort)) => Some(r),
                 _ = tokio::time::sleep(self.remaining_wall()) => None,
             };
+            deltas.flush();
             let response = match result {
                 None => {
                     return Err(budget_exceeded(
