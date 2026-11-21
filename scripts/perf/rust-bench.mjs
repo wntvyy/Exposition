@@ -65,7 +65,9 @@ function benchTargets(crate) {
 
 function run(crate, target) {
   return new Promise((resolve) => {
-    const args = ["test", "-p", crate, "--test", target, ...(opts.release ? ["--release"] : []), "--", "--ignored", "--nocapture", "--test-threads=1", ...(opts.filter ? [opts.filter] : [])];
+    // The app crate is always selected too: it keeps the dependency features of
+    // the workspace build, so a benchmark does not rebuild the dependency tree.
+    const args = ["test", "-p", crate, ...(crate === "exposition" ? [] : ["-p", "exposition"]), "--test", target, ...(opts.release ? ["--release"] : []), "--", "--ignored", "--nocapture", "--test-threads=1", ...(opts.filter ? [opts.filter] : [])];
     console.error(`rust-bench: cargo ${args.join(" ")}`);
     const child = spawn("cargo", args, { stdio: ["ignore", "pipe", "inherit"] });
     let rest = "";
