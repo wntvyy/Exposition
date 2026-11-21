@@ -534,6 +534,8 @@ export function buildPlan({ mode, base, changes: unsorted, index, options = {}, 
   for (const path of paths) {
     const inCrateDir = /^(crates\/[^/]+|src-tauri)\//.test(path);
     if (!inCrateDir) continue;
+    // Merged into the configuration by `tauri build --config` only; no crate compiles it.
+    if (path === "src-tauri/tauri.release.conf.json") continue;
     if (path.startsWith("src-tauri/permissions/") || path.startsWith("src-tauri/capabilities/") || path === "src-tauri/tauri.conf.json" || path.startsWith("src-tauri/icons/")) {
       // Compiled into the app crate by tauri-build / generate_context!.
       if (crates) addRustCrate("exposition", `${path} is compiled into the app crate`);

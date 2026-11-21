@@ -306,6 +306,15 @@ describe("deferred qualification", () => {
     expect(full.deferred.map((d) => d.id)).toContain("live:live-new");
   });
 
+  it("the release-only configuration is local and defers the release build", () => {
+    const p = plan([M("src-tauri/tauri.release.conf.json")]);
+    expect(p.level).toBe("local");
+    // No local check reads it: reported as unverified until the release build runs.
+    expect(p.uncovered).toEqual(["src-tauri/tauri.release.conf.json"]);
+    expect(p.deferred.map((d) => d.id)).toContain("release");
+    expect(ids(p).some((id) => id.startsWith("e2e:"))).toBe(false);
+  });
+
   it("--release adds the release build and the release smoke run (review finding)", () => {
     const deferred = plan([M("src-tauri/tauri.conf.json")]);
     expect(deferred.deferred.map((d) => d.id)).toContain("release");

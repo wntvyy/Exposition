@@ -385,6 +385,14 @@ export const AREAS = [
     note: "App configuration (CSP, windows, bundling): security surface and release packaging.",
   },
   {
+    id: "release-config",
+    paths: ["src-tauri/tauri.release.conf.json"],
+    level: "local",
+    e2e: [],
+    deferred: ["release"],
+    note: "Read only by `npm run build:release` (frontend built with `--mode release`); verified by a release build.",
+  },
+  {
     id: "release-assets",
     paths: ["src-tauri/icons/**"],
     level: "local",
