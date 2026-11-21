@@ -1,13 +1,15 @@
 // Run history with more stored runs than one page (real app, no kernel: the
 // runs are records written into a disposable project, as an earlier session
 // would have left them).
-//  1. 1,130 run records and one damaged record: `research_runs` returns the
-//     first page (500 runs), the total (1,131 record files), and a
-//     continuation; three pages hold every run once and count the damaged
-//     record apart. The history shows its first 200 rows and "200 of 1,130".
-//  2. "Show more runs" adds rows, reading the next page when the loaded runs
-//     are used up, until every run is listed; the header count follows, and
-//     the damaged record is counted apart ("cannot be read"), never as a run.
+//  1. 1,130 run records and one damaged record on the second page: the
+//     history shows its first 200 rows and "200 of 1,131 records" beside the
+//     pane title. "Show more runs" adds rows, reading the next page when the
+//     loaded runs are used up, until every run is listed. The total stays
+//     1,131 when the damaged record is found; it is then named in its own
+//     row ("cannot be read"), and the count ends at "1,130 of 1,131 records".
+//  2. `research_runs` returns the first page (500 runs), the total (1,131
+//     record files), and a continuation; three pages hold every run once and
+//     count the damaged record apart; a foreign continuation is refused.
 //  3. The oldest run (last row of the last page) is selected and its stored
 //     output shown.
 //  4. It is deleted with the Delete key and brought back with Undo; every
@@ -110,7 +112,66 @@ export default async function researchHistory({ launchApp, artifactsDir, assert 
     await invoke(page, "workspace_open", { path: root });
     await page.locator('[data-testid="file-tree"] [data-path="main.typ"]').waitFor({ timeout: 15_000 });
 
-    // --- 1. the command: first page, total, continuation ---------------------------------
+    // --- 1. the history list: rows on demand ------------------------------------------------
+    await runCommand(page, "Show Research Panel", /Show Research Panel/);
+    const history = page.getByTestId("research-history");
+    await history.waitFor({ timeout: 15_000 });
+    const rows = history.locator("[data-op-item]");
+    const row = (i) => history.locator(`[data-op-item="${runId(i)}"]`);
+    // The count beside the pane title (the shared PanelHeader's count).
+    const headerCount = page.locator(".exp-research__history .ui-panel-header__count");
+    const countText = () => headerCount.innerText();
+    const more = page.getByTestId("research-history-more");
+    /** The stream output shown for run `i` once it is the run shown. */
+    const shownOutput = async (i) => {
+      const stream = page.locator(`[data-testid="research-output"][data-run-id="${runId(i)}"] [data-testid="research-stream"]`);
+      await stream.first().waitFor({ timeout: 15_000 });
+      return stream.first().textContent();
+    };
+    await waitFor(async () => (await rows.count()) === ROWS, { timeout: 15_000, message: "the first 200 rows" });
+    // 1,131 record files; the damaged one is on a page not read yet.
+    assert.equal(await countText(), "200 of 1,131 records");
+    assert.equal(await row(0).count(), 0, "the oldest run is not listed yet");
+    assert.match(await more.innerText(), /^Show more runs\s+931 records not shown$/);
+    await shot("research-history-first-rows");
+
+    const counts = [];
+    for (let shown = 2 * ROWS; shown < RUNS; shown += ROWS) {
+      await more.click();
+      await waitFor(async () => (await rows.count()) === shown, { timeout: 20_000, message: `${shown} rows` });
+      counts.push(await countText());
+      if (shown === 3 * ROWS) {
+        // 600 rows: the second page was read for them.
+        await more.scrollIntoViewIfNeeded();
+        await shot("research-history-second-page");
+      }
+    }
+    assert.deepEqual(
+      counts,
+      ["400 of 1,131 records", "600 of 1,131 records", "800 of 1,131 records", "1,000 of 1,131 records"],
+      "the total stays what it was when the damaged record is found (with the second page)",
+    );
+    assert.match(await more.innerText(), /^Show more runs\s+130 records not shown$/);
+    await more.click();
+    await waitFor(async () => (await rows.count()) === RUNS, { timeout: 20_000, message: "every run listed" });
+    assert.equal(await countText(), "1,130 of 1,131 records", "listed and unreadable add up to the total");
+    const inset = await page.evaluate(() => {
+      const header = document.querySelector(".exp-research__history .ui-panel-header");
+      const title = header.querySelector(".ui-panel-header__title").getBoundingClientRect();
+      const count = header.querySelector(".ui-panel-header__count").getBoundingClientRect();
+      const box = header.getBoundingClientRect();
+      return { title: Math.round(title.left - box.left), gap: Math.round(count.left - title.right), right: Math.round(box.right - count.right) };
+    });
+    assert.equal(inset.title, 14, "the title starts at the pane inset");
+    assert.ok(inset.gap >= 4 && inset.gap <= 12, `the count follows the title (${inset.gap}px)`);
+    evidence.notes.push(`header count placement: ${JSON.stringify(inset)}`);
+    assert.equal(await more.count(), 0, "no further page");
+    assert.match(await page.getByTestId("research-history-unreadable").innerText(), /^1 run record cannot be read\s+Not listed as runs$/);
+    const listed = await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-op-item")));
+    assert.deepEqual(listed, Array.from({ length: RUNS }, (_, i) => runId(RUNS - 1 - i)), "every run once, newest first");
+    evidence.notes.push(`history rows: ${ROWS} → ${counts.join(" → ")} → ${RUNS} (all); unreadable note shown`);
+
+    // --- 2. the command: first page, total, continuation ---------------------------------
     const first = await invoke(page, "research_runs");
     assert.equal(first.runs.length, PAGE, "the first page holds 500 runs");
     assert.equal(first.total, RUNS + 1, "every record file is counted");
@@ -132,48 +193,6 @@ export default async function researchHistory({ launchApp, artifactsDir, assert 
     );
     assert.ok(refused, "a continuation of another listing is refused");
     evidence.notes.push(`research_runs: pages of ${first.runs.length}/${second.runs.length}/${third.runs.length}, total ${first.total}, unreadable ${third.unreadable}; foreign continuation: ${JSON.stringify(refused)}`);
-
-    // --- 2. the history list: rows on demand ------------------------------------------------
-    await runCommand(page, "Show Research Panel", /Show Research Panel/);
-    const history = page.getByTestId("research-history");
-    await history.waitFor({ timeout: 15_000 });
-    const rows = history.locator("[data-op-item]");
-    const row = (i) => history.locator(`[data-op-item="${runId(i)}"]`);
-    const countText = () => page.getByTestId("research-history-count").innerText();
-    const more = page.getByTestId("research-history-more");
-    /** The stream output shown for run `i` once it is the run shown. */
-    const shownOutput = async (i) => {
-      const stream = page.locator(`[data-testid="research-output"][data-run-id="${runId(i)}"] [data-testid="research-stream"]`);
-      await stream.first().waitFor({ timeout: 15_000 });
-      return stream.first().textContent();
-    };
-    await waitFor(async () => (await rows.count()) === ROWS, { timeout: 15_000, message: "the first 200 rows" });
-    // The damaged record was found by the requests above: it is not counted as a run.
-    assert.equal(await countText(), "200 of 1,130");
-    assert.equal(await row(0).count(), 0, "the oldest run is not listed yet");
-    assert.match(await more.innerText(), /^Show more runs\s+930 not shown$/);
-    await shot("research-history-first-rows");
-
-    const counts = [];
-    for (let shown = 2 * ROWS; shown < RUNS; shown += ROWS) {
-      await more.click();
-      await waitFor(async () => (await rows.count()) === shown, { timeout: 20_000, message: `${shown} rows` });
-      counts.push(await countText());
-      if (shown === 3 * ROWS) {
-        // 600 rows: the second page was read for them.
-        await more.scrollIntoViewIfNeeded();
-        await shot("research-history-second-page");
-      }
-    }
-    assert.deepEqual(counts, ["400 of 1,130", "600 of 1,130", "800 of 1,130", "1,000 of 1,130"], "the count follows the rows shown");
-    await more.click();
-    await waitFor(async () => (await rows.count()) === RUNS, { timeout: 20_000, message: "every run listed" });
-    assert.equal(await page.getByTestId("research-history-count").count(), 0, "nothing left to count");
-    assert.equal(await more.count(), 0, "no further page");
-    assert.match(await page.getByTestId("research-history-unreadable").innerText(), /^1 run record cannot be read\s+Not listed as runs$/);
-    const listed = await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-op-item")));
-    assert.deepEqual(listed, Array.from({ length: RUNS }, (_, i) => runId(RUNS - 1 - i)), "every run once, newest first");
-    evidence.notes.push(`history rows: ${ROWS} → ${counts.join(" → ")} → ${RUNS} (all); unreadable note shown`);
 
     // --- 3. the oldest run: selected, output shown ---------------------------------------------
     await row(0).scrollIntoViewIfNeeded();

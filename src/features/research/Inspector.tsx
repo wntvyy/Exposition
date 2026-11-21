@@ -19,6 +19,7 @@ import {
   Button,
   Checkbox,
   EmptyState,
+  ErrorState,
   FileIcon,
   fileTypeOf,
   InspectorBody,
@@ -45,7 +46,7 @@ import {
   useSpace,
   type ResearchItem,
 } from "./space";
-import { runFile, selectRun, useResearch, useRun } from "./store";
+import { retryLookup, runFile, selectRun, useResearch, useRun } from "./store";
 import { authorizationText } from "./runloop";
 
 const subscribe = (l: () => void) => registry.subscribe(l);
@@ -161,12 +162,26 @@ function DeclaredInFile({ path, revision }: { path: string; revision: number | n
 /** The run behind an item (its state and a way to show its output), then its provenance. */
 function RunSections({ runId }: { runId: string }) {
   const run = useRun(runId);
+  const failure = useResearch((s) => s.lookupErrors[runId]);
   if (!run) {
     return (
       <Section title="Run">
-        <p className="ui-meta">
-          {run === undefined ? `Reading run ${runId}…` : `Run ${runId} is not in the run history of this project.`}
-        </p>
+        {failure !== undefined ? (
+          <ErrorState
+            title="Could not read this run"
+            description={failure}
+            live={false}
+            actions={
+              <Button size="sm" onPress={() => void retryLookup(runId)}>
+                Retry
+              </Button>
+            }
+          />
+        ) : (
+          <p className="ui-meta">
+            {run === undefined ? `Reading run ${runId}…` : `Run ${runId} is not in the run history of this project.`}
+          </p>
+        )}
       </Section>
     );
   }

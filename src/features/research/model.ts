@@ -196,7 +196,8 @@ export const KEPT_FINISHED_OUTPUTS = 8;
 
 /**
  * Release the output of finished runs beyond the newest `keep` (the selected
- * run and runs still executing always keep theirs). The service holds every
+ * run and runs still executing always keep theirs; a run that is not in
+ * `runs` counts as finished). The service holds every
  * run's output (its own recent copy, or the stored transcript) and selecting
  * a run whose output is not held here reads it again, so nothing is lost:
  * only the copies kept in this window are bounded.
@@ -208,10 +209,25 @@ export function pruneOutputs(
   keep = KEPT_FINISHED_OUTPUTS,
 ): Record<string, RunOutput> {
   const started = new Map<string, number>();
-  for (const run of runs) if (run.status.kind !== "running") started.set(run.id, run.startedAtMs);
-  const finished = Object.keys(outputs).filter((id) => id !== selectedRun && started.has(id));
+  const running = new Set<string>();
+  for (const run of runs) {
+    if (run.status.kind === "running") running.add(run.id);
+    else started.set(run.id, run.startedAtMs);
+  }
+  // A run that is not listed (read by id from a page not loaded, or gone
+  // from the history) is a finished run too.
+  const held = Object.keys(outputs);
+  const finished = held.filter((id) => id !== selectedRun && !running.has(id));
   if (finished.length <= keep) return outputs;
-  finished.sort((a, b) => started.get(b)! - started.get(a)!);
+  // Listed runs by start time; then runs not listed, the one held last first.
+  const order = new Map(held.map((id, index) => [id, index]));
+  finished.sort((a, b) => {
+    const [x, y] = [started.get(a), started.get(b)];
+    if (x !== undefined && y !== undefined) return y - x;
+    if (x !== undefined) return -1;
+    if (y !== undefined) return 1;
+    return order.get(b)! - order.get(a)!;
+  });
   const released = new Set(finished.slice(keep));
   const next: Record<string, RunOutput> = {};
   for (const [id, output] of Object.entries(outputs)) if (!released.has(id)) next[id] = output;

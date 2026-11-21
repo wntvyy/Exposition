@@ -36,6 +36,11 @@ export function Panel({ className, children, ...aria }: PanelProps) {
 export interface PanelHeaderProps {
   title: string;
   id?: string;
+  /**
+   * Count or short fact shown after the title in muted sentence-case text
+   * ("3", "200 of 621 records"), like a Section's count.
+   */
+  count?: number | string;
   /** Trailing actions (IconButtons inside a Toolbar). */
   actions?: ReactNode;
   className?: string;
@@ -49,12 +54,13 @@ export interface PanelHeaderProps {
  * One height (`--pane-header-height`) and inset (`--pane-inset`) everywhere:
  * sidebar views, inspectors, drawers.
  */
-export function PanelHeader({ title, id, actions, className, divider = true }: PanelHeaderProps) {
+export function PanelHeader({ title, id, count, actions, className, divider = true }: PanelHeaderProps) {
   return (
-    <header className={cx("ui-panel-header", className)} data-divider={divider || undefined}>
+    <header className={cx("ui-panel-header", className)} data-divider={divider || undefined} data-count={count !== undefined || undefined}>
       <h2 className="ui-panel-header__title ui-chrome-label" id={id}>
         {title}
       </h2>
+      {count !== undefined && <span className="ui-panel-header__count ui-meta">{count}</span>}
       {actions && <div className="ui-panel-header__actions">{actions}</div>}
     </header>
   );

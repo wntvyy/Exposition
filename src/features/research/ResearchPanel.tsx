@@ -867,9 +867,12 @@ export function RunHistory() {
     if (runs.length === 0) setRows(HISTORY_ROWS);
   }, [runs.length]);
   const visible = useMemo(() => runs.slice(0, rows), [runs, rows]);
-  // Runs not shown: loaded ones beyond the rows shown, and the stored runs
-  // on pages not read yet.
+  // Not shown: loaded runs beyond the rows shown, and the records on pages
+  // not read yet. Those are counted as records: one of them may turn out
+  // not to be a run when its page is read, and is then counted in
+  // `unreadable` instead, so the total stays what it was.
   const notShown = runs.length - visible.length + (more ? remaining : 0);
+  const records = visible.length + notShown + unreadable;
   const showMore = () => {
     if (loading) return;
     setRows(rows + HISTORY_ROWS);
@@ -894,13 +897,7 @@ export function RunHistory() {
     <div className="exp-research__history">
       <PanelHeader
         title="Runs"
-        actions={
-          notShown > 0 ? (
-            <span className="ui-meta" data-testid="research-history-count">
-              {count(visible.length)} of {count(visible.length + notShown)}
-            </span>
-          ) : undefined
-        }
+        count={visible.length < records ? `${count(visible.length)} of ${count(records)} records` : undefined}
       />
       {visible.length === 0 ? (
         <EmptyState fill={false} title="No runs yet" />
@@ -925,7 +922,7 @@ export function RunHistory() {
                   aria-busy={loading || undefined}
                   data-testid="research-history-more"
                   title="Show more runs"
-                  meta={loading ? "Reading…" : notShown > 0 ? `${count(notShown)} not shown` : undefined}
+                  meta={loading ? "Reading…" : notShown > 0 ? `${count(notShown)} ${notShown === 1 ? "record" : "records"} not shown` : undefined}
                   onClick={showMore}
                   onKeyDown={onMoreKeyDown}
                 />

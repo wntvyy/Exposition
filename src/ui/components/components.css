@@ -1399,6 +1399,17 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* With a count the title keeps its width and the count takes the rest. */
+.ui-panel-header[data-count] .ui-panel-header__title {
+  flex: none;
+}
+.ui-panel-header__count {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .ui-panel-header__actions {
   display: flex;
   align-items: center;

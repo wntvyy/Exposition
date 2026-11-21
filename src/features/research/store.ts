@@ -58,6 +58,8 @@ export interface ResearchState {
    * the project has no such run). See `useRun`.
    */
   lookups: Record<string, RunSummary | null>;
+  /** Why a run could not be read by id (the service's message); `retryLookup` reads it again. */
+  lookupErrors: Record<string, string>;
   outputs: Record<string, RunOutput>;
   selectedRun: string | null;
   starting: boolean;
@@ -78,6 +80,7 @@ export const useResearch = create<ResearchState>(() => ({
   runsUnreadable: 0,
   runsLoadingMore: false,
   lookups: {},
+  lookupErrors: {},
   outputs: {},
   selectedRun: null,
   starting: false,
@@ -183,9 +186,13 @@ export function startResearchTracking(): void {
     );
     const touchesRuns = runs.size > 0 || result.outcomes.some((o) => o.target.kind === "recoverable");
     if (!touchesRuns) return;
-    // A run read on its own is read again when it is next asked for.
+    // A run read on its own is read again when it is next asked for. A
+    // restore names a recoverable item, not the run: every "no such run" and
+    // every failed read is asked for again.
+    const restored = result.outcomes.some((o) => o.target.kind === "recoverable");
     useResearch.setState((state) => ({
-      lookups: Object.fromEntries(Object.entries(state.lookups).filter(([id]) => !runs.has(id))),
+      lookups: Object.fromEntries(Object.entries(state.lookups).filter(([id, run]) => !runs.has(id) && !(restored && run === null))),
+      lookupErrors: restored ? {} : Object.fromEntries(Object.entries(state.lookupErrors).filter(([id]) => !runs.has(id))),
     }));
     void refreshRuns().then(() => {
       const { selectedRun, runs: listed } = useResearch.getState();
@@ -240,6 +247,7 @@ export async function refreshAll(): Promise<void> {
             runsRemaining: 0,
             runsUnreadable: 0,
             lookups: {},
+            lookupErrors: {},
             outputs: {},
             selectedRun: null,
             environments: null,
@@ -386,6 +394,22 @@ export function findRun(state: ResearchState, runId: string | null | undefined):
 }
 
 const lookingUp = new Set<string>();
+/** Runs read by id that are remembered (the oldest are forgotten and read again when asked for). */
+export const KEPT_LOOKUPS = 64;
+
+function withLookup(state: ResearchState, runId: string, run: RunSummary | null): Record<string, RunSummary | null> {
+  const entries = Object.entries({ ...state.lookups, [runId]: run });
+  const extra = entries.length - KEPT_LOOKUPS;
+  if (extra <= 0) return Object.fromEntries(entries);
+  let dropped = 0;
+  return Object.fromEntries(
+    entries.filter(([id]) => {
+      if (dropped >= extra || id === runId || id === state.selectedRun) return true;
+      dropped += 1;
+      return false;
+    }),
+  );
+}
 
 /**
  * Read one run that the loaded pages of the history do not list. "Not
@@ -400,33 +424,52 @@ export async function lookupRun(runId: string): Promise<void> {
   try {
     const run = summaryOfManifest(await commands.researchRun(runId));
     if ((useResearch.getState().workspace?.root ?? null) !== root) return;
-    useResearch.setState((s) => ({ lookups: { ...s.lookups, [runId]: run } }));
+    useResearch.setState((s) => ({ lookups: withLookup(s, runId, run), lookupErrors: without(s.lookupErrors, runId) }));
   } catch (e) {
     if ((useResearch.getState().workspace?.root ?? null) !== root) return;
     if (isCommandError(e) && e.code === "research.unknownRun") {
-      useResearch.setState((s) => ({ lookups: { ...s.lookups, [runId]: null } }));
+      useResearch.setState((s) => ({ lookups: withLookup(s, runId, null), lookupErrors: without(s.lookupErrors, runId) }));
+    } else {
+      // The run may exist (a damaged record, a failed read): not "no such
+      // run", and not "being read" either. The view shows the failure.
+      useResearch.setState((s) => ({ lookupErrors: { ...s.lookupErrors, [runId]: errorMessage(e) } }));
     }
   } finally {
     lookingUp.delete(runId);
   }
 }
 
+function without(errors: Record<string, string>, runId: string): Record<string, string> {
+  if (!(runId in errors)) return errors;
+  const { [runId]: _dropped, ...rest } = errors;
+  return rest;
+}
+
+/** Read a run by id again after its read failed. */
+export function retryLookup(runId: string): Promise<void> {
+  useResearch.setState((s) => ({ lookupErrors: without(s.lookupErrors, runId) }));
+  return lookupRun(runId);
+}
+
 /**
  * The run with `runId` for a view that shows one run (an inspector, a figure
  * card): `undefined` while it is not known yet, `null` when the project has
- * no such run. A run the loaded pages do not list is read on its own.
+ * no such run or the run could not be read (`lookupErrors` then holds why).
+ * A run the loaded pages do not list is read on its own.
  */
 export function useRun(runId: string | null | undefined): RunSummary | null | undefined {
   const listed = useResearch((s) => (runId ? s.runs.find((r) => r.id === runId) : undefined));
   const lookedUp = useResearch((s) => (runId ? s.lookups[runId] : undefined));
   // With every page loaded the list is the whole history.
   const more = useResearch((s) => s.runsNext !== null);
+  const failed = useResearch((s) => (runId ? runId in s.lookupErrors : false));
   useEffect(() => {
-    if (runId && !listed && more) void lookupRun(runId);
-  }, [runId, listed, more, lookedUp]);
+    if (runId && !listed && more && !failed) void lookupRun(runId);
+  }, [runId, listed, more, lookedUp, failed]);
   if (!runId) return null;
   if (listed) return listed;
   if (lookedUp !== undefined) return lookedUp;
+  if (failed) return null;
   return more ? undefined : null;
 }
 
@@ -697,7 +740,11 @@ export async function selectRun(runId: string): Promise<void> {
       if (result.entries.length < 500) break;
       after = result.entries[result.entries.length - 1]?.seq ?? null;
     }
-    useResearch.setState((state) => ({ outputs: { ...state.outputs, [runId]: output } }));
+    // Selecting runs one after another (listed or read by id) holds no more
+    // outputs than runs finishing does.
+    useResearch.setState((state) => ({
+      outputs: pruneOutputs({ ...state.outputs, [runId]: output }, state.runs, state.selectedRun),
+    }));
   } catch (e) {
     useResearch.setState({ error: errorMessage(e) });
   }

@@ -14,6 +14,7 @@ import {
   ListRow,
   NodeCard,
   PageHeader,
+  PanelHeader,
   Section,
   SimpleTable,
   StateSizeProvider,
@@ -271,3 +272,21 @@ describe("status bar scope", () => {
     expect(screen.getByText("Graph synchronized").closest(".ui-status-pill")).not.toBeNull();
   });
 });
+
+describe("PanelHeader count", () => {
+  it("shows a count after the title as muted text and nothing without one", () => {
+    const { container, rerender } = render(<PanelHeader title="Runs" count="200 of 621 records" />);
+    const header = container.querySelector(".ui-panel-header")!;
+    expect(header.getAttribute("data-count")).toBe("true");
+    const count = header.querySelector(".ui-panel-header__count")!;
+    expect(count.textContent).toBe("200 of 621 records");
+    expect(count.className).toContain("ui-meta");
+    expect(header.querySelector("h2")!.nextElementSibling).toBe(count);
+    rerender(<PanelHeader title="Runs" count={0} />);
+    expect(container.querySelector(".ui-panel-header__count")!.textContent).toBe("0");
+    rerender(<PanelHeader title="Runs" />);
+    expect(container.querySelector(".ui-panel-header__count")).toBeNull();
+    expect(container.querySelector(".ui-panel-header")!.hasAttribute("data-count")).toBe(false);
+  });
+});
+

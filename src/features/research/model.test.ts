@@ -300,3 +300,18 @@ describe("run history pages", () => {
     expect(summaryOfManifest({ ...manifest, code: { ...manifest.code, text: null } }).codePreview).toBe("sha256:abcdef012345");
   });
 });
+
+describe("outputs of runs that are not listed", () => {
+  const held = (seq: number) => appendEntries({ ...EMPTY_RUN_OUTPUT, loaded: true }, [stream(seq, "x\n")]);
+
+  it("are released like those of listed runs, the listed and the latest held kept first", () => {
+    const listed = [run({ id: "run-a", startedAtMs: 5, status: { kind: "succeeded" } }), run({ id: "run-live", startedAtMs: 9 })];
+    const outputs: Record<string, ReturnType<typeof held>> = { "run-a": held(1), "run-live": held(1) };
+    for (let i = 0; i < 20; i += 1) outputs[`run-old-${String(i).padStart(2, "0")}`] = held(1);
+    const pruned = pruneOutputs(outputs, listed, "run-old-00", 3);
+    // The selected run, the executing run, the listed finished run, and the two held last.
+    expect(Object.keys(pruned).sort()).toEqual(["run-a", "run-live", "run-old-00", "run-old-18", "run-old-19"]);
+    expect(pruneOutputs(pruned, listed, "run-old-00", 3)).toBe(pruned);
+  });
+});
+

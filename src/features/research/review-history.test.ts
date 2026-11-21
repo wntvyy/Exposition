@@ -333,7 +333,7 @@ describe("review: runs read by id", () => {
   // a page not loaded, looked at, and then restored (Undo, Storage & History)
   // keeps that answer: a restore reports the target `recoverable`, which
   // does not clear the remembered "no such run".
-  it.skip("review: defect — a run looked up while deleted is still reported missing after it is restored", async () => {
+  it("a run looked up while deleted is still reported missing after it is restored", async () => {
     storeRuns(1_230);
     await refreshRuns();
     const oldest = run(1);
@@ -355,7 +355,7 @@ describe("review: runs read by id", () => {
   // service says does not exist. Any other failure (a damaged record:
   // `research.io`) records nothing, nothing asks again, and the inspector
   // shows "Reading run …" for good, with no error.
-  it.skip("review: defect — a run whose record cannot be read is shown as being read for ever", async () => {
+  it("a run whose record cannot be read is shown as being read for ever", async () => {
     storeRuns(1_230);
     await refreshRuns();
     const damaged = "run-damaged";
@@ -372,7 +372,7 @@ describe("review: runs read by id", () => {
   // Selecting a run read by id loads its output into `outputs` (up to 10,000
   // entries). `pruneOutputs` releases only outputs of runs in the loaded
   // list, so these copies are never released while the project stays open.
-  it.skip("review: defect — the outputs of runs read by id are never released", () => {
+  it("the outputs of runs read by id are never released", () => {
     const listed = [run(1), run(2)];
     const outputs = Object.fromEntries(
       Array.from({ length: 40 }, (_, i) => [run(10_000 + i).id, { ...model.EMPTY_RUN_OUTPUT, loaded: true }]),

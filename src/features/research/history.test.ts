@@ -32,6 +32,8 @@ const server = vi.hoisted(() => ({
   /** Continuations refused once with `research.historyChanged`. */
   refuse: new Set<string>(),
   calls: [] as (string | null)[],
+  /** `research_run` fails with this. */
+  runFailure: null as { code: string; message: string } | null,
   handler: null as ((event: unknown) => void) | null,
   opListener: null as ((result: unknown) => void) | null,
 }));
@@ -40,6 +42,13 @@ const ipc = vi.hoisted(() => ({
   commands: {
     researchWorkspace: vi.fn(async () => ({ root: "C:/project", trusted: true })),
     researchSessions: vi.fn(async () => []),
+    researchRunOutput: vi.fn(async (runId: string) => ({
+      runId,
+      entries: [{ seq: 1, item: { kind: "stream", name: "stdout", text: "out" } }],
+      firstRetainedSeq: 1,
+      lastSeq: 1,
+      truncated: false,
+    })),
     researchRuns: vi.fn(async (request?: { after?: string; limit?: number }) => {
       const after = request?.after ?? null;
       server.calls.push(after);
@@ -60,6 +69,7 @@ const ipc = vi.hoisted(() => ({
       };
     }),
     researchRun: vi.fn(async (runId: string) => {
+      if (server.runFailure) throw server.runFailure;
       const found = server.stored.find((r) => r.id === runId);
       if (!found) throw { code: "research.unknownRun", message: `unknown run ${runId}` };
       return { found };
@@ -99,7 +109,7 @@ vi.mock("./model", async (importOriginal) => ({
 }));
 
 const store = await import("./store");
-const { useResearch, refreshRuns, loadMoreRuns, lookupRun, findRun, flushEvents, startResearchTracking } = store;
+const { useResearch, refreshRuns, loadMoreRuns, lookupRun, retryLookup, selectRun, findRun, flushEvents, startResearchTracking } = store;
 
 const ids = () => useResearch.getState().runs.map((r) => r.id);
 const emit = (event: ResearchEvent) => {
@@ -124,6 +134,7 @@ await settle();
 beforeEach(async () => {
   server.unreadable = 0;
   server.refuse.clear();
+  server.runFailure = null;
   // Another project: the list, the pages loaded, and the selection start over.
   ipc.commands.researchWorkspace.mockResolvedValueOnce({ root: `C:/other-${Math.random()}`, trusted: true });
   storeRuns(0);
@@ -278,5 +289,57 @@ describe("paged run history", () => {
     server.opListener!({ outcomes: [{ target: { kind: "researchRun", run: oldest } }] });
     expect(oldest in useResearch.getState().lookups).toBe(false);
     await settle();
+  });
+
+  it("reports a run that could not be read and reads it again on request", async () => {
+    storeRuns(1_230);
+    await refreshRuns();
+    const oldest = run(1).id;
+    server.runFailure = { code: "research.io", message: "run manifest is invalid: EOF" };
+    await lookupRun(oldest);
+    let state = useResearch.getState();
+    // Not "no such run" and not left as being read: the failure is kept.
+    expect(oldest in state.lookups).toBe(false);
+    expect(state.lookupErrors[oldest]).toBe("run manifest is invalid: EOF");
+    // The record is readable again.
+    server.runFailure = null;
+    await retryLookup(oldest);
+    state = useResearch.getState();
+    expect(state.lookupErrors).toEqual({});
+    expect(findRun(state, oldest)?.id).toBe(oldest);
+  });
+
+  it("asks again for a run recorded as missing once something is restored", async () => {
+    storeRuns(1_230);
+    await refreshRuns();
+    await lookupRun("run-gone");
+    server.runFailure = { code: "research.io", message: "damaged" };
+    await lookupRun(run(2).id);
+    expect(useResearch.getState().lookups["run-gone"]).toBeNull();
+    server.opListener!({ outcomes: [{ target: { kind: "recoverable", id: "researchRun:run-gone" } }] });
+    expect(useResearch.getState().lookups).toEqual({});
+    expect(useResearch.getState().lookupErrors).toEqual({});
+    server.runFailure = null;
+    await settle();
+  });
+
+  it("holds the outputs and the summaries of runs read by id within their bounds", async () => {
+    storeRuns(1_230);
+    await refreshRuns();
+    const { KEPT_FINISHED_OUTPUTS } = await import("./model");
+    // Old runs (not on the loaded page) are looked at one after another.
+    for (let n = 1; n <= 80; n += 1) {
+      await lookupRun(run(n).id);
+      await selectRun(run(n).id);
+    }
+    const state = useResearch.getState();
+    expect(Object.keys(state.outputs).length).toBeLessThanOrEqual(KEPT_FINISHED_OUTPUTS + 1);
+    expect(state.outputs[run(80).id]).toBeDefined();
+    expect(Object.keys(state.lookups).length).toBeLessThanOrEqual(store.KEPT_LOOKUPS);
+    expect(findRun(state, run(80).id)?.id).toBe(run(80).id);
+    // A forgotten one is read again when asked for.
+    expect(findRun(state, run(1).id)).toBeUndefined();
+    await lookupRun(run(1).id);
+    expect(findRun(useResearch.getState(), run(1).id)?.id).toBe(run(1).id);
   });
 });
