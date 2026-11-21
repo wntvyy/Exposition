@@ -82,6 +82,8 @@ static ALLOCATOR: Counting = Counting;
 const KIB: usize = 1024;
 const MIB: usize = 1024 * 1024;
 const SAMPLES: usize = 7;
+/// Pause between writing a file and timing an operation that opens it.
+const SETTLE: Duration = Duration::from_millis(150);
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Work {
@@ -480,6 +482,9 @@ fn journal_save_and_disk_check() {
         let mut last = (Work::default(), 0u64);
         for i in 0..=SAMPLES as u32 {
             type_char(&docs, &id, at + 100 + i);
+            // Saves are spaced as a person spaces them. Back to back, each
+            // one waits for the virus scan of the file the last one wrote.
+            std::thread::sleep(SETTLE);
             let (ms, work, saved) = measure(size, || p.service.save_document(&id, false).unwrap());
             assert_eq!(saved.saved_revision, Some(saved.revision));
             if i > 0 {
@@ -494,6 +499,7 @@ fn journal_save_and_disk_check() {
         let mut samples = Vec::new();
         let mut last = Work::default();
         for i in 0..=SAMPLES {
+            std::thread::sleep(SETTLE);
             let (ms, work, ()) = measure(size, || p.service.check_document(&id));
             if i > 0 {
                 samples.push(ms);
@@ -509,6 +515,7 @@ fn journal_save_and_disk_check() {
             let mut text = fs::read_to_string(p.root().join("doc.txt")).unwrap();
             text.replace_range(0..12, &format!("ext{i:08}\n"));
             fs::write(p.root().join("doc.txt"), &text).unwrap();
+            std::thread::sleep(SETTLE);
             let (ms, work, ()) = measure(size, || p.service.check_document(&id));
             assert_eq!(*docs.snapshot(&id).unwrap().text, *text, "the buffer follows the file");
             if i > 0 {
@@ -565,7 +572,8 @@ fn directory_listing() {
             if i.is_multiple_of(100) {
                 fs::create_dir(folder.join(format!("Group{i:06}"))).unwrap();
             } else {
-                fs::write(folder.join(format!("{}{i:06}.typ", if i.is_multiple_of(2) { "File" } else { "file" })), b"").unwrap();
+                fs::write(folder.join(format!("{}{i:06}.typ", if i.is_multiple_of(2) { "File" } else { "file" })), b"")
+                    .unwrap();
             }
         }
         let dir = wp("many");
