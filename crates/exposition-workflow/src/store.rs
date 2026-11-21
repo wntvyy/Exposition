@@ -73,6 +73,11 @@ pub(crate) const LIST_SQL: &str =
      WHERE project = ?1 AND (?2 IS NULL OR workflow = ?2) AND deleted_at IS NULL
      ORDER BY started_at DESC, id LIMIT ?3";
 
+/// [`LIST_SQL`] for a history without the `runs_listing` index.
+pub(crate) const LIST_SQL_UNINDEXED: &str = "SELECT rowid, CAST(id AS TEXT), CAST(state AS TEXT) FROM runs
+     WHERE project = ?1 AND (?2 IS NULL OR workflow = ?2) AND deleted_at IS NULL
+     ORDER BY started_at DESC, id LIMIT ?3";
+
 /// At most this many decoded summaries are kept ([`ListedSummaries`]).
 const MAX_LISTED_SUMMARIES: usize = 2048;
 
@@ -165,11 +170,15 @@ impl RunStore {
         // record text, and reading it from a row means walking the whole
         // text (hundreds of pages for a large record) for every listed run.
         // An extra index does not change what older versions read.
-        conn.execute_batch(
+        // The index only makes listings cheaper: a history that cannot take
+        // it (a read-only file, a full disk, a lock held by something else)
+        // opens and lists exactly as before, without it.
+        if let Err(e) = conn.execute_batch(
             "CREATE INDEX IF NOT EXISTS runs_listing
                  ON runs(project, started_at DESC, id, workflow, state, deleted_at);",
-        )
-        .map_err(store_error)?;
+        ) {
+            tracing::warn!("the workflow run history has no listing index ({e}); listings read the rows");
+        }
         Ok(Self { conn, path: path.map(Path::to_path_buf), counters: Default::default(), listed: Default::default() })
     }
 
@@ -257,7 +266,13 @@ impl RunStore {
         let _snapshot = self.conn.unchecked_transaction().map_err(store_error)?;
         // The index columns only; a record's text is read and decoded when
         // its summary is not already known.
-        let mut stmt = self.conn.prepare_cached(LIST_SQL).map_err(store_error)?;
+        let mut stmt = self
+            .conn
+            .prepare_cached(LIST_SQL)
+            // No such index (it could not be created, or something removed
+            // it): the same rows, read from the table.
+            .or_else(|_| self.conn.prepare_cached(LIST_SQL_UNINDEXED))
+            .map_err(store_error)?;
         let rows: Vec<_> = stmt
             .query_map(params![project, workflow.map(|w| w.as_str()), limit.min(MAX_LIST) as i64], |r| {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?))

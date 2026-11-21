@@ -574,7 +574,6 @@ fn review_a_history_from_before_the_index_is_upgraded_in_place_and_lists_the_sam
 /// cannot be added (here: the file is read-only), must still be listed.
 /// The base version listed it; this version cannot open it at all.
 #[test]
-#[ignore = "review: defect"]
 fn review_a_history_that_cannot_take_the_index_is_still_listed() {
     let template = template();
     let dir = tempfile::tempdir().unwrap();
@@ -594,7 +593,6 @@ fn review_a_history_that_cannot_take_the_index_is_still_listed() {
 /// The same history at the service: the base version started with it; this
 /// version sets it aside and starts an empty one.
 #[test]
-#[ignore = "review: defect"]
 fn review_the_service_keeps_a_history_that_cannot_take_the_index() {
     let f = fixture();
     let template = {
