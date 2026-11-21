@@ -728,6 +728,60 @@ fn watcher_real_files() {
     );
 }
 
+/// Continuous typing with the background loop running: how many journal
+/// writes used the file staged outside the I/O lock, and how many had to be
+/// written under the lock because the document changed while its journal was
+/// being written.
+#[test]
+#[ignore = "perf"]
+fn journal_writes_while_typing() {
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    for size in doc_sizes() {
+        let size = size - KIB;
+        for keys_per_second in [5u64, 10] {
+            let p = project(&[("doc.txt", &text_of(size, false, 6))]);
+            let service = Arc::clone(&p.service);
+            let id = service.open_document(&wp("doc.txt")).unwrap().state.info.id;
+            let loop_task = runtime.spawn(Arc::clone(&service).run());
+            let docs = Arc::clone(service.documents());
+            let before = service.journal_write_counts();
+            let started = Instant::now();
+            let interval = Duration::from_millis(1000 / keys_per_second);
+            let mut keys = 0u32;
+            while started.elapsed() < Duration::from_secs(8) {
+                let next = started + interval * (keys + 1);
+                type_char(&docs, &id, (size / 2) as u32 + keys);
+                keys += 1;
+                std::thread::sleep(next.saturating_duration_since(Instant::now()));
+            }
+            // The pause after the last key: its journal.
+            std::thread::sleep(Duration::from_millis(1500));
+            let after = service.journal_write_counts();
+            let (installed, locked) = (after.0 - before.0, after.1 - before.1);
+            let journal: serde_json::Value = fs::read_dir(p.data().join("recovery"))
+                .unwrap()
+                .flatten()
+                .flat_map(|d| fs::read_dir(d.path()).unwrap().flatten())
+                .find(|e| e.file_name().to_string_lossy().starts_with("live-"))
+                .map(|e| serde_json::from_slice(&fs::read(e.path()).unwrap()).unwrap())
+                .expect("a live journal");
+            assert_eq!(journal["revision"], docs.info(&id).unwrap().revision, "the last journal holds the last edit");
+            loop_task.abort();
+            perf(
+                "workspace.journal_writes_while_typing",
+                json!({ "bytes": size, "size": size_label(size + KIB), "keys_per_second": keys_per_second, "seconds": 8 }),
+                &[],
+                json!({
+                    "keys": keys,
+                    "journal_writes": installed + locked,
+                    "installed_staged": installed,
+                    "written_under_lock": locked,
+                }),
+            );
+        }
+    }
+}
+
 // ----- current() versus open_root() ---------------------------------------------------
 
 /// With recovery entries waiting for the user's decision: the cost of asking
