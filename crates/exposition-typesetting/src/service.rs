@@ -110,6 +110,9 @@ struct CompilerContext {
 struct Store {
     recent: VecDeque<Arc<BuildRecord>>,
     last_good: HashMap<WorkspacePath, Arc<BuildRecord>>,
+    /// The id of each entry's latest retained-kind build (whether or not its
+    /// record is still among `recent`).
+    latest_ids: HashMap<WorkspacePath, BuildId>,
     svgs: VecDeque<(String, Arc<String>)>,
 }
 
@@ -272,6 +275,7 @@ impl TypesettingService {
         while store.recent.len() > RECENT_BUILDS {
             store.recent.pop_front();
         }
+        store.latest_ids.insert(target.entry.clone(), record.result.id.clone());
         if record.succeeded() {
             store.last_good.insert(target.entry.clone(), Arc::clone(&record));
         }
@@ -323,11 +327,25 @@ impl TypesettingService {
     /// document the build did not compile when one of its reads failed: the
     /// file it missed may be this document under a new name.
     pub fn change_concerns(&self, entry: &WorkspacePath, document: &DocumentId, revision: u64) -> bool {
-        let Some(record) = self.latest(entry) else { return true };
+        let Some(record) = self.latest_known(entry) else { return true };
         match record.revision_of(document) {
             Some(compiled) => compiled < revision,
             None => record.unresolved_reads || !record.open_documents.contains(document),
         }
+    }
+
+    /// The record of an entry's latest build while it is still held: among
+    /// the recent builds, or (when builds of other entries pushed it out of
+    /// those) as the entry's last successful build, if that is its latest
+    /// build. With several watched entries the recent builds are shared, and
+    /// an entry that is not being built must not lose what is known about it.
+    fn latest_known(&self, entry: &WorkspacePath) -> Option<Arc<BuildRecord>> {
+        if let Some(record) = self.latest(entry) {
+            return Some(record);
+        }
+        let record = self.last_good(entry)?;
+        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        (store.latest_ids.get(entry) == Some(&record.result.id)).then_some(record)
     }
 
     /// Text of a document revision compiled by a retained build.

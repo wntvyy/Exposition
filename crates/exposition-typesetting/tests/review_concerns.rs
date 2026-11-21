@@ -157,8 +157,23 @@ fn a_missing_file_that_appears_and_an_evicted_build_concern_the_entry() {
     for _ in 0..12 {
         fx.service.build(&other).unwrap();
     }
-    assert!(fx.service.latest(&entry).is_none(), "the entry's latest build is no longer retained");
-    assert!(fx.service.change_concerns(&entry, &notes, 2), "nothing is known about an evicted build");
+    assert!(fx.service.latest(&entry).is_none(), "the entry's latest build is no longer among the recent ones");
+    // Its latest build succeeded and is still held as its last good build:
+    // what that build read is known, so an open, unread document does not
+    // concern it, and a document opened since does.
+    assert!(!fx.service.change_concerns(&entry, &notes, 2), "the last good build is the entry's latest build");
+    let later = open(&fx, "other.typ");
+    assert!(fx.service.change_concerns(&entry, &later, 2), "opened after that build");
+    // A failed build after it, itself pushed out: the last good build is not
+    // the latest any more, and nothing is known about the latest.
+    append(&fx, &fx.document, "#include \"nowhere.typ\"\n");
+    let failed = fx.build();
+    assert_eq!(failed.result.status, BuildStatus::Failed, "an include is missing again");
+    for _ in 0..12 {
+        fx.service.build(&other).unwrap();
+    }
+    assert!(fx.service.latest(&entry).is_none());
+    assert!(fx.service.change_concerns(&entry, &notes, 2), "nothing is known about an evicted failed build");
 }
 
 /// An open, unread document is renamed onto the path the entry includes (the
