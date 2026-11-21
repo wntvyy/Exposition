@@ -4,7 +4,7 @@
 // One hidden textarea, kept at the caret, is the keyboard/IME/clipboard
 // target; caret, selection, equation outline, and composition are drawn over
 // the pages from the page map. All source changes are page transactions.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, KeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import { FileDown, FileWarning, RefreshCw, Search, Sigma, ZoomIn, ZoomOut } from "lucide-react";
 
@@ -72,9 +72,14 @@ export interface PageEditorProps extends EditorProps {
    * added after the last good build). The caller shows it in the source.
    */
   onRevealMissed?: (offset: number) => void;
+  /**
+   * False while this view is hidden behind another tab of its group: it then
+   * neither builds nor loads pages, and catches up when shown (default true).
+   */
+  visible?: boolean;
 }
 
-export function PageEditor({ resource, active, onRevealMissed }: PageEditorProps) {
+export function PageEditor({ resource, active, onRevealMissed, visible = true }: PageEditorProps) {
   const path = resource.path ?? "";
   const session = useMemo(() => new PageSession(path), [path]);
   const model = useSyncExternalStore(session.subscribe, session.getModel);
@@ -82,6 +87,7 @@ export function PageEditor({ resource, active, onRevealMissed }: PageEditorProps
   const [focused, setFocused] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
   const caretRef = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLDivElement>(null);
   const pageRefs = useRef(new Map<number, HTMLDivElement>());
   const composing = useRef(false);
   const dragging = useRef<{ page: number; element: HTMLElement } | null>(null);
@@ -94,6 +100,55 @@ export function PageEditor({ resource, active, onRevealMissed }: PageEditorProps
     void session.attach();
     return () => session.detach();
   }, [session]);
+
+  // A hidden tab does no work; shown again it rebuilds and catches up.
+  useEffect(() => {
+    session.setVisible(visible);
+  }, [session, visible]);
+
+  // Tell the session which pages are displayed: those in the viewport and the
+  // page before and after them. Only their images are loaded.
+  const reportDisplayed = useCallback(() => {
+    const view = scroller.current;
+    if (!view || view.clientHeight === 0) return; // hidden, or not laid out
+    const top = view.scrollTop;
+    const bottom = top + view.clientHeight;
+    let first = Number.POSITIVE_INFINITY;
+    let last = -1;
+    for (const [index, element] of pageRefs.current) {
+      if (element.offsetTop + element.offsetHeight > top && element.offsetTop < bottom) {
+        first = Math.min(first, index);
+        last = Math.max(last, index);
+      }
+    }
+    if (last < 0) return;
+    const displayed: number[] = [];
+    for (let index = Math.max(0, first - 1); index <= last + 1; index++) displayed.push(index);
+    session.setDisplayedPages(displayed);
+  }, [session]);
+  useLayoutEffect(() => {
+    if (visible) reportDisplayed();
+  }, [reportDisplayed, visible, scale, model.buildId, model.pages.length]);
+  useEffect(() => {
+    const view = scroller.current;
+    if (!view) return;
+    let frame = 0;
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        reportDisplayed();
+      });
+    };
+    view.addEventListener("scroll", schedule, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
+    observer?.observe(view);
+    return () => {
+      view.removeEventListener("scroll", schedule);
+      observer?.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [reportDisplayed, model.phase]);
 
   // Caret-based tools (the equation editor) find this view's caret, in the
   // current revision, through the page-surface registry.
@@ -145,7 +200,9 @@ export function PageEditor({ resource, active, onRevealMissed }: PageEditorProps
     element.style.top = `${top}px`;
     element.style.height = `${caret ? Math.max(caret.bottom - caret.top, 4) * scale : 16}px`;
     caretRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [caret, scale, model.pages]);
+    // Per build, not per loaded page image: an image arriving while the view
+    // is scrolled elsewhere must not pull it back to the caret.
+  }, [caret, scale, model.buildId, model.pages.length]);
 
   const pointFor = (event: { clientX: number; clientY: number }, element: HTMLElement) => {
     const box = element.getBoundingClientRect();
@@ -396,7 +453,7 @@ export function PageEditor({ resource, active, onRevealMissed }: PageEditorProps
         </Banner>
       )}
 
-      <div className="page-editor__scroller" data-testid="page-scroller">
+      <div ref={scroller} className="page-editor__scroller" data-testid="page-scroller">
         {model.pages.map((page) => {
           const width = page.widthPt * scale;
           const height = page.heightPt * scale;

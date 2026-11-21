@@ -118,6 +118,10 @@ function isUnknownBuild(error: unknown): boolean {
 const MAX_STALE_RETRIES = 20;
 /** How long a stale keystroke waits for the concurrent change's event. */
 const EVENT_WAIT_MS = 3000;
+/** Pages loaded before a build is first shown, until the view reports what it displays. */
+const FIRST_PAGES = 3;
+/** Page images kept for pages that are not displayed (least recently displayed dropped first). */
+export const IDLE_PAGE_IMAGES = 12;
 
 export class PageSession {
   private model: PageViewModel = {
@@ -160,7 +164,18 @@ export class PageSession {
   private readonly history = new RevisionHistory();
   private readonly own = new Set<string>();
   private queue: Promise<void> = Promise.resolve();
+  /** Loaded page images by render reference, least recently displayed first. */
   private readonly urls = new Map<string, string>();
+  /** Page image requests in flight, by render reference. */
+  private readonly loading = new Map<string, Promise<string>>();
+  /** Page indexes the view displays now (its viewport and the pages next to it), ascending. */
+  private displayed: number[] = [];
+  /** The view is hidden (its tab is not the displayed one): it neither watches nor loads. */
+  private suspended = false;
+  private watchPending = false;
+  /** No build result has arrived since this view started watching: the pages
+   *  it holds were built before and are not known to be current. */
+  private awaitingBuild = true;
   private geometrySeq = 0;
   private showSeq = 0;
   /** Newest build this view has accepted for display (shown or loading). */
@@ -218,19 +233,69 @@ export class PageSession {
       this.docRevision = info.info.revision;
       this.eventRevision = info.info.revision;
       this.set({ phase: "ready", documentId: handle.id });
-      // Each view counts as one watcher of its entry (unwatched on detach).
+      // A view that is displayed watches its entry; a hidden one starts when shown.
+      if (!this.suspended) await this.startWatching();
+    } catch (error) {
+      if (current()) this.set({ phase: "error", error: errorMessage(error) });
+    }
+  }
+
+  /**
+   * Count this view as one watcher of its entry (the entry is built now and
+   * after every change that concerns it) and show the latest retained build.
+   * Those pages were built before the view watched, so they stay marked stale
+   * until a build result arrives.
+   */
+  private async startWatching(): Promise<void> {
+    if (this.watching || this.watchPending || !this.docId || this.disposed) return;
+    const gen = this.attachGen;
+    this.watchPending = true;
+    this.awaitingBuild = true;
+    if (!this.model.stale) this.set({ stale: true });
+    try {
       const latest = await commands.typesettingWatch(this.path);
-      if (!current()) {
+      if (gen !== this.attachGen || this.disposed || this.suspended) {
         void commands.typesettingUnwatch(this.path).catch(() => {});
         return;
       }
       this.watching = true;
       // A newer build may already have arrived as an event; onBuild keeps
       // whichever is newest.
-      if (latest) await this.onBuild(latest);
+      if (latest) await this.onBuild(latest, true);
     } catch (error) {
-      if (current()) this.set({ phase: "error", error: errorMessage(error) });
+      if (gen === this.attachGen && !this.disposed) this.set({ phase: "error", error: errorMessage(error) });
+    } finally {
+      if (gen === this.attachGen) this.watchPending = false;
     }
+  }
+
+  private stopWatching(): void {
+    if (!this.watching) return;
+    this.watching = false;
+    void commands.typesettingUnwatch(this.path).catch(() => {});
+  }
+
+  /**
+   * The view is displayed (`true`) or hidden behind another tab (`false`).
+   * A hidden view does no work: it stops watching its entry (no builds on its
+   * account), ignores builds, and requests no page images or geometry. It
+   * keeps following the document's changes, so its caret stays mapped. Shown
+   * again, it watches again, which builds the entry; until that result
+   * arrives the pages it still holds are marked stale.
+   */
+  setVisible(visible: boolean): void {
+    if (this.suspended === !visible) return;
+    this.suspended = !visible;
+    if (!visible) {
+      // A build that is still loading its pages is not shown.
+      this.showSeq += 1;
+      this.stopWatching();
+      return;
+    }
+    if (!this.docId || this.disposed) return; // attach() starts watching
+    void this.startWatching();
+    void this.refreshGeometry();
+    void this.loadDisplayed();
   }
 
   detach(): void {
@@ -239,12 +304,11 @@ export class PageSession {
     for (const waiter of this.revisionWaiters.splice(0)) waiter.resolve(false);
     for (const un of this.unlisten) un();
     this.unlisten = [];
-    if (this.watching) {
-      this.watching = false;
-      void commands.typesettingUnwatch(this.path).catch(() => {});
-    }
+    this.stopWatching();
+    this.watchPending = false;
     for (const url of this.urls.values()) URL.revokeObjectURL(url);
     this.urls.clear();
+    this.loading.clear();
   }
 
   /** Follow the document's read-only state (it changes on normalize/undo). */
@@ -255,8 +319,10 @@ export class PageSession {
 
   // ---- builds -------------------------------------------------------------
 
-  async onBuild(event: BuildEvent): Promise<void> {
-    if (event.result.target.entry !== this.path || this.disposed || !this.docId) return;
+  /** A build result: an event, or (`retained`) the latest retained build returned when watching started. */
+  async onBuild(event: BuildEvent, retained = false): Promise<void> {
+    if (event.result.target.entry !== this.path || this.disposed || !this.docId || this.suspended) return;
+    if (!retained) this.awaitingBuild = false;
     // Ignore results older than one already handled (events and the watch
     // reply can arrive in either order).
     // A build that compiled nothing (refused for an untrusted workspace, a
@@ -292,13 +358,103 @@ export class PageSession {
     return result.sources.find((s) => s.document === this.docId)?.revision ?? null;
   }
 
-  private async urlFor(renderRef: string): Promise<string> {
+  /** The image of a page, requested once per render reference. */
+  private urlFor(renderRef: string): Promise<string> {
     const cached = this.urls.get(renderRef);
-    if (cached) return cached;
-    const bytes = new Uint8Array(await commands.pageImage(renderRef));
-    const url = URL.createObjectURL(new Blob([bytes], { type: imageType(bytes) }));
-    this.urls.set(renderRef, url);
-    return url;
+    if (cached) {
+      // Most recently displayed last.
+      this.urls.delete(renderRef);
+      this.urls.set(renderRef, cached);
+      return Promise.resolve(cached);
+    }
+    const pending = this.loading.get(renderRef);
+    if (pending) return pending;
+    const gen = this.attachGen;
+    const request = commands
+      .pageImage(renderRef)
+      .then((buffer) => {
+        // A view detached meanwhile holds no images (nothing would revoke this one).
+        if (gen !== this.attachGen || this.disposed) throw new Error("the page view was closed");
+        const bytes = new Uint8Array(buffer);
+        const url = URL.createObjectURL(new Blob([bytes], { type: imageType(bytes) }));
+        this.urls.set(renderRef, url);
+        return url;
+      })
+      .finally(() => {
+        if (this.loading.get(renderRef) === request) this.loading.delete(renderRef);
+      });
+    this.loading.set(renderRef, request);
+    return request;
+  }
+
+  /** The displayed page indexes that exist in a build of `count` pages. */
+  private displayedIn(count: number): number[] {
+    const within = this.displayed.filter((index) => index < count);
+    if (within.length > 0) return within;
+    // Nothing reported yet: the first pages. The document became shorter than
+    // the displayed position: its last pages.
+    const first = this.displayed.length === 0 ? 0 : Math.max(0, count - FIRST_PAGES);
+    return Array.from({ length: Math.min(FIRST_PAGES, count) }, (_, i) => first + i);
+  }
+
+  /** The shown build's pages with the images held now. */
+  private pageImages(result: BuildResult): PageImage[] {
+    return result.pages.map((p) => ({
+      index: p.index,
+      widthPt: p.widthPt,
+      heightPt: p.heightPt,
+      renderRef: p.renderRef,
+      url: this.urls.get(p.renderRef) ?? null,
+    }));
+  }
+
+  /**
+   * Release images the shown build no longer has, and all but the
+   * `IDLE_PAGE_IMAGES` most recently displayed images of pages that are not
+   * displayed.
+   */
+  private pruneImages(): void {
+    const build = this.build;
+    if (!build) return;
+    const refs = new Set(build.pages.map((p) => p.renderRef));
+    const displayed = new Set(this.displayedIn(build.pages.length).map((index) => build.pages[index]!.renderRef));
+    const idle: string[] = [];
+    for (const [ref, url] of this.urls) {
+      if (!refs.has(ref)) {
+        URL.revokeObjectURL(url);
+        this.urls.delete(ref);
+      } else if (!displayed.has(ref)) {
+        idle.push(ref);
+      }
+    }
+    for (const ref of idle.slice(0, Math.max(0, idle.length - IDLE_PAGE_IMAGES))) {
+      URL.revokeObjectURL(this.urls.get(ref)!);
+      this.urls.delete(ref);
+    }
+  }
+
+  /**
+   * The pages the view displays now (zero-based indexes: its viewport and the
+   * pages next to it). Only their images are requested; other pages keep
+   * their place and size and get their image when they are displayed.
+   */
+  setDisplayedPages(indexes: readonly number[]): void {
+    const next = [...new Set(indexes)].filter((index) => Number.isInteger(index) && index >= 0).sort((a, b) => a - b);
+    if (next.length === this.displayed.length && next.every((index, i) => index === this.displayed[i])) return;
+    this.displayed = next;
+    void this.loadDisplayed();
+  }
+
+  /** Load the images of the displayed pages of the shown build. */
+  private async loadDisplayed(): Promise<void> {
+    const build = this.build;
+    if (!build || this.disposed || this.suspended) return;
+    const wanted = this.displayedIn(build.pages.length).map((index) => build.pages[index]!.renderRef);
+    await Promise.all(wanted.map((ref) => this.urlFor(ref).catch(() => null)));
+    if (this.build !== build || this.disposed) return;
+    this.pruneImages();
+    const pages = this.pageImages(build);
+    if (pages.some((page, i) => page.url !== this.model.pages[i]?.url)) this.set({ pages });
   }
 
   private async show(result: BuildResult): Promise<void> {
@@ -309,25 +465,16 @@ export class PageSession {
     if (this.newest && isOlder(key, this.newest)) return;
     this.newest = key;
     const seq = ++this.showSeq;
-    const pages: PageImage[] = await Promise.all(
-      result.pages.map(async (p) => ({
-        index: p.index,
-        widthPt: p.widthPt,
-        heightPt: p.heightPt,
-        renderRef: p.renderRef,
-        url: await this.urlFor(p.renderRef).catch(() => null),
-      })),
-    );
-    if (seq !== this.showSeq || this.disposed) return;
+    // Load the pages the view displays before replacing the shown build, so
+    // what is on screen changes in one step; every other page keeps its place
+    // and size and loads its image when it is displayed.
+    const first = this.displayedIn(result.pages.length);
+    await Promise.all(first.map((index) => this.urlFor(result.pages[index]!.renderRef).catch(() => null)));
+    if (seq !== this.showSeq || this.disposed || this.suspended) return;
     this.build = result;
     this.buildRevision = revision;
-    const keep = new Set(result.pages.map((p) => p.renderRef));
-    for (const [ref, url] of this.urls) {
-      if (!keep.has(ref)) {
-        URL.revokeObjectURL(url);
-        this.urls.delete(ref);
-      }
-    }
+    this.pruneImages();
+    const pages = this.pageImages(result);
     // Keep the revision steps the caret and anchor still need: a page edit's
     // reply or a stale retry can leave them older than the shown build.
     this.history.prune(Math.min(revision, this.caret?.revision ?? revision, this.anchor?.revision ?? revision));
@@ -336,8 +483,16 @@ export class PageSession {
       latencyMs = performance.now() - this.editAt.time;
       this.editAt = null;
     }
-    this.set({ pages, buildId: result.id, buildRevision: revision, stale: this.docRevision > revision, latencyMs });
+    this.set({
+      pages,
+      buildId: result.id,
+      buildRevision: revision,
+      stale: this.awaitingBuild || this.docRevision > revision,
+      latencyMs,
+    });
     await this.refreshGeometry();
+    // The view may display other pages by now than when the build arrived.
+    void this.loadDisplayed();
   }
 
   // ---- document events ----------------------------------------------------
@@ -367,7 +522,8 @@ export class PageSession {
       this.syncPositions();
     }
     this.set({ stale: true });
-    void this.refreshGeometry();
+    // A hidden view maps its caret when it is shown again.
+    if (!this.suspended) void this.refreshGeometry();
   }
 
   /** Bring caret and anchor to the current document revision. */
