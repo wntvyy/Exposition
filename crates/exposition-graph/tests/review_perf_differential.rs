@@ -1184,8 +1184,7 @@ impl Run {
                         };
                         let part = parts.entry(key).or_default();
                         part.push_str(line);
-                        part.push('
-');
+                        part.push('\n');
                     }
                     let parts: Vec<String> = parts.iter().map(|(k, v)| format!("{k}={:08x}", fnv(v) as u32)).collect();
                     writeln!(file, "{step} files={} {}", run.files.len(), parts.join(" ")).unwrap();
