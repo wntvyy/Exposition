@@ -6,6 +6,7 @@
 //!   service, plus a temporary local runner.
 //! * [`synctex`] — SyncTeX parsing, forward and backward search.
 //! * [`pdf`] — page rendering and glyph extraction (hayro).
+//! * [`page_key`] — content identity of PDF pages (the key of page images).
 //! * [`pdf_view`] — read-only views of project PDF files (bounded, project-bound).
 //! * [`latex`], [`normalize`], [`mapping`] — character-level page ↔ source
 //!   mapping for the declared construct set.
@@ -20,6 +21,7 @@ pub mod mapping;
 pub mod mirror;
 pub mod normalize;
 pub mod page_input;
+pub mod page_key;
 pub mod page_map;
 pub mod pdf;
 pub mod pdf_view;

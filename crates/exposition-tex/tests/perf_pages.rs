@@ -36,9 +36,8 @@ fn page_counts() -> Vec<usize> {
 }
 
 fn perf(bench: &str, scale: &[(&str, f64)], samples: &[f64], counters: &[(&str, f64)]) {
-    let object = |pairs: &[(&str, f64)]| {
-        pairs.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",")
-    };
+    let object =
+        |pairs: &[(&str, f64)]| pairs.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(",");
     let samples = samples.iter().map(|s| format!("{s:.3}")).collect::<Vec<_>>().join(",");
     println!(
         "PERF {{\"bench\":\"{bench}\",\"scale\":{{{}}},\"samples_ms\":[{samples}],\"counters\":{{{}}}}}",
@@ -64,7 +63,9 @@ fn document(pages: usize) -> String {
                 "\\begin{{equation}}\\label{{eq:{i}:{j}}}\n  \\sum_{{k=0}}^{{n}} k^{j} = \\frac{{n (n + 1)}}{{2}} + \\int_0^{{{i}}} x^{j} \\, dx\n\\end{{equation}}\n"
             ));
         }
-        text.push_str("Hence the supremum is attained by some point of the domain, which proves the claim.\n\\newpage\n");
+        text.push_str(
+            "Hence the supremum is attained by some point of the domain, which proves the claim.\n\\newpage\n",
+        );
     }
     text.push_str("\\end{document}\n");
     text
@@ -179,10 +180,11 @@ impl Env {
     }
 }
 
-/// What the application does for a change of an open document. At the base
-/// revision every change rebuilt every watched entry.
-fn on_document_changed(env: &Env, _document: &DocumentId) {
-    env.service.rebuild_watched();
+/// What the application does for a change of an open document: rebuild the
+/// watched entries the change can concern (at the base revision: all of them).
+fn on_document_changed(env: &Env, document: &DocumentId) {
+    let info = env.documents.info(document).unwrap();
+    env.service.rebuild_for_change(document, info.path.as_ref(), info.revision);
 }
 
 #[test]
@@ -274,7 +276,8 @@ fn tex_page_images_and_page_map() {
                 let glyphs = session.pdf.extract_glyphs_and_rules(page).unwrap();
                 extract_ms += ms(started);
                 let started = Instant::now();
-                let mapping = exposition_tex::mapping::map_page(page as u32, glyphs, &session.synctex, &session.sources);
+                let mapping =
+                    exposition_tex::mapping::map_page(page as u32, glyphs, &session.synctex, &session.sources);
                 map_ms += ms(started);
                 mapped.push((mapping, session.pdf.page_size(page).unwrap()));
             }
@@ -325,9 +328,8 @@ fn tex_edit_bursts() {
     fn drain(env: &mut Env) -> (usize, usize, usize, usize) {
         let (mut started, mut passes, mut canceled, mut results) = (0, 0, 0, 0);
         loop {
-            let next = env
-                .runtime
-                .block_on(async { tokio::time::timeout(Duration::from_secs(2), env.events.recv()).await });
+            let next =
+                env.runtime.block_on(async { tokio::time::timeout(Duration::from_secs(2), env.events.recv()).await });
             match next {
                 Ok(Ok(TexEvent::Started { .. })) => started += 1,
                 Ok(Ok(TexEvent::Finished { summary, .. })) => {

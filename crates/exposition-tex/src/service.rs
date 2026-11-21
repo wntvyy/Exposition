@@ -20,7 +20,11 @@
 //!   that workspace (so its jobs follow the workspace's trust).
 //! * **Scheduling.** One worker per target (workspace, entry, engine). A new
 //!   request coalesces with any pending one and cancels the running build
-//!   (its snapshot is superseded). Draft builds (one engine pass) serve typing;
+//!   (its snapshot is superseded). A request for an idle target starts at
+//!   once; one that supersedes a running build starts when no further request
+//!   has arrived for `supersede_delay`, so a burst of edits runs the engine
+//!   for its first and its last state instead of once per edit. Draft builds
+//!   (one engine pass) serve typing;
 //!   after a draft, a Full build (bibliography + reruns) runs automatically
 //!   once the target has been idle for `idle_full_delay`.
 //! * **Results.** Core [`BuildResult`]s (diagnostics for the Problems view),
@@ -28,12 +32,20 @@
 //!   *last good* and reported stale while newer edits are pending or its
 //!   source revisions no longer match the open documents.
 //! * **Pages.** Immutable per build: PNG renderings and glyph mappings are
-//!   served from the build's frozen output through [`TexPageSession`].
+//!   served from the build's frozen output through [`TexPageSession`]. A page
+//!   is referred to by its content identity ([`crate::page_key`]), so a page
+//!   that a later build leaves as it was keeps its reference and its rendered
+//!   image (one bounded cache for the service).
+//! * **Changes.** A change of an open document rebuilds a watched entry
+//!   unless the entry's latest build is known not to have read that document
+//!   ([`TexService::rebuild_for_change`]); file changes on disk always do.
+//! * **Folders.** When the open folder changes, the workers, builds and page
+//!   images of other folders are released ([`TexService::release_closed_folders`]).
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use exposition_core::build::{
     BuildId, BuildResult, BuildStatus, BuildTarget, DocumentFormat, Engine, ExportArtifact, ExportKind,
@@ -170,11 +182,19 @@ pub struct TexServiceConfig {
     pub idle_full_delay: Option<Duration>,
     /// Finished builds kept for page access (besides each target's last good).
     pub keep_builds: usize,
+    /// How long a request that superseded a running build waits for further
+    /// requests before its build starts (zero: start at once).
+    pub supersede_delay: Duration,
 }
 
 impl TexServiceConfig {
     pub fn new(data_dir: impl Into<PathBuf>) -> Self {
-        Self { data_dir: data_dir.into(), idle_full_delay: Some(Duration::from_millis(1500)), keep_builds: 8 }
+        Self {
+            data_dir: data_dir.into(),
+            idle_full_delay: Some(Duration::from_millis(1500)),
+            keep_builds: 8,
+            supersede_delay: Duration::from_millis(150),
+        }
     }
 }
 
@@ -190,12 +210,15 @@ struct Inner {
     runtime: tokio::runtime::Handle,
     root: PathBuf,
     idle_full_delay: Option<Duration>,
+    supersede_delay: Duration,
     keep_builds: usize,
     targets: Mutex<HashMap<TexTargetRef, Arc<Target>>>,
     /// Entries watched by page views: the target each builds and how many
     /// views watch it.
     watched: Mutex<BTreeMap<WorkspacePath, (BuildTarget, usize)>>,
     builds: Mutex<BuildStore>,
+    page_images: Mutex<PageImageCache>,
+    pages_rendered: std::sync::atomic::AtomicU64,
     events: broadcast::Sender<TexEvent>,
     counter: std::sync::atomic::AtomicU64,
 }
@@ -215,28 +238,85 @@ struct Control {
     running: Option<TexBuildMode>,
     /// The running build was superseded by a newer request.
     superseded: bool,
+    /// The pending request superseded a running build: it starts when this
+    /// time has passed without a further request.
+    settle_until: Option<Instant>,
     /// Drafts ran since the last completed full build.
     needs_full: bool,
+    /// A requested build was canceled or dropped after `last` finished: `last`
+    /// is then not the outcome of the latest request.
+    unbuilt_request: bool,
     last: Option<Arc<StoredBuild>>,
     last_good: Option<Arc<StoredBuild>>,
     shutdown: bool,
 }
 
-/// (page, scale in thousandths).
-type PngKey = (u32, u32);
+/// (render reference, scale in thousandths).
+type PngKey = (String, u32);
 
-/// Cached renderings/mappings per build before the cache is reset.
+/// Cached mappings per build before the cache is reset.
 const MAX_CACHED_PAGES: usize = 48;
+
+/// PNG bytes of rendered pages kept for reuse.
+const PAGE_IMAGE_CACHE_BYTES: usize = 96 << 20;
+
+/// Rendered page images of the open folder's builds.
+///
+/// * Owner: the [`TexService`] (one cache, shared by every build).
+/// * Key: the page's render reference and the scale. The reference is the
+///   page's content identity ([`crate::page_key`]: the page object with its
+///   content streams, fonts, images, annotations and inherited settings), or,
+///   for a page whose content could not be identified, a reference unique to
+///   its build.
+/// * Invalidation: none needed, a key names fixed pixels for the renderer of
+///   this process. An image is served only for a page of a retained build of
+///   the open folder, and the cache is emptied when another folder's builds
+///   are released.
+/// * Bound: [`PAGE_IMAGE_CACHE_BYTES`] of PNG data (an image larger than
+///   that is not kept). Eviction: least recently used first.
+#[derive(Default)]
+struct PageImageCache {
+    /// Least recently used first.
+    entries: VecDeque<(PngKey, Arc<[u8]>)>,
+    bytes: usize,
+}
+
+impl PageImageCache {
+    fn get(&mut self, key: &PngKey) -> Option<Arc<[u8]>> {
+        let position = self.entries.iter().position(|(k, _)| k == key)?;
+        let entry = self.entries.remove(position)?;
+        let png = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(png)
+    }
+
+    /// Keep `png` and return the image to serve (the one already kept, if
+    /// another request rendered the same page meanwhile).
+    fn insert(&mut self, key: PngKey, png: Arc<[u8]>) -> Arc<[u8]> {
+        if let Some(existing) = self.get(&key) {
+            return existing;
+        }
+        if png.len() > PAGE_IMAGE_CACHE_BYTES {
+            return png;
+        }
+        self.bytes += png.len();
+        self.entries.push_back((key, png.clone()));
+        while self.bytes > PAGE_IMAGE_CACHE_BYTES {
+            let Some((_, evicted)) = self.entries.pop_front() else { break };
+            self.bytes -= evicted.len();
+        }
+        png
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+}
 
 /// Pixels per point of page images served to page views (216 dpi: sharp at
 /// the page editor's zoom levels on high-density displays).
 pub const PAGE_IMAGE_SCALE: f32 = 3.0;
-
-/// `<build id>-p<index>` → (build id, page index).
-fn parse_render_ref(render_ref: &str) -> Option<(BuildId, u32)> {
-    let (build, page) = render_ref.rsplit_once("-p")?;
-    Some((BuildId(build.to_owned()), page.parse().ok()?))
-}
 
 /// A finished build with lazily opened page access.
 pub struct StoredBuild {
@@ -247,7 +327,6 @@ pub struct StoredBuild {
     root: PathBuf,
     session: OnceLock<Result<Arc<TexPageSession>, String>>,
     page_map: OnceLock<Option<Arc<PageMap>>>,
-    pngs: Mutex<HashMap<PngKey, Arc<Vec<u8>>>>,
     maps: Mutex<HashMap<u32, Arc<PageMapping>>>,
 }
 
@@ -276,10 +355,13 @@ impl TexService {
                 runtime,
                 root,
                 idle_full_delay: config.idle_full_delay,
+                supersede_delay: config.supersede_delay,
                 keep_builds: config.keep_builds.max(1),
                 targets: Mutex::new(HashMap::new()),
                 watched: Mutex::new(BTreeMap::new()),
                 builds: Mutex::new(BuildStore::default()),
+                page_images: Mutex::new(PageImageCache::default()),
+                pages_rendered: std::sync::atomic::AtomicU64::new(0),
                 events,
                 counter: std::sync::atomic::AtomicU64::new(0),
             }),
@@ -312,6 +394,11 @@ impl TexService {
             if control.running.is_some() {
                 control.superseded = true;
                 target.cancel.cancel();
+            }
+            // A burst of requests: each one that supersedes a build, or
+            // arrives while such a request still waits, restarts the wait.
+            if (control.running.is_some() || control.settle_until.is_some()) && !self.inner.supersede_delay.is_zero() {
+                control.settle_until = Some(Instant::now() + self.inner.supersede_delay);
             }
             // Sent under the lock so it always precedes the worker's `Started`.
             let _ = self.inner.events.send(TexEvent::Queued { target: target.reference.clone(), mode });
@@ -351,10 +438,12 @@ impl TexService {
         };
         let mut control = target.control.lock().unwrap_or_else(|p| p.into_inner());
         let had = control.pending.take().is_some() || control.running.is_some();
+        control.settle_until = None;
         if control.running.is_some() {
             target.cancel.cancel();
         }
         control.needs_full = false;
+        control.unbuilt_request |= had;
         had
     }
 
@@ -382,28 +471,52 @@ impl TexService {
         self.inner.belongs_to_open_folder(&stored).then_some(stored)
     }
 
-    /// PNG of a page at `scale` pixels per point (0.25..=8).
-    pub fn page_png(&self, id: &BuildId, page: u32, scale: f32) -> Result<Arc<Vec<u8>>, TexServiceError> {
+    /// PNG of a page at `scale` pixels per point (0.25..=8). Rendered once
+    /// per page content and scale while the image stays in the service's
+    /// cache: an unchanged page of a later build is not rendered again.
+    pub fn page_png(&self, id: &BuildId, page: u32, scale: f32) -> Result<Arc<[u8]>, TexServiceError> {
         if !(0.25..=8.0).contains(&scale) || !scale.is_finite() {
             return Err(TexServiceError::InvalidScale(scale));
         }
         let stored = self.build(id).ok_or(TexServiceError::UnknownBuild)?;
-        let key = (page, (scale * 1000.0).round() as u32);
-        if let Some(png) = stored.pngs.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
-            return Ok(png.clone());
-        }
         let session = stored.session()?;
         if page as usize >= session.page_count() {
             return Err(TexServiceError::NoSuchPage(page));
         }
-        let rendered = session.render_page(page as usize, scale).map_err(|e| TexServiceError::Io(e.to_string()))?;
-        let png = Arc::new(rendered.png);
-        let mut pngs = stored.pngs.lock().unwrap_or_else(|p| p.into_inner());
-        if pngs.len() >= MAX_CACHED_PAGES {
-            pngs.clear();
+        // The page's render reference names its pixels (see `PageImageCache`).
+        let reference = match stored.summary.result.pages.get(page as usize) {
+            Some(artifact) => artifact.render_ref.clone(),
+            None => format!("{}-p{page}", id.0),
+        };
+        let key = (reference, (scale * 1000.0).round() as u32);
+        if let Some(png) = self.inner.page_images.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+            return Ok(png);
         }
-        pngs.insert(key, png.clone());
-        Ok(png)
+        let rendered = session.render_page(page as usize, scale).map_err(|e| TexServiceError::Io(e.to_string()))?;
+        self.inner.pages_rendered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let png: Arc<[u8]> = Arc::from(rendered.png);
+        Ok(self.inner.page_images.lock().unwrap_or_else(|p| p.into_inner()).insert(key, png))
+    }
+
+    /// Pages rasterized since the service started (a counter for tests and
+    /// measurements: a request served from the cache does not count).
+    pub fn pages_rendered(&self) -> u64 {
+        self.inner.pages_rendered.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A retained build of the open folder that has a page with this render
+    /// reference, and that page's index. Builds with the same reference show
+    /// the same page, so any of them serves.
+    fn page_of(&self, render_ref: &str) -> Option<(BuildId, u32)> {
+        let store = self.inner.builds.lock().unwrap_or_else(|p| p.into_inner());
+        store
+            .builds
+            .values()
+            .filter(|stored| stored.summary.has_output && self.inner.belongs_to_open_folder(stored))
+            .find_map(|stored| {
+                let page = stored.summary.result.pages.iter().find(|p| p.render_ref == render_ref)?;
+                Some((stored.summary.result.id.clone(), page.index))
+            })
     }
 
     /// Glyph-level mapping of a page.
@@ -562,9 +675,132 @@ impl TexService {
         }
     }
 
+    /// An open document changed: queue draft builds of the watched entries
+    /// the change can concern. `path` is the document's workspace path (`None`
+    /// for a document without one, which no build reads) and `revision` its
+    /// revision after the change. See [`Self::change_concerns`] for when an
+    /// entry is left alone; in every case of doubt it is rebuilt.
+    pub fn rebuild_for_change(&self, document: &DocumentId, path: Option<&WorkspacePath>, revision: u64) {
+        let Some(path) = path else { return };
+        let entries: Vec<WorkspacePath> =
+            self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).keys().cloned().collect();
+        for entry in entries {
+            let target = self.target_for_entry(&entry);
+            if let Some(watch) = self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&entry) {
+                watch.0 = target.clone();
+            } else {
+                continue; // unwatched meanwhile
+            }
+            if self.change_concerns(&target, document, path, revision) {
+                let _ = self.request_build(Some(target), TexBuildMode::Draft);
+            }
+        }
+    }
+
+    /// Whether a change of the open document `document` (at `path`, now at
+    /// `revision`) can alter what `target`'s latest build produced. "No" only
+    /// when all of this is known:
+    ///
+    /// * the target is built with pdfTeX, whose recorder lists every project
+    ///   file the engine opens (LuaTeX can read files from Lua unrecorded);
+    /// * no build is pending or running and none was canceled or dropped
+    ///   since the latest result, so that result is the outcome of the latest
+    ///   request;
+    /// * the document was an open buffer of that build (a document opened
+    ///   since is not known to it), is not a bibliography database or style
+    ///   (the bibliography tools read those without a record), and
+    /// * the engine did not open the file, or the build compiled this
+    ///   revision of it (or a later one) already.
+    ///
+    /// What a TeX run reads is decided by the files it has read so far, so a
+    /// file the latest run did not open cannot change the next run. A change
+    /// on disk (a file created, removed or saved) is not handled here: it
+    /// rebuilds every watched entry.
+    fn change_concerns(
+        &self,
+        target: &BuildTarget,
+        document: &DocumentId,
+        path: &WorkspacePath,
+        revision: u64,
+    ) -> bool {
+        if target.engine != Engine::PdfLatex {
+            return true;
+        }
+        let bibliography =
+            path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bib") || e.eq_ignore_ascii_case("bst"))
+                || path.file_name().eq_ignore_ascii_case("biber.conf");
+        if bibliography {
+            return true;
+        }
+        let Some(reference) = self.reference(Some(target)) else { return true };
+        let Some(target) = self.inner.targets.lock().unwrap_or_else(|p| p.into_inner()).get(&reference).cloned() else {
+            return true;
+        };
+        let control = target.control.lock().unwrap_or_else(|p| p.into_inner());
+        if control.pending.is_some() || control.running.is_some() || control.unbuilt_request {
+            return true;
+        }
+        let Some(snapshot) = control.last.as_ref().and_then(|last| last.build.snapshot.as_ref()) else { return true };
+        let Some(file) = snapshot.files.get(path).filter(|file| file.document.as_ref() == Some(document)) else {
+            return true;
+        };
+        match snapshot.engine_read(path) {
+            None => true,
+            Some(false) => false,
+            Some(true) => file.revision.is_none_or(|compiled| compiled < revision),
+        }
+    }
+
     /// The workspace closed: stop watching its entries.
     pub fn forget_watched(&self) {
         self.inner.watched.lock().unwrap_or_else(|p| p.into_inner()).clear();
+    }
+
+    /// The open folder changed or closed: stop the workers of every other
+    /// folder's targets and drop their builds (with their PDFs, SyncTeX data
+    /// and mappings) and the cached page images. Builds of a folder that is
+    /// not open are never served, so nothing that could be shown is lost;
+    /// opening the folder again builds it again.
+    pub fn release_closed_folders(&self) {
+        let open = self.inner.workspace.open_root().map(|root| crate::compile::plain_path(&root));
+        let released: Vec<Arc<Target>> = {
+            let mut targets = self.inner.targets.lock().unwrap_or_else(|p| p.into_inner());
+            let gone: Vec<TexTargetRef> = targets
+                .iter()
+                .filter(|(_, target)| Some(&target.root) != open.as_ref())
+                .map(|(reference, _)| reference.clone())
+                .collect();
+            gone.iter().filter_map(|reference| targets.remove(reference)).collect()
+        };
+        for target in &released {
+            let mut control = target.control.lock().unwrap_or_else(|p| p.into_inner());
+            control.shutdown = true;
+            control.pending = None;
+            control.last = None;
+            control.last_good = None;
+            target.cancel.cancel();
+            target.wake.notify_all();
+        }
+        let dropped = {
+            let mut store = self.inner.builds.lock().unwrap_or_else(|p| p.into_inner());
+            let before = store.builds.len();
+            store.builds.retain(|_, stored| Some(&stored.root) == open.as_ref());
+            let BuildStore { builds, order, last_good } = &mut *store;
+            order.retain(|id| builds.contains_key(id));
+            last_good.retain(|_, id| builds.contains_key(id));
+            before - builds.len()
+        };
+        if dropped > 0 || !released.is_empty() {
+            self.inner.page_images.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        }
+    }
+
+    /// Targets with a worker, and builds kept for page access (for tests and
+    /// measurements of what the service retains).
+    pub fn retained(&self) -> (usize, usize) {
+        let targets = self.inner.targets.lock().unwrap_or_else(|p| p.into_inner()).len();
+        let builds = self.inner.builds.lock().unwrap_or_else(|p| p.into_inner()).builds.len();
+        (targets, builds)
     }
 
     /// Stop all workers and cancel running builds (application exit).
@@ -654,16 +890,21 @@ impl TexService {
 
 impl StoredBuild {
     /// The shared page-editor map of every page (computed once, on demand).
-    pub fn page_map(&self, service: &TexService) -> Option<Arc<PageMap>> {
+    /// The per-page mappings it is built from are used in place and not kept
+    /// (a page's mapping already cached for the probes is reused).
+    pub fn page_map(&self) -> Option<Arc<PageMap>> {
         self.page_map
             .get_or_init(|| {
                 let session = self.session().ok()?;
-                let id = &self.summary.result.id;
-                let pages: Vec<_> = (0..session.page_count() as u32)
+                let pages: Vec<(Arc<PageMapping>, (f64, f64))> = (0..session.page_count() as u32)
                     .map(|page| {
-                        let mapping = service.page_map(id, page).ok()?;
+                        let cached = self.maps.lock().unwrap_or_else(|p| p.into_inner()).get(&page).cloned();
+                        let mapping = match cached {
+                            Some(mapping) => mapping,
+                            None => Arc::new(session.map_page(page as usize).ok()?),
+                        };
                         let size = session.pdf.page_size(page as usize).ok()?;
-                        Some((mapping.as_ref().clone(), size))
+                        Some((mapping, size))
                     })
                     .collect::<Option<_>>()?;
                 Some(Arc::new(crate::page_map::build_page_map(&pages)))
@@ -697,7 +938,16 @@ impl Inner {
                     if control.shutdown {
                         return;
                     }
-                    if let Some(mode) = control.pending.take() {
+                    if let Some(mode) = control.pending {
+                        // A request that superseded a build waits for the
+                        // burst it belongs to to end.
+                        let wait = control.settle_until.and_then(|until| until.checked_duration_since(Instant::now()));
+                        if let Some(wait) = wait.filter(|wait| !wait.is_zero()) {
+                            control = target.wake.wait_timeout(control, wait).unwrap_or_else(|p| p.into_inner()).0;
+                            continue;
+                        }
+                        control.settle_until = None;
+                        control.pending = None;
                         break (mode, false);
                     }
                     match (control.needs_full, self.idle_full_delay) {
@@ -733,6 +983,7 @@ impl Inner {
             let build = self.run_build(&target, &build_target, id, mode);
             let mut control = target.control.lock().unwrap_or_else(|p| p.into_inner());
             control.running = None;
+            control.unbuilt_request = build.result.status == BuildStatus::Canceled;
             let superseded = control.superseded && build.result.status == BuildStatus::Canceled;
             let summary = TexBuildSummary {
                 result: build.result.clone(),
@@ -748,13 +999,21 @@ impl Inner {
                 has_output: build.output.as_ref().is_some_and(|o| o.synctex.is_some())
                     && build.result.status != BuildStatus::Canceled,
             };
+            if control.shutdown {
+                // Released (its folder is no longer open) or exiting: the
+                // result is reported but neither kept nor pinned.
+                drop(control);
+                let _ = self
+                    .events
+                    .send(TexEvent::Finished { target: target.reference.clone(), summary: Box::new(summary) });
+                return;
+            }
             let stored = Arc::new(StoredBuild {
                 build,
                 summary: summary.clone(),
                 root: target.root.clone(),
                 session: OnceLock::new(),
                 page_map: OnceLock::new(),
-                pngs: Mutex::new(HashMap::new()),
                 maps: Mutex::new(HashMap::new()),
             });
             // Load the PDF and SyncTeX now: the frozen output directory may be
@@ -887,16 +1146,16 @@ impl PageMapProvider for TexService {
         if !build.starts_with("tex-") {
             return None;
         }
-        self.build(&BuildId(build.to_owned()))?.page_map(self)
+        self.build(&BuildId(build.to_owned()))?.page_map()
     }
 
     fn page_image(&self, render_ref: &str) -> Option<PageImage> {
         if !render_ref.starts_with("tex-") {
             return None;
         }
-        let (build, page) = parse_render_ref(render_ref)?;
+        let (build, page) = self.page_of(render_ref)?;
         let png = self.page_png(&build, page, PAGE_IMAGE_SCALE).ok()?;
-        Some(PageImage { media_type: "image/png", bytes: Arc::from(png.as_slice()) })
+        Some(PageImage { media_type: "image/png", bytes: png })
     }
 
     fn revision_text(&self, document: &DocumentId, revision: u64) -> Option<Arc<str>> {

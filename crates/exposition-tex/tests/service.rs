@@ -398,6 +398,8 @@ fn builds_of_a_folder_that_is_no_longer_open_are_unreachable() {
     assert_eq!(summary.result.status, BuildStatus::Succeeded, "{:?}", summary.result.diagnostics);
     let id = summary.result.id.clone();
     assert!(env.service.page_png(&id, 0, 1.0).is_ok());
+    let page = summary.result.pages[0].render_ref.clone();
+    assert!(exposition_page::PageMapProvider::page_image(&env.service, &page).is_some());
 
     let other = tempfile::tempdir().unwrap();
     std::fs::write(other.path().join("main.tex"), "\\documentclass{article}\\begin{document}B\\end{document}\n")
@@ -409,6 +411,7 @@ fn builds_of_a_folder_that_is_no_longer_open_are_unreachable() {
     assert!(env.service.build(&id).is_none(), "the build id is unknown in the other folder");
     assert!(matches!(env.service.page_png(&id, 0, 1.0), Err(TexServiceError::UnknownBuild)));
     assert!(matches!(env.service.page_map(&id, 0), Err(TexServiceError::UnknownBuild)));
+    assert!(exposition_page::PageMapProvider::page_image(&env.service, &page).is_none());
     assert!(exposition_page::PageMapProvider::page_image(&env.service, &format!("{}-p0", id.0)).is_none());
     assert!(matches!(env.service.export_pdf(&id, None), Err(TexServiceError::UnknownBuild)));
     let elsewhere = tempfile::tempdir().unwrap();

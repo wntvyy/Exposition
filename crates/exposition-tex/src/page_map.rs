@@ -32,12 +32,13 @@ use crate::pdf::PageRect;
 
 /// Build the shared page map of one build from its page mappings.
 /// `pages` pairs each mapping with its page size in points.
-pub fn build_page_map(pages: &[(PageMapping, (f64, f64))]) -> PageMap {
+pub fn build_page_map<M: std::borrow::Borrow<PageMapping>>(pages: &[(M, (f64, f64))]) -> PageMap {
     let mut files: Vec<WorkspacePath> = Vec::new();
     let mut equations: Vec<EquationInfo> = Vec::new();
     let mut equation_ids: HashMap<(u32, TextRange), u32> = HashMap::new();
     let mut raw_pages = Vec::with_capacity(pages.len());
     for (mapping, (width, height)) in pages {
+        let mapping: &PageMapping = mapping.borrow();
         let mut clusters = Vec::new();
         let mut i = 0;
         while i < mapping.glyphs.len() {
