@@ -141,12 +141,12 @@ when it is missing. The runner reads that and reports the scenario as
 *unavailable*, not passed. `mathlib` and `mathlib-setup` need prepared external
 state and are always deferred, as are the live scenarios.
 
-**Scenario inventory.** `scripts/e2e/scenarios/` holds 102 scenario files
+**Scenario inventory.** `scripts/e2e/scenarios/` holds 103 scenario files
 (every `.mjs` file there is a scenario; helper modules live one folder up in
 `scripts/e2e/` and are not counted). `npm run e2e` without names runs the 92
 whose name does not start with `live-`; eight of those (`review-m5-agents`,
 `review-m7-graph-fs`, `review-m7-ipc`, and the five `review-sec-*`) skip
-themselves unless they are named. The other ten are the `live-*` scenarios.
+themselves unless they are named. The other eleven are the `live-*` scenarios.
 
 **Scenarios that need a debug build.** Scenarios run against the debug build
 made by `npm run build:app` unless `EXPOSITION_E2E_EXECUTABLE` names another

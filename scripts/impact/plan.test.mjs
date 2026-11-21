@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { INVARIANT_SCENARIOS, SCENARIOS } from "./manifest.mjs";
 import { buildPlan, globToRegExp, isRustTestOnly } from "./plan.mjs";
 
-const ALL_SCENARIOS = [...new Set([...Object.values(SCENARIOS).flat(), ...INVARIANT_SCENARIOS, "live-agents", "live-graph", "live-restricted", "live-agentctx", "live-a1-loop", "live-workflow", "live-workflow-audit", "live-m9-agents", "live-review-m8-agent", "mathlib", "mathlib-setup"])].sort();
+const ALL_SCENARIOS = [...new Set([...Object.values(SCENARIOS).flat(), ...INVARIANT_SCENARIOS, "live-agents", "live-graph", "live-restricted", "live-agentctx", "live-a1-loop", "live-tool-continuations", "live-workflow", "live-workflow-audit", "live-m9-agents", "live-review-m8-agent", "mathlib", "mathlib-setup"])].sort();
 
 const CRATES = [
   { name: "exposition-core", dir: "crates/exposition-core", deps: [] },
@@ -283,6 +283,9 @@ describe("deferred qualification", () => {
   it("live scenarios are deferred unless --live is given", () => {
     const deferred = plan([M("crates/exposition-agents/src/prompt.rs")]);
     expect(deferred.deferred.map((d) => d.id)).toEqual(expect.arrayContaining(["live:live-agents", "live:live-a1-loop"]));
+    // What a tool tells the model (schemas, descriptions, result notes) is qualified by the continuation scenario.
+    const tools = plan([M("crates/exposition-agents/src/tools/exec.rs")]);
+    expect(tools.deferred.map((d) => d.id)).toContain("live:live-tool-continuations");
     expect(ids(deferred).some((id) => id.startsWith("live:"))).toBe(false);
     const live = plan([M("crates/exposition-agents/src/prompt.rs")], { options: { live: true } });
     expect(ids(live)).toContain("live:live-agents");
