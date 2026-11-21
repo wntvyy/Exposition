@@ -68,6 +68,10 @@ pub struct BuildRecord {
     pub map: Option<Arc<PageMap>>,
     /// Texts of the open documents compiled, by (document, revision).
     pub texts: Vec<(DocumentId, u64, WorkspacePath, Arc<str>)>,
+    /// The documents that were open (with a path) when the build's snapshot
+    /// was taken, read or not. One of these that is not in `texts` was
+    /// available to the build and not read by it.
+    pub open_documents: Vec<DocumentId>,
     pub timings: BuildTimings,
 }
 
@@ -251,6 +255,7 @@ impl TypesettingService {
             document: if failed { None } else { output.document },
             map: if failed { None } else { output.map },
             texts: snapshot.buffer_texts().into_iter().collect(),
+            open_documents: snapshot.open_documents(),
             timings: BuildTimings { snapshot_ms, compile_ms: output.compile_ms, map_ms: output.map_ms, total_ms },
         });
         if !retain {
@@ -298,6 +303,23 @@ impl TypesettingService {
         let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
         let open = self.workspace.open_root();
         store.recent.iter().rev().find(|r| &r.entry == entry && open.as_deref() == Some(r.root.as_path())).cloned()
+    }
+
+    /// Whether a change of the open document `document`, now at `revision`,
+    /// can alter what the latest build of `entry` produced. "No" only when
+    /// that build is retained and either compiled this revision of the
+    /// document (or a later one), or had the document as an open buffer and
+    /// did not read it under any path. Every file a build reads goes through
+    /// its snapshot, and what it reads is decided by the files read so far, so
+    /// a buffer it did not read cannot change the next build. A document
+    /// opened after the build is not known to it and counts as a concern, as
+    /// does everything when the latest build is no longer retained.
+    pub fn change_concerns(&self, entry: &WorkspacePath, document: &DocumentId, revision: u64) -> bool {
+        let Some(record) = self.latest(entry) else { return true };
+        match record.revision_of(document) {
+            Some(compiled) => compiled < revision,
+            None => !record.open_documents.contains(document),
+        }
     }
 
     /// Text of a document revision compiled by a retained build.

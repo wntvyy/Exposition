@@ -105,6 +105,12 @@ impl BuildSnapshot {
             .collect()
     }
 
+    /// Every open document (with a path) captured in this snapshot, whether
+    /// or not the build read it.
+    pub fn open_documents(&self) -> Vec<DocumentId> {
+        self.workspace.buffers().map(|buffer| buffer.id.clone()).collect()
+    }
+
     /// Text of every open document read by the build, by (document, revision).
     pub fn buffer_texts(&self) -> Vec<(DocumentId, u64, WorkspacePath, Arc<str>)> {
         let read = self.read.lock().unwrap_or_else(|p| p.into_inner());
