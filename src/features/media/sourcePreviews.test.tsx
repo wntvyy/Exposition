@@ -5,11 +5,13 @@ import type { ImageReference } from "../../bindings/ImageReference";
 
 const ipc = vi.hoisted(() => ({
   mediaReadImage: vi.fn<(path: string) => Promise<ArrayBuffer>>(),
+  workspaceOff: vi.fn(),
+  workspace: vi.fn(),
 }));
 
 vi.mock("../../lib/ipc", () => ({
   commands: { mediaReadImage: ipc.mediaReadImage, mediaImageReferences: vi.fn() },
-  events: { workspace: () => Promise.resolve(() => {}) },
+  events: { workspace: ipc.workspace },
   isCommandError: (v: unknown) => typeof v === "object" && v !== null && "code" in v,
 }));
 
@@ -101,6 +103,9 @@ function png(): ArrayBuffer {
 }
 
 beforeEach(() => {
+  ipc.workspaceOff.mockReset();
+  ipc.workspace.mockReset();
+  ipc.workspace.mockImplementation(async () => ipc.workspaceOff);
   localStorage.clear();
   resetImageCacheForTests();
   let n = 0;
@@ -238,6 +243,35 @@ describe("PreviewController", () => {
     expect(document.body.textContent).toContain("No preview for PDF files: fig.pdf");
     expect(ipc.mediaReadImage).not.toHaveBeenCalled();
     controller.dispose();
+  });
+
+  it("shares one workspace-event subscription among all controllers (perf FE-8)", async () => {
+    const answer = vi.fn(() => [found("a.png", 0)]);
+    const first = await setup("![a](a.png) one", answer);
+    const second = await setup("![a](a.png) two", answer);
+    expect(ipc.workspace).toHaveBeenCalledTimes(1);
+    const deliver = ipc.workspace.mock.calls[0]![0] as (event: unknown) => void;
+    const queries = () => first.query.mock.calls.length + second.query.mock.calls.length;
+    const before = queries();
+    // A change to a source file concerns no preview.
+    deliver({ kind: "filesChanged", rescan: false, changes: [{ path: "doc/notes.md", kind: "modified" }] });
+    await new Promise((r) => setTimeout(r, 250));
+    expect(queries()).toBe(before);
+    // A changed image: every controller locates its references again.
+    deliver({ kind: "filesChanged", rescan: false, changes: [{ path: "a.png", kind: "modified" }] });
+    await vi.waitFor(() => expect(queries()).toBe(before + 2));
+    // Another project: previews are dropped at once and looked up again.
+    deliver({ kind: "closed" });
+    expect(first.editor.zones.size + second.editor.zones.size).toBe(0);
+    await vi.waitFor(() => expect(queries()).toBe(before + 4));
+    first.controller.dispose();
+    expect(ipc.workspaceOff).not.toHaveBeenCalled();
+    second.controller.dispose();
+    await vi.waitFor(() => expect(ipc.workspaceOff).toHaveBeenCalledTimes(1));
+    // The next controller subscribes again.
+    const third = await setup("x", () => []);
+    expect(ipc.workspace).toHaveBeenCalledTimes(2);
+    third.controller.dispose();
   });
 
   it("shrinks to one line when the image cannot be displayed", async () => {

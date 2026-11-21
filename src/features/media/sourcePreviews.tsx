@@ -335,12 +335,7 @@ export class PreviewController {
     ];
     this.cleanups.push(() => subs.forEach((s) => s.dispose()));
     this.cleanups.push(previewPrefs.subscribe(() => this.onPrefs()));
-    try {
-      const pending = events.workspace((event) => this.onWorkspace(event));
-      this.cleanups.push(() => void pending.then((off) => off()).catch(() => {}));
-    } catch {
-      // Not running inside the desktop shell (unit tests).
-    }
+    watchWorkspace();
     this.schedule(0);
   }
 
@@ -396,19 +391,16 @@ export class PreviewController {
     else this.schedule(0);
   }
 
-  private onWorkspace(event: WorkspaceEvent) {
-    if (event.kind === "opened" || event.kind === "closed") {
-      // Never keep another project's previews.
-      this.references = [];
-      this.apply([]);
-      this.schedule(0);
-      return;
-    }
-    if (event.kind !== "filesChanged") return;
-    const relevant =
-      event.rescan ||
-      event.changes.some((c) => /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico|pdf|eps|tiff?)$/i.test(c.path) || !c.path.includes("."));
-    if (relevant) this.schedule(150);
+  /** Another project was opened, or this one closed: never keep its previews. */
+  projectChanged(): void {
+    this.references = [];
+    this.apply([]);
+    this.schedule(0);
+  }
+
+  /** Image files (or folders) of the project changed: locate the references again. */
+  imagesChanged(): void {
+    this.schedule(150);
   }
 
   /** Ask the backend for the references of the current text; drop obsolete answers. */
@@ -511,8 +503,45 @@ export class PreviewController {
     if (this.timer) clearTimeout(this.timer);
     this.cleanups.forEach((c) => c());
     controllers.delete(this);
+    unwatchWorkspace();
     if (lastActive === this) lastActive = null;
   }
+}
+
+/**
+ * One workspace-event subscription for every preview controller (there is a
+ * controller per open source editor): each event is examined once, then the
+ * controllers are told. Held only while a controller exists.
+ */
+let workspaceWatch: Promise<() => void> | null = null;
+
+/** Tell the preview controllers about a workspace event. */
+export function dispatchWorkspaceEvent(event: WorkspaceEvent): void {
+  if (event.kind === "opened" || event.kind === "closed") {
+    for (const controller of [...controllers]) controller.projectChanged();
+    return;
+  }
+  if (event.kind !== "filesChanged") return;
+  const relevant =
+    event.rescan ||
+    event.changes.some((c) => /\.(png|jpe?g|gif|webp|bmp|svg|avif|ico|pdf|eps|tiff?)$/i.test(c.path) || !c.path.includes("."));
+  if (relevant) for (const controller of [...controllers]) controller.imagesChanged();
+}
+
+function watchWorkspace() {
+  if (workspaceWatch) return;
+  try {
+    workspaceWatch = events.workspace(dispatchWorkspaceEvent);
+  } catch {
+    // Not running inside the desktop shell (unit tests).
+  }
+}
+
+function unwatchWorkspace() {
+  if (controllers.size > 0 || !workspaceWatch) return;
+  const pending = workspaceWatch;
+  workspaceWatch = null;
+  void pending.then((off) => off()).catch(() => {});
 }
 
 /** The preview controller of the focused (or most recently focused) source editor. */
