@@ -40,10 +40,24 @@ fn rules_for(path: Option<&WorkspacePath>) -> Option<&'static dyn PageInputRules
     }
 }
 
-fn map_of(state: &State<'_, AppState>, build: &str) -> Result<Arc<PageMap>, CommandError> {
-    providers(state)
-        .iter()
-        .find_map(|p| p.page_map(build))
+/// Run `work` with every format's provider on a blocking thread. A provider
+/// call can compute (the first page-map query of a LaTeX build extracts and
+/// maps every page; a page image is rendered on first request), which must
+/// not occupy an async runtime thread.
+async fn with_providers<T: Send + 'static>(
+    state: &State<'_, AppState>,
+    work: impl FnOnce(&[&dyn PageMapProvider]) -> T + Send + 'static,
+) -> Result<T, CommandError> {
+    let typesetting = Arc::clone(&state.typesetting.service);
+    let tex = state.tex.clone();
+    tauri::async_runtime::spawn_blocking(move || work(&[typesetting.as_ref(), &tex]))
+        .await
+        .map_err(|e| CommandError::new("page.internal", e.to_string()))
+}
+
+async fn map_of(state: &State<'_, AppState>, build: String) -> Result<Arc<PageMap>, CommandError> {
+    with_providers(state, move |providers| providers.iter().find_map(|p| p.page_map(&build)))
+        .await?
         .ok_or_else(|| CommandError::new("page.unknownBuild", "the build or its page map is no longer available"))
 }
 
@@ -56,11 +70,12 @@ pub async fn page_image(state: State<'_, AppState>, render_ref: String) -> Resul
     {
         return Err(CommandError::new("page.invalidRef", "invalid page reference"));
     }
-    providers(&state)
-        .iter()
-        .find_map(|p| p.page_image(&render_ref))
-        .map(|image| Response::new(image.bytes.to_vec()))
-        .ok_or_else(|| CommandError::new("page.unknownPage", "the page is no longer available"))
+    with_providers(&state, move |providers| {
+        providers.iter().find_map(|p| p.page_image(&render_ref)).map(|image| image.bytes.to_vec())
+    })
+    .await?
+    .map(Response::new)
+    .ok_or_else(|| CommandError::new("page.unknownPage", "the page is no longer available"))
 }
 
 fn finite(values: &[f64]) -> Result<(), CommandError> {
@@ -81,7 +96,7 @@ pub async fn page_hit_test(
     y: f64,
 ) -> Result<PageHit, CommandError> {
     finite(&[x, y])?;
-    Ok(map_of(&state, &build)?.hit_test(page, x, y))
+    Ok(map_of(&state, build).await?.hit_test(page, x, y))
 }
 
 #[tauri::command]
@@ -92,7 +107,7 @@ pub async fn page_caret(
     offset: u32,
     affinity: Affinity,
 ) -> Result<Option<CaretGeometry>, CommandError> {
-    Ok(map_of(&state, &build)?.caret_geometry(&path, offset, affinity))
+    Ok(map_of(&state, build).await?.caret_geometry(&path, offset, affinity))
 }
 
 #[tauri::command]
@@ -109,7 +124,7 @@ pub async fn page_navigate(
     if let Some(x) = goal_x {
         finite(&[x])?;
     }
-    Ok(map_of(&state, &build)?.navigate(&path, offset, affinity, motion, goal_x))
+    Ok(map_of(&state, build).await?.navigate(&path, offset, affinity, motion, goal_x))
 }
 
 /// Highlight rectangles and rendered text of a source range.
@@ -121,7 +136,7 @@ pub async fn page_selection(
     start: u32,
     end: u32,
 ) -> Result<SelectionGeometry, CommandError> {
-    Ok(map_of(&state, &build)?.selection(&path, start, end))
+    Ok(map_of(&state, build).await?.selection(&path, start, end))
 }
 
 /// Apply typing, deletion, or a paragraph break at a caret/selection.

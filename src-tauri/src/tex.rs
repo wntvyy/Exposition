@@ -119,7 +119,7 @@ pub async fn tex_page_image(
         .await
         .map_err(|e| CommandError::new("tex.io", e.to_string()))?
         .map_err(service_error)?;
-    Ok(Response::new(png.as_ref().clone()))
+    Ok(Response::new(png.to_vec()))
 }
 
 /// Glyph-level mapping of a page of a finished build.
@@ -208,6 +208,13 @@ pub fn is_tex_build(build: &str) -> bool {
 
 fn shared_events(app: &AppHandle, event: &TexEvent) {
     let tex = app.state::<AppState>().tex.clone();
+    // The shared events name an entry by its path alone: a build of the
+    // folder that was open before must not reach the views of this one.
+    let (TexEvent::Queued { target, .. } | TexEvent::Started { target, .. } | TexEvent::Finished { target, .. }) =
+        event;
+    if !tex.is_open_folder(target) {
+        return;
+    }
     let (entry, activity) = match event {
         TexEvent::Queued { target, .. } => (target.entry.clone(), BuildActivity::Queued),
         TexEvent::Started { target, .. } => (target.entry.clone(), BuildActivity::Building),
@@ -264,12 +271,24 @@ pub fn forward_events(app: AppHandle) {
 
     // Document edits (typing on the page or in source) and file changes
     // rebuild the watched entries; closing the folder forgets them.
-    let mut documents = app.state::<AppState>().documents.subscribe();
+    let service = app.state::<AppState>().documents.clone();
+    let mut documents = service.subscribe();
     let tex = app.state::<AppState>().tex.clone();
     tauri::async_runtime::spawn(async move {
         loop {
             match documents.recv().await {
-                Ok(DocumentEvent::Changed(_)) | Err(RecvError::Lagged(_)) => {
+                // Only the entries the change can concern are rebuilt; a
+                // document that is no longer known rebuilds all of them.
+                Ok(DocumentEvent::Changed(change)) => {
+                    let (tex, service) = (tex.clone(), service.clone());
+                    let _ = tauri::async_runtime::spawn_blocking(move || match service.info(&change.document) {
+                        Ok(info) => tex.rebuild_for_change(&change.document, info.path.as_ref(), change.revision),
+                        Err(_) => tex.rebuild_watched(),
+                    })
+                    .await;
+                }
+                // Changes were missed: every entry may be concerned.
+                Err(RecvError::Lagged(_)) => {
                     let tex = tex.clone();
                     let _ = tauri::async_runtime::spawn_blocking(move || tex.rebuild_watched()).await;
                 }
@@ -287,7 +306,13 @@ pub fn forward_events(app: AppHandle) {
                     let tex = tex.clone();
                     let _ = tauri::async_runtime::spawn_blocking(move || tex.rebuild_watched()).await;
                 }
-                Ok(WorkspaceEvent::Closed) => tex.forget_watched(),
+                Ok(WorkspaceEvent::Closed) => {
+                    tex.forget_watched();
+                    tex.release_closed_folders();
+                }
+                // Another folder is open now: its predecessor's workers,
+                // builds and page images are not needed again.
+                Ok(WorkspaceEvent::Opened { .. }) => tex.release_closed_folders(),
                 Ok(_) => {}
                 Err(RecvError::Closed) => break,
             }

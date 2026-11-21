@@ -105,6 +105,17 @@ impl BuildSnapshot {
             .collect()
     }
 
+    /// Every open document (with a path) captured in this snapshot, whether
+    /// or not the build read it.
+    pub fn open_documents(&self) -> Vec<DocumentId> {
+        self.workspace.buffers().map(|buffer| buffer.id.clone()).collect()
+    }
+
+    /// Whether a read of this snapshot failed (a missing or refused file).
+    pub fn has_failed_reads(&self) -> bool {
+        self.read.lock().unwrap_or_else(|p| p.into_inner()).values().any(Result::is_err)
+    }
+
     /// Text of every open document read by the build, by (document, revision).
     pub fn buffer_texts(&self) -> Vec<(DocumentId, u64, WorkspacePath, Arc<str>)> {
         let read = self.read.lock().unwrap_or_else(|p| p.into_inner());

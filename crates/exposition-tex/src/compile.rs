@@ -46,7 +46,7 @@
 //! execution service provides one. `--safer` would restrict LuaLaTeX further
 //! but breaks luaotfload, so it is not used.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
@@ -158,7 +158,16 @@ pub struct SnapshotFile {
 #[derive(Clone, Debug)]
 pub struct BuildSnapshot {
     pub id: SnapshotId,
+    /// Every open document with a path, and every project file the engine read.
     pub files: BTreeMap<WorkspacePath, SnapshotFile>,
+    /// Workspace paths (lower-cased) of the project files the engine opened,
+    /// from its recorder. `None` when the recorder is missing or does not
+    /// list the entry: what the build read is then unknown. The bibliography
+    /// tools' inputs are not recorded.
+    engine_inputs: Option<BTreeSet<String>>,
+    /// The build has a biber control file: biber reads the data sources it
+    /// names (any extension, any location) without a record.
+    biber: bool,
     overlay_root: PathBuf,
     project_root: PathBuf,
     entry_dir: Option<WorkspacePath>,
@@ -174,6 +183,17 @@ impl BuildSnapshot {
     /// Text of a snapshot file.
     pub fn text(&self, path: &WorkspacePath) -> Option<&Arc<str>> {
         self.files.get(path).and_then(|f| f.text.as_ref())
+    }
+
+    /// Whether the engine opened `path` during this build (compared without
+    /// regard to letter case, as the file system may). `None`: not known.
+    pub fn engine_read(&self, path: &WorkspacePath) -> Option<bool> {
+        self.engine_inputs.as_ref().map(|inputs| inputs.contains(&path.as_str().to_lowercase()))
+    }
+
+    /// Whether the build's bibliography is made by biber (see `biber`).
+    pub fn uses_biber(&self) -> bool {
+        self.biber
     }
 
     /// The snapshot's TeX sources bound to a SyncTeX file, for mapping.
@@ -227,6 +247,9 @@ pub struct TexBuilder<R: JobRunner> {
 }
 
 const ENGINE_TIMEOUT_MS: u64 = 180_000;
+/// Prefix of a page render reference that is the page's content identity
+/// ([`crate::pdf::PdfDocument::page_keys`]); build ids never start with it.
+pub const CONTENT_REF_PREFIX: &str = "tex-c-";
 const KEEP_BUILDS: usize = 4;
 
 impl<R: JobRunner> TexBuilder<R> {
@@ -592,14 +615,22 @@ impl<R: JobRunner> TexBuilder<R> {
                 content_hash: hex_sha256(&bytes),
             });
             if let Ok(doc) = PdfDocument::open(bytes) {
+                let keys = doc.page_keys();
                 for i in 0..doc.page_count() {
                     let (w, h) = doc.page_size(i).unwrap_or((0.0, 0.0));
                     pages.push(PageArtifact {
                         index: i as u32,
                         width_pt: w,
                         height_pt: h,
-                        // `<build id>-p<index>`: plain characters, as page views require.
-                        render_ref: format!("{}-p{i}", id.0),
+                        // The page's content identity: a page that an edit
+                        // elsewhere left as it was keeps its reference, so
+                        // its image is neither rendered nor sent again. A
+                        // page without one gets `<build id>-p<index>`, unique
+                        // to this build. Plain characters, as page views require.
+                        render_ref: match keys.get(i).and_then(Option::as_deref) {
+                            Some(key) => format!("{CONTENT_REF_PREFIX}{key}"),
+                            None => format!("{}-p{i}", id.0),
+                        },
                     });
                 }
             }
@@ -797,6 +828,7 @@ impl<R: JobRunner> TexBuilder<R> {
             );
         }
         let recorder = read_lossy(fls);
+        let mut engine_inputs: BTreeSet<String> = BTreeSet::new();
         let mut pwd: Option<PathBuf> = None;
         for line in recorder.lines() {
             if let Some(p) = line.strip_prefix("PWD ") {
@@ -811,6 +843,7 @@ impl<R: JobRunner> TexBuilder<R> {
             let Some(path) = resolve_name(&absolute, overlay_root, project_root, entry_dir.as_ref()) else {
                 continue;
             };
+            engine_inputs.insert(path.as_str().to_lowercase());
             if files.contains_key(&path) {
                 continue;
             }
@@ -846,9 +879,15 @@ impl<R: JobRunner> TexBuilder<R> {
             hasher.update(file.content_hash.as_bytes());
             hasher.update(b"\n");
         }
+        // A recorder that does not list the entry is not a record of this build.
+        let engine_inputs = engine_inputs.contains(&target.entry.as_str().to_lowercase()).then_some(engine_inputs);
+        // biblatex writes `<job>.bcf` next to the recorder file.
+        let biber = fls.with_extension("bcf").is_file();
         BuildSnapshot {
             id: SnapshotId(hex::encode(hasher.finalize())),
             files,
+            engine_inputs,
+            biber,
             overlay_root: overlay_root.to_path_buf(),
             project_root: project_root.to_path_buf(),
             entry_dir,

@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use exposition_core::path::WorkspacePath;
-use exposition_core::text::{TextRange, byte_to_utf16, utf16_to_byte};
+use exposition_core::text::{TextRange, utf16_len, utf16_to_byte};
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
@@ -45,6 +45,104 @@ pub struct SourceFile {
     pub path: WorkspacePath,
     pub text: Arc<str>,
     pub model: SourceModel,
+    /// Lookups over `text` and `model` that mapping a page needs for every
+    /// glyph cluster, prepared once per file: a page is mapped in time
+    /// proportional to the page, not to the file.
+    index: SourceIndex,
+}
+
+/// Bytes between two marks of a [`SourceIndex`].
+const OFFSET_MARK_BYTES: usize = 1024;
+
+struct SourceIndex {
+    /// (byte offset, UTF-16 offset) of the first character boundary at or
+    /// after every [`OFFSET_MARK_BYTES`] bytes, starting with (0, 0).
+    marks: Vec<(usize, usize)>,
+    /// The units' lines never decrease in unit order (units are in source
+    /// order): the units of a line range are then one run.
+    lines_ordered: bool,
+    /// The units' byte ranges never go backwards in unit order.
+    ranges_ordered: bool,
+    /// The units of each deferred stream, in unit order.
+    deferred: HashMap<u32, Vec<usize>>,
+}
+
+impl SourceIndex {
+    fn new(text: &str, model: &SourceModel) -> Self {
+        let mut marks = vec![(0, 0)];
+        let mut next = OFFSET_MARK_BYTES;
+        let mut units = 0;
+        for (byte, ch) in text.char_indices() {
+            if byte >= next {
+                marks.push((byte, units));
+                next = byte + OFFSET_MARK_BYTES;
+            }
+            units += ch.len_utf16();
+        }
+        let lines_ordered = model.units.windows(2).all(|pair| pair[0].line <= pair[1].line);
+        let ranges_ordered = model
+            .units
+            .windows(2)
+            .all(|pair| pair[0].range.start <= pair[1].range.start && pair[0].range.end <= pair[1].range.end);
+        let mut deferred: HashMap<u32, Vec<usize>> =
+            model.deferred_streams.iter().map(|stream| (*stream, Vec::new())).collect();
+        for (index, unit) in model.units.iter().enumerate() {
+            if let Some(list) = deferred.get_mut(&unit.stream) {
+                list.push(index);
+            }
+        }
+        Self { marks, lines_ordered, ranges_ordered, deferred }
+    }
+}
+
+impl SourceFile {
+    fn new(path: WorkspacePath, text: Arc<str>) -> Self {
+        let model = latex::parse(&text);
+        let index = SourceIndex::new(&text, &model);
+        Self { path, text, model, index }
+    }
+
+    /// UTF-16 offset of a byte offset (`None` beyond the text or inside a
+    /// character), as `exposition_core::text::byte_to_utf16`.
+    fn byte_to_utf16(&self, byte: usize) -> Option<usize> {
+        if byte > self.text.len() || !self.text.is_char_boundary(byte) {
+            return None;
+        }
+        let after = self.index.marks.partition_point(|mark| mark.0 <= byte);
+        let (mark_byte, mark_units) = self.index.marks[after - 1];
+        Some(mark_units + utf16_len(&self.text[mark_byte..byte]))
+    }
+
+    /// Byte offset of a UTF-16 offset (`None` beyond the text or inside a
+    /// surrogate pair), as `exposition_core::text::utf16_to_byte`.
+    fn utf16_to_byte(&self, offset: usize) -> Option<usize> {
+        let after = self.index.marks.partition_point(|mark| mark.1 <= offset);
+        let (mark_byte, mark_units) = self.index.marks[after - 1];
+        utf16_to_byte(&self.text[mark_byte..], offset - mark_units).ok().map(|byte| mark_byte + byte)
+    }
+
+    /// Indexes of the units on lines `first..=last`, in unit order.
+    fn units_on_lines(&self, first: u32, last: u32) -> Vec<usize> {
+        let units = &self.model.units;
+        if self.index.lines_ordered {
+            let start = units.partition_point(|unit| unit.line < first);
+            let end = units.partition_point(|unit| unit.line <= last);
+            (start..end.max(start)).collect()
+        } else {
+            (0..units.len()).filter(|&i| units[i].line >= first && units[i].line <= last).collect()
+        }
+    }
+
+    /// The units whose byte range lies within `start..end`, in unit order.
+    fn units_within(&self, start: usize, end: usize) -> Vec<&latex::SourceUnit> {
+        let units = &self.model.units;
+        if self.index.ranges_ordered {
+            let from = units.partition_point(|unit| unit.range.start < start);
+            units[from..].iter().take_while(|unit| unit.range.end <= end).collect()
+        } else {
+            units.iter().filter(|unit| unit.range.start >= start && unit.range.end <= end).collect()
+        }
+    }
 }
 
 /// The source files of a build snapshot, bound to SyncTeX input tags.
@@ -63,13 +161,7 @@ impl SourceSet {
         synctex: &SyncTex,
         resolve: impl Fn(&str) -> Option<WorkspacePath>,
     ) -> Self {
-        let files: Vec<SourceFile> = files
-            .into_iter()
-            .map(|(path, text)| {
-                let model = latex::parse(&text);
-                SourceFile { path, text, model }
-            })
-            .collect();
+        let files: Vec<SourceFile> = files.into_iter().map(|(path, text)| SourceFile::new(path, text)).collect();
         let mut by_tag = HashMap::new();
         for (tag, name) in &synctex.inputs {
             if let Some(path) = resolve(name)
@@ -586,21 +678,16 @@ fn align_block(
     for (tag, (l0, l1)) in window {
         let Some(file_index) = sources.file_for_tag(*tag) else { continue };
         let file = &sources.files[file_index];
-        for (ui, unit) in file.model.units.iter().enumerate() {
-            if unit.line >= *l0 && unit.line <= *l1 && !taken.contains(&(file_index, ui)) {
-                streams.entry((file_index, unit.stream)).or_default().push(ui);
+        for ui in file.units_on_lines(*l0, *l1) {
+            if !taken.contains(&(file_index, ui)) {
+                streams.entry((file_index, file.model.units[ui].stream)).or_default().push(ui);
             }
         }
         // Deferred streams (title block) may be typeset anywhere.
         for stream in &file.model.deferred_streams {
             streams.entry((file_index, *stream)).or_insert_with(|| {
-                file.model
-                    .units
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, u)| u.stream == *stream && !taken.contains(&(file_index, *i)))
-                    .map(|(i, _)| i)
-                    .collect()
+                let units = file.index.deferred.get(stream).map(Vec::as_slice).unwrap_or(&[]);
+                units.iter().copied().filter(|i| !taken.contains(&(file_index, *i))).collect()
             });
         }
     }
@@ -789,7 +876,7 @@ fn assign_targets(
                 let model_units: Vec<&latex::SourceUnit> = units.iter().map(|&u| &file.model.units[u]).collect();
                 let start = model_units.iter().map(|u| u.range.start).min().unwrap_or(0);
                 let end = model_units.iter().map(|u| u.range.end).max().unwrap_or(0);
-                let to16 = |b: usize| byte_to_utf16(&file.text, b).unwrap_or(0) as u32;
+                let to16 = |b: usize| file.byte_to_utf16(b).unwrap_or(0) as u32;
                 let mut boundaries: Vec<u32> = model_units.iter().map(|u| to16(u.range.start)).collect();
                 boundaries.push(to16(end));
                 boundaries.dedup();
@@ -865,17 +952,10 @@ fn compute_stats(
     }
     for ((path, start, end), members) in groups {
         let Some(file) = sources.files.iter().find(|f| f.path.as_str() == path) else { continue };
-        let (Ok(b0), Ok(b1)) = (utf16_to_byte(&file.text, start as usize), utf16_to_byte(&file.text, end as usize))
-        else {
+        let (Some(b0), Some(b1)) = (file.utf16_to_byte(start as usize), file.utf16_to_byte(end as usize)) else {
             continue;
         };
-        let expected: String = file
-            .model
-            .units
-            .iter()
-            .filter(|u| u.range.start >= b0 && u.range.end <= b1)
-            .map(|u| u.text.as_str())
-            .collect();
+        let expected: String = file.units_within(b0, b1).into_iter().map(|u| u.text.as_str()).collect();
         let actual: Vec<char> = members.iter().flat_map(|&c| clusters[c].chars.iter().copied()).collect();
         stats.roundtrip_checked += 1;
         if comparison_chars(&expected) == actual {
@@ -922,3 +1002,67 @@ pub fn source_coverage(pages: &[PageMapping], sources: &SourceSet) -> SourceCove
     }
     coverage
 }
+
+#[cfg(test)]
+mod index_tests {
+    use exposition_core::text::byte_to_utf16;
+
+    use super::*;
+
+    fn file(text: &str) -> SourceFile {
+        SourceFile::new(WorkspacePath::parse("main.tex").unwrap(), Arc::from(text))
+    }
+
+    /// A long source with characters of every UTF-8 and UTF-16 width.
+    fn long_text() -> String {
+        let mut text = String::from("\\documentclass{article}\n\\begin{document}\n");
+        for i in 0..400 {
+            text.push_str(&format!(
+                "Line {i}: caf\u{e9} na\u{ef}ve \u{1d538} $a_{i} + \\alpha$ \u{4e2d}\u{6587} end.\n"
+            ));
+        }
+        text.push_str("\\end{document}\n");
+        text
+    }
+
+    #[test]
+    fn indexed_offsets_equal_a_scan_from_the_start() {
+        let text = long_text();
+        let file = file(&text);
+        assert!(file.index.marks.len() > 10, "several marks: {}", file.index.marks.len());
+        for byte in 0..=text.len() + 2 {
+            assert_eq!(file.byte_to_utf16(byte), byte_to_utf16(&text, byte).ok(), "byte {byte}");
+        }
+        let units = utf16_len(&text);
+        for offset in 0..=units + 2 {
+            assert_eq!(file.utf16_to_byte(offset), utf16_to_byte(&text, offset).ok(), "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn indexed_unit_lookups_equal_a_scan_of_every_unit() {
+        let text = long_text();
+        let file = file(&text);
+        let units = &file.model.units;
+        assert!(units.len() > 5000);
+        assert!(file.index.lines_ordered && file.index.ranges_ordered, "units are in source order");
+        for (first, last) in [(1, 1), (3, 3), (10, 12), (200, 199), (399, 500), (0, 2), (900, 950)] {
+            let scanned: Vec<usize> =
+                (0..units.len()).filter(|&i| units[i].line >= first && units[i].line <= last).collect();
+            assert_eq!(file.units_on_lines(first, last), scanned, "lines {first}..={last}");
+        }
+        for (start, end) in [(0, 0), (0, 60), (57, 300), (1000, 1500), (text.len() - 40, text.len()), (500, 400)] {
+            let scanned: Vec<&str> = units
+                .iter()
+                .filter(|u| u.range.start >= start && u.range.end <= end)
+                .map(|u| u.text.as_str())
+                .collect();
+            let indexed: Vec<&str> = file.units_within(start, end).into_iter().map(|u| u.text.as_str()).collect();
+            assert_eq!(indexed, scanned, "bytes {start}..{end}");
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "mapping_review_tests.rs"]
+mod review_tests;

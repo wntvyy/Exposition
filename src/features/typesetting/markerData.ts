@@ -14,6 +14,34 @@ export interface DiagnosticMark {
   source: string;
 }
 
+/** What a document's markers were last computed from. */
+export interface AppliedMarks {
+  path: string;
+  revision: number;
+  builds: readonly BuildEvent[];
+}
+
+/**
+ * Whether a document's markers must be computed again: its path, its revision,
+ * or one of the latest finished builds differs from what they were computed
+ * from. Build activity (queued, building, idle) notifies without changing any
+ * of these, and then nothing is recomputed.
+ */
+export function marksOutdated(
+  applied: AppliedMarks | undefined,
+  path: string,
+  revision: number,
+  builds: readonly BuildEvent[],
+): boolean {
+  return (
+    !applied ||
+    applied.path !== path ||
+    applied.revision !== revision ||
+    applied.builds.length !== builds.length ||
+    applied.builds.some((build, i) => build !== builds[i])
+  );
+}
+
 const FORMAT_NAMES: Record<DocumentFormat, string> = { typst: "Typst", latex: "LaTeX", markdown: "Markdown" };
 
 /**

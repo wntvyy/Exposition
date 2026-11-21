@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { BuildEvent } from "../../bindings/BuildEvent";
 import type { Diagnostic } from "../../bindings/Diagnostic";
-import { diagnosticMarks } from "./markerData";
+import { diagnosticMarks, marksOutdated } from "./markerData";
 
 function build(format: "typst" | "latex", sources: Array<[string, number | null]>, diagnostics: Diagnostic[]): BuildEvent {
   return {
@@ -61,5 +61,27 @@ describe("diagnosticMarks", () => {
       { start: 0, end: 1, severity: "error", message: "a", source: "Typst" },
       { start: 3, end: 5, severity: "error", message: "b", source: "LaTeX" },
     ]);
+  });
+});
+
+describe("marker recomputation", () => {
+  it("is skipped when neither the revision nor a latest build changed (build activity only)", () => {
+    const typst = build("typst", [["main.typ", 4]], [error("main.typ", 0, 1, "a")]);
+    const other = build("latex", [["main.tex", 2]], []);
+    const applied = { path: "main.typ", revision: 4, builds: [typst, other] };
+    // queued / building / idle: the store hands out a new list of the same results.
+    expect(marksOutdated(applied, "main.typ", 4, [typst, other])).toBe(false);
+  });
+
+  it("is due for a first pass, a new result, another revision, or a renamed document", () => {
+    const typst = build("typst", [["main.typ", 4]], []);
+    const next = build("typst", [["main.typ", 4]], []);
+    const applied = { path: "main.typ", revision: 4, builds: [typst] };
+    expect(marksOutdated(undefined, "main.typ", 4, [typst])).toBe(true);
+    expect(marksOutdated(applied, "main.typ", 4, [next])).toBe(true);
+    expect(marksOutdated(applied, "main.typ", 4, [typst, next])).toBe(true);
+    expect(marksOutdated(applied, "main.typ", 4, [])).toBe(true);
+    expect(marksOutdated(applied, "main.typ", 5, [typst])).toBe(true);
+    expect(marksOutdated(applied, "renamed.typ", 4, [typst])).toBe(true);
   });
 });

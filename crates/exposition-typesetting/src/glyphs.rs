@@ -25,7 +25,7 @@ use exposition_page::map::{
 };
 use typst::World;
 use typst::layout::{Abs, Frame, FrameItem, Point, Transform};
-use typst::syntax::{FileId, LinkedNode, Source, Span, SyntaxKind, VirtualRoot, ast};
+use typst::syntax::{FileId, LinkedNode, Source, Span, SpanKind, SyntaxKind, VirtualRoot, ast};
 use typst::text::TextItem;
 use typst_layout::PagedDocument;
 use unicode_segmentation::UnicodeSegmentation;
@@ -59,8 +59,50 @@ enum Resolved {
     },
 }
 
+/// The top-level nodes of one source file with the span number each starts
+/// at, for finding the node of a span without walking every top-level node
+/// before it. Span numbers increase from left to right and a node's number
+/// is smaller than its descendants', so the node of a span lies under the
+/// last top-level node whose number is not greater.
+struct TopLevel<'a> {
+    /// Per node: the largest span number among it and the nodes before it
+    /// (non-decreasing, so it can be searched).
+    keys: Vec<u64>,
+    nodes: Vec<LinkedNode<'a>>,
+}
+
+impl<'a> TopLevel<'a> {
+    fn new(source: &'a Source) -> Self {
+        let nodes: Vec<LinkedNode<'a>> = LinkedNode::new(source.root()).children().collect();
+        let mut keys = Vec::with_capacity(nodes.len());
+        let mut highest = 0u64;
+        for node in &nodes {
+            if matches!(node.span().get(), SpanKind::Number { .. }) {
+                highest = highest.max(node.span().into_raw().get());
+            }
+            keys.push(highest);
+        }
+        Self { keys, nodes }
+    }
+
+    /// The node of a numbered span of this file, if it lies where the index
+    /// expects it. A span's number is unique in its file, so a node found
+    /// here is the one a search from the root finds.
+    fn find(&self, span: Span) -> Option<LinkedNode<'a>> {
+        if !matches!(span.get(), SpanKind::Number { .. }) {
+            return None;
+        }
+        let raw = span.into_raw().get();
+        let after = self.keys.partition_point(|key| *key <= raw);
+        self.nodes.get(after.checked_sub(1)?)?.find(span)
+    }
+}
+
 struct Extractor<'a> {
     world: &'a dyn World,
+    /// The sources of the files the document's glyphs refer to.
+    loaded: &'a HashMap<FileId, Source>,
+    top_level: HashMap<u32, TopLevel<'a>>,
     files: Vec<WorkspacePath>,
     file_index: HashMap<FileId, Option<u32>>,
     sources: HashMap<u32, Source>,
@@ -105,28 +147,45 @@ pub struct RawExtraction {
 
 /// Extract the clusters of every page (source ranges as compiled).
 pub fn extract_raw(world: &dyn World, document: &PagedDocument) -> RawExtraction {
-    let mut ex = Extractor {
-        world,
-        files: Vec::new(),
-        file_index: HashMap::new(),
-        sources: HashMap::new(),
-        equations: Vec::new(),
-        equation_index: HashMap::new(),
-        resolved: HashMap::new(),
-        span_totals: HashMap::new(),
-        span_seen: HashMap::new(),
-    };
+    // One walk over the frames: the text items of every page, how often each
+    // span occurs, and the sources of the files the glyphs refer to (held for
+    // the whole extraction so that their syntax trees can be indexed once).
+    let mut loaded: HashMap<FileId, Source> = HashMap::new();
+    let mut span_totals: HashMap<Span, usize> = HashMap::new();
     let mut placed_pages = Vec::with_capacity(document.pages().len());
     for page in document.pages() {
         let mut placed = Vec::new();
         collect(&page.frame, Transform::identity(), &mut placed);
         for p in &placed {
             for glyph in &p.item.glyphs {
-                *ex.span_totals.entry(glyph.span.0).or_default() += 1;
+                let span = glyph.span.0;
+                let total = span_totals.entry(span).or_default();
+                *total += 1;
+                if *total == 1
+                    && let Some(id) = span.id()
+                    && !loaded.contains_key(&id)
+                    && matches!(id.root(), VirtualRoot::Project)
+                    && let Ok(source) = world.source(id)
+                {
+                    loaded.insert(id, source);
+                }
             }
         }
         placed_pages.push((page.frame.width().to_pt(), page.frame.height().to_pt(), placed));
     }
+    let mut ex = Extractor {
+        world,
+        loaded: &loaded,
+        top_level: HashMap::new(),
+        files: Vec::new(),
+        file_index: HashMap::new(),
+        sources: HashMap::new(),
+        equations: Vec::new(),
+        equation_index: HashMap::new(),
+        resolved: HashMap::new(),
+        span_totals,
+        span_seen: HashMap::new(),
+    };
     let mut pages = Vec::with_capacity(placed_pages.len());
     for (width, height, placed) in &placed_pages {
         let mut clusters = Vec::new();
@@ -157,10 +216,13 @@ impl Extractor<'_> {
             }),
             VirtualRoot::Package(_) => None,
         };
-        if let Some(i) = index
-            && let Ok(source) = self.world.source(id)
-        {
-            self.sources.insert(i, source);
+        if let Some(i) = index {
+            if let Some(source) = self.loaded.get(&id) {
+                self.top_level.insert(i, TopLevel::new(source));
+                self.sources.insert(i, source.clone());
+            } else if let Ok(source) = self.world.source(id) {
+                self.sources.insert(i, source);
+            }
         }
         self.file_index.insert(id, index);
         index
@@ -211,7 +273,11 @@ impl Extractor<'_> {
             return Resolved::NonEditable(NonEditableReason::External, None);
         };
         let Some(source) = self.sources.get(&file).cloned() else { return Resolved::Generated(None) };
-        let Some(node) = source.find(span) else { return Resolved::Generated(None) };
+        // Through the file's top-level index when it has the span; a search
+        // from the root walks every top-level node before the span's, for
+        // every span of the document.
+        let indexed = self.top_level.get(&file).and_then(|top| top.find(span));
+        let Some(node) = indexed.or_else(|| source.find(span)) else { return Resolved::Generated(None) };
         let range = node.range();
         let in_raw = |n: &LinkedNode| {
             let mut p = n.parent().cloned();
@@ -675,3 +741,55 @@ fn is_code(kind: SyntaxKind) -> bool {
             | K::MathCall
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn walk<'a>(node: &LinkedNode<'a>, out: &mut Vec<LinkedNode<'a>>) {
+        out.push(node.clone());
+        for child in node.children() {
+            walk(&child, out);
+        }
+    }
+
+    /// Every node below the top level is found through the index (no search
+    /// from the root), and it is the node a search from the root finds.
+    #[test]
+    fn the_top_level_index_finds_the_node_a_root_search_finds() {
+        let mut text = String::new();
+        for i in 0..200 {
+            text.push_str(&format!(
+                "= Section {i} <sec-{i}>\nSome *strong* text with $a_{i}^2 + b = c$ and #emph[content {i}].\n\n$ sum_(k = 0)^n k = (n (n + 1)) / 2 $\n\n- item one\n- item `raw`\n\n"
+            ));
+        }
+        let source = Source::detached(text);
+        let top = TopLevel::new(&source);
+        assert!(top.nodes.len() > 1000, "{} top-level nodes", top.nodes.len());
+        assert!(top.keys.windows(2).all(|pair| pair[0] <= pair[1]));
+        let root = LinkedNode::new(source.root());
+        let mut nodes = Vec::new();
+        for child in root.children() {
+            walk(&child, &mut nodes);
+        }
+        let mut checked = 0;
+        for node in &nodes {
+            let span = node.span();
+            if !matches!(span.get(), SpanKind::Number { .. }) {
+                continue;
+            }
+            let indexed = top.find(span).unwrap_or_else(|| panic!("{:?} not found through the index", node.kind()));
+            let searched = source.find(span).expect("found from the root");
+            assert_eq!((indexed.range(), indexed.kind()), (searched.range(), searched.kind()));
+            assert_eq!(indexed.range(), node.range());
+            checked += 1;
+        }
+        assert!(checked > 5000, "{checked} spans checked");
+        // The root itself is not below a top-level node: the caller searches.
+        assert!(top.find(root.span()).is_none());
+    }
+}
+
+#[cfg(test)]
+#[path = "glyphs_review_tests.rs"]
+mod review_tests;

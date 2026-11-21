@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
 use exposition_core::build::{BuildId, BuildResult, BuildTarget, DocumentFormat, Engine, ExportArtifact};
-use exposition_core::document::DocumentEvent;
+use exposition_core::document::{DocumentChanged, DocumentEvent};
 use exposition_core::path::WorkspacePath;
 use exposition_execution::JobRefusal;
 use exposition_typesetting::{BuildRecord, BuildTimings, TypesettingService};
@@ -64,6 +64,8 @@ pub struct BuildStatusEvent {
 #[derive(Default)]
 struct Queue {
     dirty: BTreeSet<WorkspacePath>,
+    /// Entries taken from `dirty` whose build has not finished yet.
+    active: BTreeSet<WorkspacePath>,
 }
 
 /// Owns the typesetting service and its build thread.
@@ -155,6 +157,40 @@ impl TypesettingRuntime {
         }
     }
 
+    /// The watched entries a document change must rebuild. An entry is left
+    /// alone only when no build of it is queued or unfinished and its latest
+    /// build is known not to depend on the change
+    /// ([`TypesettingService::change_concerns`]); a document without a path is
+    /// read by no build. An unknown document rebuilds everything.
+    fn entries_for_change(&self, change: &DocumentChanged) -> Vec<WorkspacePath> {
+        let watched: Vec<_> = self.watched.lock().unwrap_or_else(|p| p.into_inner()).keys().cloned().collect();
+        match self.service.workspace().documents().info(&change.document) {
+            Ok(info) if info.path.is_none() => Vec::new(),
+            Ok(_) => watched
+                .into_iter()
+                .filter(|entry| {
+                    let unfinished = {
+                        let queue = self.queue.lock().unwrap_or_else(|p| p.into_inner());
+                        queue.dirty.contains(entry) || queue.active.contains(entry)
+                    };
+                    unfinished || self.service.change_concerns(entry, &change.document, change.revision)
+                })
+                .collect(),
+            Err(_) => watched,
+        }
+    }
+
+    fn request_for_change(&self, app: &AppHandle, change: &DocumentChanged) {
+        for entry in self.entries_for_change(change) {
+            self.request(entry, app);
+        }
+    }
+
+    /// A build of `entry` finished (or could not start).
+    fn finished(&self, entry: &WorkspacePath) {
+        self.queue.lock().unwrap_or_else(|p| p.into_inner()).active.remove(entry);
+    }
+
     /// Start the build thread and forward document changes to it.
     pub fn start(self: &Arc<Self>, app: AppHandle) {
         let runtime = Arc::clone(self);
@@ -168,11 +204,18 @@ impl TypesettingRuntime {
                         while queue.dirty.is_empty() {
                             queue = runtime.wake.wait(queue).unwrap_or_else(|p| p.into_inner());
                         }
-                        std::mem::take(&mut queue.dirty).into_iter().collect()
+                        // Unfinished until each is built: a change that arrives
+                        // meanwhile cannot be judged against the previous build.
+                        let entries: Vec<WorkspacePath> = std::mem::take(&mut queue.dirty).into_iter().collect();
+                        queue.active.extend(entries.iter().cloned());
+                        entries
                     };
                     for entry in entries {
                         // Watched entries were checked by `typesetting_watch`.
-                        let Ok(target) = target(&entry) else { continue };
+                        let Ok(target) = target(&entry) else {
+                            runtime.finished(&entry);
+                            continue;
+                        };
                         let _ = handle.emit(
                             STATUS_EVENT,
                             BuildStatusEvent { entry: entry.clone(), activity: BuildActivity::Building },
@@ -187,6 +230,8 @@ impl TypesettingRuntime {
                             Ok(Err(_)) => {}
                             Err(_) => eprintln!("typesetting: the compiler panicked while building {entry}"),
                         }
+                        // The record (if any) is retained by now.
+                        runtime.finished(&entry);
                         let _ = handle.emit(STATUS_EVENT, BuildStatusEvent { entry, activity: BuildActivity::Idle });
                     }
                 }
@@ -199,9 +244,9 @@ impl TypesettingRuntime {
         tauri::async_runtime::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(DocumentEvent::Changed(_)) | Err(RecvError::Lagged(_)) => {
-                        runtime.request_watched(&documents_app)
-                    }
+                    Ok(DocumentEvent::Changed(change)) => runtime.request_for_change(&documents_app, &change),
+                    // Changes were missed: every entry may be concerned.
+                    Err(RecvError::Lagged(_)) => runtime.request_watched(&documents_app),
                     Ok(_) => {}
                     Err(RecvError::Closed) => break,
                 }

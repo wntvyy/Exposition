@@ -4,7 +4,7 @@
 import type { BuildEvent } from "../../bindings/BuildEvent";
 import { monaco } from "../../lib/monaco";
 import { openHandles, type DocumentHandle } from "../editor";
-import { diagnosticMarks, type DiagnosticMark } from "./markerData";
+import { diagnosticMarks, marksOutdated, type AppliedMarks, type DiagnosticMark } from "./markerData";
 import { useTypesetting } from "./store";
 
 const OWNER = "typesetting";
@@ -33,11 +33,19 @@ function toMarker(model: monaco.editor.ITextModel, mark: DiagnosticMark): monaco
   };
 }
 
+/** What each model's markers were last computed from (dropped with the model). */
+const applied = new WeakMap<monaco.editor.ITextModel, AppliedMarks>();
+
 function update(handle: DocumentHandle, builds: BuildEvent[]) {
   if (handle.closed || !handle.path || handle.sync.pendingCount > 0) return;
-  const marks = diagnosticMarks(builds, handle.path, handle.sync.revision);
-  if (!marks) return;
   const model = handle.model;
+  const revision = handle.sync.revision;
+  // The store notifies for queued/building/idle as well as for results: the
+  // same builds for the same revision give the same markers.
+  if (!marksOutdated(applied.get(model), handle.path, revision, builds)) return;
+  applied.set(model, { path: handle.path, revision, builds });
+  const marks = diagnosticMarks(builds, handle.path, revision);
+  if (!marks) return;
   monaco.editor.setModelMarkers(
     model,
     OWNER,
@@ -60,5 +68,11 @@ export function installBuildMarkers(): void {
     if (state.entries !== previous.entries) updateAll();
   });
   // A document opened after its build: mark it once its handle is registered.
-  monaco.editor.onDidCreateModel(() => queueMicrotask(updateAll));
+  monaco.editor.onDidCreateModel((model) =>
+    queueMicrotask(() => {
+      const handle = openHandles().find((h) => h.model === model);
+      if (handle) update(handle, latestBuilds());
+      else updateAll();
+    }),
+  );
 }

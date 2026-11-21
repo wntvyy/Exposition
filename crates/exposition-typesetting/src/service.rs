@@ -68,6 +68,15 @@ pub struct BuildRecord {
     pub map: Option<Arc<PageMap>>,
     /// Texts of the open documents compiled, by (document, revision).
     pub texts: Vec<(DocumentId, u64, WorkspacePath, Arc<str>)>,
+    /// The documents that were open (with a path) when the build's snapshot
+    /// was taken, read or not. One of these that is not in `texts` was
+    /// available to the build and not read by it.
+    pub open_documents: Vec<DocumentId>,
+    /// A read of the build failed (a file that is missing or refused). What
+    /// such a build would read once the file exists is not known from it: a
+    /// document renamed or saved onto the missing path changes the result
+    /// without having been read.
+    pub unresolved_reads: bool,
     pub timings: BuildTimings,
 }
 
@@ -101,6 +110,9 @@ struct CompilerContext {
 struct Store {
     recent: VecDeque<Arc<BuildRecord>>,
     last_good: HashMap<WorkspacePath, Arc<BuildRecord>>,
+    /// The id of each entry's latest retained-kind build (whether or not its
+    /// record is still among `recent`).
+    latest_ids: HashMap<WorkspacePath, BuildId>,
     svgs: VecDeque<(String, Arc<String>)>,
 }
 
@@ -251,6 +263,8 @@ impl TypesettingService {
             document: if failed { None } else { output.document },
             map: if failed { None } else { output.map },
             texts: snapshot.buffer_texts().into_iter().collect(),
+            open_documents: snapshot.open_documents(),
+            unresolved_reads: snapshot.has_failed_reads(),
             timings: BuildTimings { snapshot_ms, compile_ms: output.compile_ms, map_ms: output.map_ms, total_ms },
         });
         if !retain {
@@ -261,6 +275,7 @@ impl TypesettingService {
         while store.recent.len() > RECENT_BUILDS {
             store.recent.pop_front();
         }
+        store.latest_ids.insert(target.entry.clone(), record.result.id.clone());
         if record.succeeded() {
             store.last_good.insert(target.entry.clone(), Arc::clone(&record));
         }
@@ -298,6 +313,39 @@ impl TypesettingService {
         let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
         let open = self.workspace.open_root();
         store.recent.iter().rev().find(|r| &r.entry == entry && open.as_deref() == Some(r.root.as_path())).cloned()
+    }
+
+    /// Whether a change of the open document `document`, now at `revision`,
+    /// can alter what the latest build of `entry` produced. "No" only when
+    /// that build is retained and either compiled this revision of the
+    /// document (or a later one), or had the document as an open buffer and
+    /// did not read it under any path. Every file a build reads goes through
+    /// its snapshot, and what it reads is decided by the files read so far, so
+    /// a buffer it did not read cannot change the next build. A document
+    /// opened after the build is not known to it and counts as a concern, as
+    /// does everything when the latest build is no longer retained, and every
+    /// document the build did not compile when one of its reads failed: the
+    /// file it missed may be this document under a new name.
+    pub fn change_concerns(&self, entry: &WorkspacePath, document: &DocumentId, revision: u64) -> bool {
+        let Some(record) = self.latest_known(entry) else { return true };
+        match record.revision_of(document) {
+            Some(compiled) => compiled < revision,
+            None => record.unresolved_reads || !record.open_documents.contains(document),
+        }
+    }
+
+    /// The record of an entry's latest build while it is still held: among
+    /// the recent builds, or (when builds of other entries pushed it out of
+    /// those) as the entry's last successful build, if that is its latest
+    /// build. With several watched entries the recent builds are shared, and
+    /// an entry that is not being built must not lose what is known about it.
+    fn latest_known(&self, entry: &WorkspacePath) -> Option<Arc<BuildRecord>> {
+        if let Some(record) = self.latest(entry) {
+            return Some(record);
+        }
+        let record = self.last_good(entry)?;
+        let store = self.store.lock().unwrap_or_else(|p| p.into_inner());
+        (store.latest_ids.get(entry) == Some(&record.result.id)).then_some(record)
     }
 
     /// Text of a document revision compiled by a retained build.

@@ -19,6 +19,8 @@ export function TypstEditor({ resource, mode, active }: EditorProps) {
   // Inactive tabs stay mounted; only the selected tab of the active group takes focus.
   const selected = useEditors((s) => s.groups[s.activeGroup].activeKey === resource.key);
   const focused = active && selected;
+  // The tab displayed in one of the groups; a tab hidden behind another does no page work.
+  const visible = useEditors((s) => Object.values(s.groups).some((group) => group.activeKey === resource.key));
   const monacoEditor = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const reveal = useTypesetting((s) => s.reveal);
   const modeRef = useRef(mode);
@@ -71,7 +73,9 @@ export function TypstEditor({ resource, mode, active }: EditorProps) {
     return <SourceEditor path={resource.path} active={focused} onEditor={onEditor} />;
   }
   if (mode === "page") {
-    return <PageEditor resource={resource} mode="page" active={focused} onRevealMissed={onRevealMissed} />;
+    return (
+      <PageEditor resource={resource} mode="page" active={focused} visible={visible} onRevealMissed={onRevealMissed} />
+    );
   }
   return (
     <Group orientation="horizontal" className="typst-split" data-testid="typst-split">
@@ -80,7 +84,7 @@ export function TypstEditor({ resource, mode, active }: EditorProps) {
       </ResizablePanel>
       <ResizeHandle aria-label="Resize source and page views" />
       <ResizablePanel id="page" defaultSize="50%" minSize="20%">
-        <PageEditor resource={resource} mode="page" active={focused && !prefersSource} />
+        <PageEditor resource={resource} mode="page" active={focused && !prefersSource} visible={visible} />
       </ResizablePanel>
     </Group>
   );
