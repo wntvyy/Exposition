@@ -82,6 +82,12 @@ pub use exposition_research::records::{DeletedOutputs, OutputFile, OutputsRemove
 /// Research run records as the data side uses them.
 pub trait ResearchRecords: Send + Sync {
     fn records(&self) -> Result<Vec<ResearchRecord>, OpError>;
+    /// The records of [`Self::records`] that are active (runs executing
+    /// now). Implementations that can find them without reading the whole
+    /// history do so; the result is the same.
+    fn active_records(&self) -> Result<Vec<ResearchRecord>, OpError> {
+        Ok(self.records()?.into_iter().filter(|r| r.active).collect())
+    }
     fn deleted(&self) -> Result<Vec<ResearchRecord>, OpError>;
     fn record(&self, id: &str) -> Result<ResearchRecord, OpError>;
     fn delete(&self, id: &str, permanent: bool) -> Result<(), OpError>;
@@ -132,6 +138,9 @@ fn research_error(e: exposition_research::ResearchError) -> OpError {
 impl ResearchRecords for ResearchServiceRecords {
     fn records(&self) -> Result<Vec<ResearchRecord>, OpError> {
         self.service.run_records().map_err(research_error)
+    }
+    fn active_records(&self) -> Result<Vec<ResearchRecord>, OpError> {
+        self.service.active_run_records().map_err(research_error)
     }
     fn deleted(&self) -> Result<Vec<ResearchRecord>, OpError> {
         self.service.deleted_run_records().map_err(research_error)
@@ -427,9 +436,9 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
         }
     }
     if let Some(research) = cx.research
-        && let Ok(records) = research.records()
+        && let Ok(records) = research.active_records()
     {
-        for r in records.iter().filter(|r| r.active) {
+        for r in &records {
             // A workflow batch is part of its workflow run (listed and
             // stopped as that run, never on its own).
             let owner = research_consumer(cx, r);
