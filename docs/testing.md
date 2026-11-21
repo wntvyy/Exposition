@@ -21,7 +21,7 @@ product's project graph.
 | `npm run e2e -- <scenario>...` | Named scenarios against the built app, unchanged. |
 
 Options (after `--`): `--base <ref>`, `--json`, `--json-out <file>`,
-`--expect-plan <hash>`, `--jobs <n>`, `--skip <kinds or ids>`, `--fail-fast`,
+`--expect-plan <hash>`, `--jobs <n>`, `--e2e-jobs <n>`, `--skip <kinds or ids>`, `--fail-fast`,
 `--live`, `--release`, `--allow-full`, `--full`. `node scripts/impact.mjs` without arguments
 prints the usage.
 
@@ -80,6 +80,13 @@ private file, and the guard is the only check that sees the whole index.
   interface names in `src/features/*/register.tsx` runs when those files
   change, and the kernel host Python file, compiled into the research crate,
   selects the research crate and its dependents.
+
+- *Crates built on a changed crate.* The Rust tests of a dependent crate do not
+  show that its features still work in the app. An area can name the scenarios
+  that exercise it through its dependencies (`dependents` in the manifest); they
+  run when a crate one of the area's crates depends on changes. Example: a
+  typesetting change runs the agent scenarios in which an agent edits, saves,
+  and builds a document; a Lean change runs a formal-audit workflow.
 
 **Explicit mapping.** `scripts/impact/manifest.mjs` maps areas of the
 repository (editor, explorer, project operations, pages, research, execution,
@@ -165,7 +172,7 @@ Each planned check ends **passed**, **failed**, **skipped** (by `--skip`,
 |---|---|
 | 0 | every planned check ran and passed, and no required gate is pending |
 | 1 | a check failed |
-| 2 | usage error, invalid base, or the plan differs from `--expect-plan` |
+| 2 | usage error, invalid base, the plan differs from `--expect-plan`, or the working tree changed while the checks ran (stale result) |
 | 3 | nothing failed, but planned checks were skipped or unavailable |
 | 4 | pending: planned checks passed, but required gates were deferred (live, release, CI, manual), or the change escalated to full validation and the run was not allowed to expand |
 
@@ -183,12 +190,30 @@ The summary and the JSON result (`--json`, `--json-out`) also list the deferred
 qualification items and uncovered files; `complete` is true only when every
 planned check passed, nothing is deferred, and nothing is uncovered.
 
-Light checks run concurrently (`--jobs`, default 2). Cargo, the app build, and
-end-to-end scenarios run one at a time and never overlap each other or the
-light checks. `CARGO_BUILD_JOBS` and `RUST_TEST_THREADS` pass through to cargo;
-on a memory-constrained host set them low. Interrupting a run stops the running
-process tree. Scenario isolation is unchanged: each scenario process uses its
-own data directory and WebView2 profile as before.
+**Results are evidence for one snapshot.** The checks read the working tree as
+they go, not a copy. When the checks finish, the plan is resolved again; if the
+tree no longer gives the plan that was started (a file was edited, added, or
+removed, or `HEAD` moved), the run ends as **stale** with exit status 2 and is
+not a pass, whatever the individual checks reported. Do not edit the checkout
+a run is reading; work in another worktree, or commit and run the checks in a
+separate worktree. The JSON result records the snapshot (`HEAD`, merge base,
+the digest of the changed files), the wall time, and the settings used.
+
+**Concurrency.** Light checks run concurrently (`--jobs`, default 2). Cargo and
+the app build run one at a time and never overlap each other, the light checks,
+or a scenario. End-to-end scenarios then run up to `--e2e-jobs` at once
+(default 1; `EXPOSITION_E2E_JOBS` sets the default). Each scenario is its own
+process and app instance with its own data directory, WebView2 profile,
+debugging port, and credential namespace, and its page reports focus whichever
+window is in front, so scenarios do not see each other. Two kinds of scenario
+are still kept apart (`SCENARIO_RESOURCES` in the manifest, kept exact by its
+test): one that moves the real pointer, needs the foreground window, or drives
+a native dialog runs with no other scenario; one that reads or writes the OS
+clipboard never overlaps another clipboard scenario. The same scenarios run,
+each with the same isolation and the same failure reporting; only their
+overlap in time changes. `CARGO_BUILD_JOBS` and `RUST_TEST_THREADS` pass
+through to cargo; on a memory-constrained host set them low. Interrupting a run
+stops the running process trees.
 
 ## When to run full validation
 
@@ -234,10 +259,11 @@ listed; everything deferred or uncovered remains unverified.
   a computed `import()` path would be invisible (there are none in `src/`).
   File reads are found from literal paths and `join()` segment lists; a path
   assembled through variables is invisible unless the manifest maps it.
-- End-to-end selection follows areas, not the Rust dependency graph: a change
-  in a lower crate runs its dependents' Rust tests and its own area's
-  scenarios, and the dependents' scenarios only when the level is broad (which
-  adds the invariant set) or the area lists them.
+- End-to-end selection follows areas. A change in a lower crate runs its
+  dependents' Rust tests, its own area's scenarios, and the `dependents`
+  scenarios of each area built on it: a representative set, not every scenario
+  of those areas. The full set runs at the broad level's invariants or in full
+  validation.
 - Interrupting a run stops it without a summary or JSON result.
 - Path-literal detection is a heuristic that errs toward selecting more. The
   selector's own tests use real paths as sample data, so changing those files
