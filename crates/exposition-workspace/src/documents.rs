@@ -51,15 +51,16 @@ const UNDO_LIMIT: usize = 1000;
 /// first. The step made last is kept even when it alone is larger.
 pub const UNDO_BYTE_BUDGET: usize = 4 * crate::encoding::MAX_TEXT_BYTES as usize + 1024 * 1024;
 /// Bytes the rebase history of one document may hold (records only: [`held`]).
-/// The full window of 2,048 revisions of typing holds about 0.2 MiB; the
-/// budget is reached only by revisions of thousands of patches (replace all:
+/// The full window of 2,048 revisions of typing holds 155,648 bytes (about
+/// 0.15 MiB); the budget is reached only by revisions of thousands of patches (replace all:
 /// a revision of 20,000 patches holds 0.23 MiB, so the 17 newest stay). The
 /// newest revision is kept even when it alone is larger.
 pub const HISTORY_BYTE_BUDGET: usize = 4 * 1024 * 1024;
 
-/// Bytes charged for the records of the histories, next to the text bytes of
-/// undo and redo patches. Their heap sizes are constants, so a history of
-/// many small patches is bounded like one of few large ones.
+/// Bytes charged for the records of the histories, next to the bytes of the
+/// strings they own (the texts of undo and redo patches, the merge key of a
+/// step, the task or run identifier of an origin). A history of many small
+/// patches is bounded like one of few large ones.
 #[doc(hidden)]
 pub mod held {
     use super::{HistoryEntry, PatchShape, TextPatch, TextRange, UndoGroup};
@@ -219,8 +220,19 @@ struct HistoryEntry {
 }
 
 impl HistoryEntry {
+    /// Bytes this revision holds: its record, its patches, and the
+    /// identifier its origin carries.
     fn held(&self) -> usize {
-        held::REVISION + self.patches.len() * held::REVISION_PATCH
+        held::REVISION + self.patches.len() * held::REVISION_PATCH + origin_bytes(&self.origin)
+    }
+}
+
+/// Bytes of the identifier an origin owns on the heap.
+fn origin_bytes(origin: &EditOrigin) -> usize {
+    match origin {
+        EditOrigin::Agent { task_id } => task_id.len(),
+        EditOrigin::Research { run_id } => run_id.len(),
+        EditOrigin::Source | EditOrigin::Page | EditOrigin::External | EditOrigin::Recovery | EditOrigin::System => 0,
     }
 }
 
@@ -277,10 +289,14 @@ struct UndoGroup {
 }
 
 impl UndoGroup {
-    /// Bytes this group holds: the texts of its patches and its records.
+    /// Bytes this group holds: its record and everything the record owns
+    /// (the patches and their texts, the selections, the merge key, and the
+    /// identifier of the origin).
     fn held(&self) -> usize {
         let ranges = |selection: &Option<Vec<TextRange>>| selection.as_ref().map_or(0, Vec::len);
         held::UNDO_STEP
+            + self.key.as_ref().map_or(0, String::len)
+            + origin_bytes(&self.origin)
             + self.inverse.iter().map(|p| held::UNDO_PATCH + p.text.len()).sum::<usize>()
             + (ranges(&self.selection_before) + ranges(&self.selection_after)) * held::SELECTION_RANGE
     }

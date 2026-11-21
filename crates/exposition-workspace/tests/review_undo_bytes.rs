@@ -709,12 +709,26 @@ struct ModelStep {
     exact: bool,
     selection_before: usize,
     selection_after: usize,
+    /// Bytes of the merge key the step was made with (none once it was
+    /// undone or redone) and of the identifier of its origin.
+    key_bytes: usize,
+    origin_bytes: usize,
 }
 
-fn step_held(patch_bytes: &[usize], selection_before: usize, selection_after: usize) -> usize {
+fn step_held(patch_bytes: &[usize], selection_before: usize, selection_after: usize, owned: usize) -> usize {
     held::UNDO_STEP
         + patch_bytes.iter().map(|bytes| held::UNDO_PATCH + bytes).sum::<usize>()
         + (selection_before + selection_after) * held::SELECTION_RANGE
+        + owned
+}
+
+/// Bytes of the task or run identifier an origin carries.
+fn origin_bytes(origin: &EditOrigin) -> usize {
+    match origin {
+        EditOrigin::Agent { task_id } => task_id.len(),
+        EditOrigin::Research { run_id } => run_id.len(),
+        _ => 0,
+    }
 }
 
 struct Model {
@@ -770,9 +784,10 @@ impl Model {
         self.history.front().map_or(self.revision(), |(revision, _)| revision - 1)
     }
 
-    fn revise(&mut self, text: String, patches: usize) {
+    fn revise(&mut self, text: String, patches: usize, origin: &EditOrigin) {
         self.texts.push(text);
-        self.history.push_back((self.revision(), held::REVISION + patches * held::REVISION_PATCH));
+        let held = held::REVISION + patches * held::REVISION_PATCH + origin_bytes(origin);
+        self.history.push_back((self.revision(), held));
         while self.history.len() > self.limits.history_entries
             || (self.history_held() > self.limits.history_bytes && self.history.len() > 1)
         {
@@ -797,11 +812,11 @@ impl Model {
         }
     }
 
-    fn edit(&mut self, patches: &[TextPatch], behavior: &UndoBehavior, selection: bool) {
+    fn edit(&mut self, patches: &[TextPatch], behavior: &UndoBehavior, selection: bool, origin: &EditOrigin) {
         let before = self.text().to_owned();
         let bytes = replaced_bytes(&before, patches);
         let after = naive_apply(&before, patches);
-        self.revise(after.clone(), patches.len());
+        self.revise(after.clone(), patches.len(), origin);
         self.redo.clear();
         let ranges = usize::from(selection);
         match behavior {
@@ -817,16 +832,24 @@ impl Model {
                 top.after = after;
                 top.selection_after = ranges;
                 let bytes: Vec<usize> = differing_middle(&top.after, &top.before).into_iter().collect();
-                top.held = step_held(&bytes, top.selection_before, top.selection_after);
+                let owned = top.key_bytes + top.origin_bytes;
+                top.held = step_held(&bytes, top.selection_before, top.selection_after, owned);
             }
             _ => {
+                let key_bytes = match behavior {
+                    UndoBehavior::Merge { key } => key.len(),
+                    _ => 0,
+                };
+                let origin_bytes = origin_bytes(origin);
                 self.undo.push_back(ModelStep {
-                    held: step_held(&bytes, ranges, ranges),
+                    held: step_held(&bytes, ranges, ranges, key_bytes + origin_bytes),
                     before,
                     after,
                     exact: true,
                     selection_before: ranges,
                     selection_after: ranges,
+                    key_bytes,
+                    origin_bytes,
                 });
                 if self.undo.len() > self.limits.undo_groups {
                     self.undo.pop_front();
@@ -850,8 +873,10 @@ impl Model {
             let expected = if undo { &step.before } else { &step.after };
             assert_eq!(&text, expected, "a step did not restore its snapshot: {}", context());
         }
-        self.revise(text, patches.len());
-        let opposite = ModelStep { held: step_held(&bytes, step.selection_before, step.selection_after), ..step };
+        // Stepped by the source editor; the opposite step has no merge key.
+        self.revise(text, patches.len(), &EditOrigin::Source);
+        let held = step_held(&bytes, step.selection_before, step.selection_after, step.origin_bytes);
+        let opposite = ModelStep { held, key_bytes: 0, ..step };
         if undo {
             self.redo.push_back(opposite)
         } else {
@@ -1119,6 +1144,7 @@ impl Enumeration {
                 _ => {
                     let edit = Self::build(op, &model);
                     let (behavior, selection) = (edit.undo.clone(), edit.selection.is_some());
+                    let origin = edit.origin.clone();
                     let base_revision = edit.base_revision;
                     if base_revision < model.oldest_base() {
                         // The revision was dropped from the rebase history;
@@ -1135,7 +1161,7 @@ impl Enumeration {
                     } else {
                         match self.pair.apply_both(&id, edit, &context) {
                             Ok(outcome) => {
-                                model.edit(&outcome.applied[0].patches, &behavior, selection);
+                                model.edit(&outcome.applied[0].patches, &behavior, selection, &origin);
                                 if !matches!(behavior, UndoBehavior::Skip) {
                                     assert!(!model.undo.is_empty(), "the step made last was dropped: {}", context());
                                 }

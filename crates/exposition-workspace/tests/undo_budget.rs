@@ -520,11 +520,24 @@ struct Step {
     redo_text: usize,
     selection_before: usize,
     selection_after: usize,
+    /// Bytes of the identifier of the origin (the merge key is `key`).
+    origin_bytes: usize,
+}
+
+/// Bytes of the task or run identifier an origin carries.
+fn origin_bytes(origin: &EditOrigin) -> usize {
+    match origin {
+        EditOrigin::Agent { task_id } => task_id.len(),
+        EditOrigin::Research { run_id } => run_id.len(),
+        _ => 0,
+    }
 }
 
 impl Step {
     fn held(&self, undo: bool) -> usize {
         held::UNDO_STEP
+            + self.key.as_ref().map_or(0, String::len)
+            + self.origin_bytes
             + self.patches * held::UNDO_PATCH
             + if undo { self.undo_text } else { self.redo_text }
             + (self.selection_before + self.selection_after) * held::SELECTION_RANGE
@@ -539,7 +552,7 @@ struct Model {
     saved: Option<u64>,
     undo: VecDeque<Step>,
     redo: VecDeque<Step>,
-    /// Revision and patch count of each revision the rebase history keeps.
+    /// Revision and bytes held of each revision the rebase history keeps.
     history: VecDeque<(u64, usize)>,
     /// Steps dropped for the byte budget so far.
     dropped: usize,
@@ -571,7 +584,7 @@ impl Model {
     }
 
     fn held_history(&self) -> usize {
-        self.history.iter().map(|(_, patches)| held::REVISION + patches * held::REVISION_PATCH).sum()
+        self.history.iter().map(|(_, held)| held).sum()
     }
 
     /// The trimming rule: over budget, the oldest undo steps go first, then
@@ -593,9 +606,10 @@ impl Model {
 
     /// A new revision of `patches` patches: the oldest revisions leave the
     /// rebase history over its count or its budget; the newest stays.
-    fn revise(&mut self, text: String, patches: usize) -> u64 {
+    fn revise(&mut self, text: String, patches: usize, origin: &EditOrigin) -> u64 {
         self.texts.push(text);
-        self.history.push_back((self.revision(), patches));
+        let held = held::REVISION + patches * held::REVISION_PATCH + origin_bytes(origin);
+        self.history.push_back((self.revision(), held));
         while self.history.len() > self.limits.history_entries
             || (self.held_history() > self.limits.history_bytes && self.history.len() > 1)
         {
@@ -615,7 +629,8 @@ impl Model {
         let start = self.text().to_owned();
         let (next, replaced) = naive_apply(&start, patches);
         let previous = self.revision();
-        let revision = self.revise(next.clone(), patches.len());
+        let revision = self.revise(next.clone(), patches.len(), origin);
+        let origin_bytes = origin_bytes(origin);
         let key = match behavior {
             UndoBehavior::Merge { key } => Some(key.clone()),
             _ => None,
@@ -646,6 +661,7 @@ impl Model {
                     redo_text: patches.iter().map(|p| p.text.len()).sum(),
                     selection_before: selection.0,
                     selection_after: selection.1,
+                    origin_bytes,
                 });
                 if self.undo.len() > self.limits.undo_groups {
                     self.undo.pop_front();
@@ -662,7 +678,8 @@ impl Model {
         };
         let text = if undo { step.start.clone() } else { step.end.clone() };
         step.key = None;
-        step.end_revision = self.revise(text, step.patches);
+        // Stepped by the source editor.
+        step.end_revision = self.revise(text, step.patches, &EditOrigin::Source);
         if undo {
             self.redo.push_back(step);
         } else {

@@ -103,7 +103,7 @@ host at the `large` scale unless a row says otherwise; release-profile figures f
 |---|---|---|
 | One typed character, merged undo group | at most 2 copies of the text and 1 bytewise seek to the edit; no line-ending scan | 1 MiB: 40.3 → 2.0 ms; 10 MiB: 398 → 20 ms |
 | Undo | proportional to the touched region plus one copy | 10 MiB: 105 → 19.7 ms |
-| Undo and rebase history of a document | undo and redo steps together hold at most 41 MiB (the text they put back and their records); the rebase history holds patch ranges and lengths, no text, at most 4 MiB; trimming costs the dropped steps only | 50 full rewrites of a 2 MiB document: 209.7 → 41.9 MB retained (undo 104.9 → 41.9 MB in 20 steps, rebase history 104.9 MB → 3.8 KB); after undoing every step: 314.6 → 41.9 MB |
+| Undo and rebase history of a document | undo and redo steps together hold at most 41 MiB (the text they put back and their records), except that the step made last stays even when it alone is larger; the rebase history holds patch ranges and lengths, no text, at most 4 MiB; trimming costs the dropped steps only | 50 full rewrites of a 2 MiB document: 209.7 → 41.9 MB retained (undo 104.9 → 41.9 MB in 20 steps, rebase history 104.9 MB → 3.8 KB); after undoing every step: 314.6 → 41.9 MB |
 | Recovery journal tick | no in-memory copy of the text; the I/O lock is held for validation and rename when the document did not change during the write | 10 MiB: 44 MB → 69 KB allocated per tick; bytes written unchanged |
 | Own-save disk check | read and hash; decode only when the hash differs | 10 MiB: 74 → 6.6 ms |
 | Changed-documents scan | O(documents × path depth) | 50 documents × 100k changes: 515 → 17 ms |
@@ -238,6 +238,8 @@ for one extraction or one build and are not caches.
 Measured and left for a decision, because the fix changes a format, a contract
 or product behaviour:
 
+- **An unrecorded edit reads the whole undo stack.** An edit with `UndoBehavior::Skip` reads every byte the undo steps hold; no product caller uses it.
+- **Unread document events are outside the undo budget.** Events a subscriber has not read yet hold their patch texts (4,096-slot channel); the app's forwarder drains continuously.
 - **Folders of 10,000 files.** Expanding one takes about 12 s; the shared tree
   needs virtualization.
 - **Workflow run records store the plan with every write.** A 97-step plan

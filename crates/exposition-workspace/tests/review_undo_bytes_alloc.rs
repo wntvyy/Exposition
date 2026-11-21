@@ -296,11 +296,10 @@ fn events_not_yet_read_by_a_subscriber_hold_the_texts_of_the_steps() {
 // ----- what the budget does not count --------------------------------------------------
 
 /// A step keeps the key it was made with (`UndoBehavior::Merge`), a string of
-/// the caller's; `held` charges the step's record, patches, texts and
-/// selection ranges only. Two hundred steps with keys of 32 KiB stay far
-/// below a budget of 64 KiB while they keep 6.4 MiB allocated.
+/// the caller's, and the key counts toward the budget like the texts: two
+/// hundred steps with keys of 32 KiB do not stay allocated under a budget of
+/// 64 KiB.
 #[test]
-#[ignore = "review: defect"]
 fn the_merge_keys_of_the_steps_count_toward_the_undo_budget() {
     const KEY: usize = 32 * KIB;
     let limits = HistoryLimits { undo_bytes: 64 * KIB, ..HistoryLimits::default() };
