@@ -176,14 +176,14 @@ fn text_of(bytes: usize, unicode: bool, seed: u64) -> String {
     let mut line = 0usize;
     while out.len() < bytes {
         let pick = next();
-        if unicode && pick % 5 == 0 {
+        if unicode && pick.is_multiple_of(5) {
             out.push_str(SYMBOLS[pick / 7 % SYMBOLS.len()]);
         } else {
             out.push_str(WORDS[pick % WORDS.len()]);
         }
         out.push(' ');
         line += 1;
-        if line % 12 == 0 {
+        if line.is_multiple_of(12) {
             out.push('\n');
         }
     }
@@ -562,10 +562,10 @@ fn directory_listing() {
         let folder = p.root().join("many");
         fs::create_dir_all(&folder).unwrap();
         for i in 0..entries {
-            if i % 100 == 0 {
+            if i.is_multiple_of(100) {
                 fs::create_dir(folder.join(format!("Group{i:06}"))).unwrap();
             } else {
-                fs::write(folder.join(format!("{}{i:06}.typ", if i % 2 == 0 { "File" } else { "file" })), b"").unwrap();
+                fs::write(folder.join(format!("{}{i:06}.typ", if i.is_multiple_of(2) { "File" } else { "file" })), b"").unwrap();
             }
         }
         let dir = wp("many");
@@ -652,7 +652,7 @@ fn watcher_burst() {
                 if i < visible {
                     service.inject_fs_event(event_at(&format!("src/r{round}/f{i}.typ")));
                     injected += 1;
-                } else if visible == 0 && i % 4 == 0 {
+                } else if visible == 0 && i.is_multiple_of(4) {
                     // Keep the batch at 5,000 events.
                     for tree in HIDDEN_TREES {
                         service.inject_fs_event(event_at(&format!("{tree}/r{round}/g{i}.o")));
