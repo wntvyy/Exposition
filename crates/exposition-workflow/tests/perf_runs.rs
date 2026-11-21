@@ -10,8 +10,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use exposition_core::artifact::{ArtifactId, ArtifactKind, ArtifactRecord, RunStatus};
@@ -23,8 +23,7 @@ use exposition_graph::workflow::{
     WorkflowOutcome, WorkflowStep,
 };
 use exposition_graph::{
-    GraphConfig, GraphService, Origin, SaveWorkflowRequest, SavedWorkflow, ValidationContext, WorkflowId,
-    WorkflowRunId,
+    GraphConfig, GraphService, Origin, SaveWorkflowRequest, SavedWorkflow, ValidationContext, WorkflowId, WorkflowRunId,
 };
 use exposition_research::ResearchError;
 use exposition_research::batch::{
@@ -35,8 +34,8 @@ use exposition_workflow::adapters::batch::BatchAdapter;
 use exposition_workflow::adapters::{Adapters, runner_ids, sha256_hex};
 use exposition_workflow::store::RunStore;
 use exposition_workflow::{
-    StartWorkflowRunRequest, WorkflowConcurrencyLimits, WorkflowHost, WorkflowRun, WorkflowRunConfig,
-    WorkflowRunError, WorkflowRunService, WorkflowRunState,
+    StartWorkflowRunRequest, WorkflowConcurrencyLimits, WorkflowHost, WorkflowRun, WorkflowRunConfig, WorkflowRunError,
+    WorkflowRunService, WorkflowRunState,
 };
 
 const IMAGE: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -150,7 +149,8 @@ impl BatchRunner for FakeBatch {
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
         .collect();
         for i in 0..self.packages {
-            environment.push((keys::PACKAGE.into(), format!("scientific-package-{i:04}=={}.{}.{}", i % 7, i % 13, i % 5)));
+            environment
+                .push((keys::PACKAGE.into(), format!("scientific-package-{i:04}=={}.{}.{}", i % 7, i % 13, i % 5)));
         }
         if let Some(seed) = request.seed {
             environment.push((keys::SEED.into(), seed.to_string()));
@@ -530,7 +530,8 @@ fn planning_large_plans() {
     let before = f.service.store_counters();
     let wake_before = f.service.scheduler_wakeups();
     let t = Instant::now();
-    let run = f.service.start(&StartWorkflowRunRequest { plan: first.plan, approval_hash: first.approval_hash }).unwrap();
+    let run =
+        f.service.start(&StartWorkflowRunRequest { plan: first.plan, approval_hash: first.approval_hash }).unwrap();
     let start_ms = ms(t);
     assert!(f.service.wait_idle(Duration::from_secs(600)));
     let total_ms = ms(t);

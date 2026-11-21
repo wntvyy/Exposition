@@ -25,8 +25,8 @@ use exposition_research::project::types::{RetainRequest, RetainState};
 use exposition_research::store::{write_manifest, write_transcript};
 use exposition_research::types::{
     Availability, CodeOrigin, CodeProvenance, ExecuteRequest, InterpreterProvenance, KernelDescriptor, OutputEntry,
-    OutputItem, OutputSummary, ResearchEvent, RunManifest, RunSource, RuntimeLanguage, SessionOwner,
-    SessionProvenance, StreamName,
+    OutputItem, OutputSummary, ResearchEvent, RunManifest, RunSource, RuntimeLanguage, SessionOwner, SessionProvenance,
+    StreamName,
 };
 use exposition_research::{ResearchConfig, ResearchProject, ResearchService, StartSessionRequest};
 use exposition_workspace::DocumentService;
@@ -155,9 +155,7 @@ fn run_id(i: usize) -> String {
 }
 
 fn dir_bytes(dir: &Path) -> u64 {
-    std::fs::read_dir(dir)
-        .map(|d| d.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum())
-        .unwrap_or(0)
+    std::fs::read_dir(dir).map(|d| d.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum()).unwrap_or(0)
 }
 
 /// Run history with 50 / 500 / 2,000 recorded runs: the cost of one listing,
@@ -190,7 +188,8 @@ fn run_history() {
         let manifest_bytes = dir_bytes(&root.join(".exposition/runs"));
         let mut listed = 0;
         let samples = sample(5, || listed = service.runs().unwrap().len());
-        let scale = serde_json::json!({"runs_on_disk": runs, "code_bytes": code_bytes, "transcript_bytes": transcript_bytes});
+        let scale =
+            serde_json::json!({"runs_on_disk": runs, "code_bytes": code_bytes, "transcript_bytes": transcript_bytes});
         perf(
             "research.history.list",
             scale.clone(),
@@ -254,8 +253,11 @@ fn explorer_listing() {
     let graph = GraphService::new(GraphConfig { data_dir: dir.path().join("data") });
     assert!(graph.attach(&root).is_usable());
     let documents = Arc::new(DocumentService::new());
-    let research =
-        Arc::new(ResearchService::new(ResearchConfig::new(dir.path().join("data"), Arc::new(NoLauncher), documents.clone())));
+    let research = Arc::new(ResearchService::new(ResearchConfig::new(
+        dir.path().join("data"),
+        Arc::new(NoLauncher),
+        documents.clone(),
+    )));
     research.set_workspace(&root, true).unwrap();
     let project = ResearchProject::new(graph, research, documents);
     let space = project.enable().unwrap();
@@ -455,12 +457,12 @@ async fn retained_run_states() {
         return;
     };
     let mut events = f.service.subscribe();
-    let session = f
-        .service
-        .start_session(StartSessionRequest { environment_id: env, owner: SessionOwner::User })
-        .await
-        .unwrap();
-    let code = format!("print('x' * 99 + '\\n', end='', flush=False)\nfor _ in range({}):\n    print('y' * 99)\n", chars_per_run / 100);
+    let session =
+        f.service.start_session(StartSessionRequest { environment_id: env, owner: SessionOwner::User }).await.unwrap();
+    let code = format!(
+        "print('x' * 99 + '\\n', end='', flush=False)\nfor _ in range({}):\n    print('y' * 99)\n",
+        chars_per_run / 100
+    );
     let mut samples = Vec::new();
     for _ in 0..runs {
         let t = Instant::now();

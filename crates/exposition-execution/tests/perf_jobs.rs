@@ -72,7 +72,8 @@ async fn long_output_stream() {
     let mut events = f.service.subscribe();
     let started = Instant::now();
     let id = f.service.launch(f.spec(&["flood", &flood.to_string()]));
-    let (mut output_events, mut output_event_bytes, mut text_bytes, mut lifecycle, mut lagged) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut output_events, mut output_event_bytes, mut text_bytes, mut lifecycle, mut lagged) =
+        (0u64, 0u64, 0u64, 0u64, 0u64);
     let mut lifecycle_bytes = 0u64;
     loop {
         match tokio::time::timeout(Duration::from_secs(120), events.recv()).await.expect("job events stalled") {
@@ -159,7 +160,9 @@ async fn idle_supervision() {
         let f = fixture();
         let mut jobs = Vec::new();
         for _ in 0..sessions {
-            jobs.push(f.service.launch_interactive(f.spec(&["echo-lines"]), InteractiveOptions::default()).await.unwrap());
+            jobs.push(
+                f.service.launch_interactive(f.spec(&["echo-lines"]), InteractiveOptions::default()).await.unwrap(),
+            );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
         let before = process_cpu_ms();
