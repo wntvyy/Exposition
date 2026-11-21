@@ -65,7 +65,7 @@ pub async fn workspace_open(
     let runs = state.workflow_runs.clone();
     let discard = discard.unwrap_or_default();
     let info = blocking(&state, move |ws| {
-        let previous = ws.current().map(|info| info.root);
+        let previous = ws.open_display_root();
         let previous_root = ws.open_root();
         let destination = ws.check_workspace(&PathBuf::from(&path))?;
         let switching = previous.as_deref() != Some(destination.as_str());
@@ -118,8 +118,8 @@ pub async fn workspace_close(state: State<'_, AppState>) -> Result<(), CommandEr
             let root = std::fs::canonicalize(&root).unwrap_or(root);
             runs.project_closed(Some(&root));
         }
-        if let Some(info) = ws.current() {
-            execution.unregister_root(Path::new(&info.root));
+        if let Some(root) = ws.open_display_root() {
+            execution.unregister_root(Path::new(&root));
         }
         ws.close_workspace();
         graph.detach();

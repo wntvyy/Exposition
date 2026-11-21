@@ -73,9 +73,9 @@ pub struct ResearchExecuteRequest {
 /// project (registered with the execution service by `workspace_open`); trust
 /// is always the execution service's decision.
 pub(crate) fn sync_workspace(state: &AppState) -> Result<(), CommandError> {
-    match state.workspace.current() {
-        Some(info) => {
-            let root = PathBuf::from(&info.root);
+    match state.workspace.open_display_root() {
+        Some(open) => {
+            let root = PathBuf::from(&open);
             let current = state.research.workspace_root();
             let same = current.as_ref().is_some_and(|c| std::fs::canonicalize(&root).map(|r| &r == c).unwrap_or(false));
             if !same {

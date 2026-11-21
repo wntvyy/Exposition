@@ -1,7 +1,7 @@
 // The Outline view: rows in source order with the unsaved-buffer label and
 // coverage, navigation on click, the compiled pages of the last good build
 // labelled after a failed build, and an honest state for other files.
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BuildEvent } from "../../bindings/BuildEvent";
@@ -15,7 +15,23 @@ const env = vi.hoisted(() => ({
   showPage: vi.fn(async () => {}),
 }));
 
-const handle = { id: "doc-1", closed: false, sync: { revision: 7 }, subscribe: () => () => {}, getVersion: () => 1 };
+const documentListeners = new Set<() => void>();
+let documentVersion = 1;
+const handle = {
+  id: "doc-1",
+  closed: false,
+  sync: { revision: 7 },
+  subscribe: (listener: () => void) => {
+    documentListeners.add(listener);
+    return () => documentListeners.delete(listener);
+  },
+  getVersion: () => documentVersion,
+};
+/** A change of the document (an edit or its acknowledgement), as the handle reports it. */
+const documentChanged = () => {
+  documentVersion += 1;
+  for (const listener of [...documentListeners]) listener();
+};
 
 vi.mock("../workspace/store", () => ({
   useWorkspace: (select: (s: { info: unknown }) => unknown) => select({ info: { root: "C:/p", name: "p", recovery: [] } }),
@@ -90,6 +106,27 @@ describe("Outline view", () => {
     expect(screen.getByTestId("outline-coverage").textContent).toMatch(/^Extraction: Partial \(typst\/1\) — Not interpreted: headings written as #heading/);
     fireEvent.click(within(tree).getAllByRole("row")[1]!);
     await waitFor(() => expect(env.navigate).toHaveBeenCalledWith(expect.objectContaining({ id: "typst.call:theorem|Main|0" }), OUTLINE, expect.anything()));
+  });
+
+  it("does not rebuild the outline rows when the document changes but the outline does not (perf FE-7)", async () => {
+    // Count how often the rows are built: building a row reads its item's title.
+    let built = 0;
+    const counted = structuredClone(OUTLINE);
+    Object.defineProperty(counted.items[0]!, "title", {
+      get: () => {
+        built += 1;
+        return "Intro";
+      },
+    });
+    env.outline = counted;
+    render(<OutlineView />);
+    await screen.findByTestId("outline-tree", {}, { timeout: 3000 });
+    const afterFirstRender = built;
+    expect(afterFirstRender).toBeGreaterThan(0);
+    // Ten typed characters: a local edit and its acknowledgement each.
+    for (let i = 0; i < 20; i++) act(() => documentChanged());
+    expect(screen.getByTestId("outline-view")).toBeTruthy();
+    expect(built).toBe(afterFirstRender);
   });
 
   it("keeps the last good build's pages, labelled, after a failed build", async () => {

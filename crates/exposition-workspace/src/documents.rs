@@ -36,6 +36,53 @@ const HISTORY_LIMIT: usize = 2048;
 /// Undo groups retained per document.
 const UNDO_LIMIT: usize = 1000;
 
+/// Deterministic work counters: bytes of document text copied and scanned by
+/// the service on the calling thread. For the scale benchmarks
+/// (`tests/perf_workspace.rs`) and the tests that keep per-edit work bounded;
+/// they do not depend on the build profile or the machine. One thread-local
+/// add per pass over the text.
+#[doc(hidden)]
+pub mod work {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COPIED: Cell<u64> = const { Cell::new(0) };
+        static SCANNED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn copied(bytes: usize) {
+        COPIED.with(|c| c.set(c.get() + bytes as u64));
+    }
+
+    pub(crate) fn scanned(bytes: usize) {
+        SCANNED.with(|c| c.set(c.get() + bytes as u64));
+    }
+
+    /// Reset the counters of the calling thread.
+    pub fn reset() {
+        COPIED.with(|c| c.set(0));
+        SCANNED.with(|c| c.set(0));
+    }
+
+    /// `(bytes copied, bytes scanned)` on the calling thread since the last reset.
+    pub fn totals() -> (u64, u64) {
+        (COPIED.with(Cell::get), SCANNED.with(Cell::get))
+    }
+}
+
+/// Text bytes retained by the histories of one document (see
+/// [`DocumentService::retained`]).
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RetainedHistory {
+    pub undo_groups: usize,
+    pub undo_bytes: usize,
+    pub redo_groups: usize,
+    pub redo_bytes: usize,
+    pub history_entries: usize,
+    pub history_bytes: usize,
+}
+
 /// Parameters for opening a document.
 #[derive(Debug, Clone)]
 pub struct OpenDocument {
@@ -146,6 +193,7 @@ impl DocumentService {
         inner.next_id += 1;
         let id = DocumentId(format!("doc-{}", inner.next_id));
         let line_ending = detect_line_ending(&spec.text);
+        work::copied(spec.text.len());
         let state = DocState {
             id: id.clone(),
             path: spec.path,
@@ -191,7 +239,32 @@ impl DocumentService {
     pub fn state(&self, id: &DocumentId) -> Result<DocumentState, TransactionError> {
         let inner = self.lock();
         let doc = get(&inner, id)?;
+        work::copied(doc.text.len());
         Ok(DocumentState { info: doc.info(), text: doc.text.to_string() })
+    }
+
+    /// Text bytes held by the undo, redo, and rebase histories of a document.
+    #[doc(hidden)]
+    pub fn retained(&self, id: &DocumentId) -> Result<RetainedHistory, TransactionError> {
+        let inner = self.lock();
+        let doc = get(&inner, id)?;
+        let bytes = |patches: &[TextPatch]| patches.iter().map(|p| p.text.len()).sum::<usize>();
+        Ok(RetainedHistory {
+            undo_groups: doc.undo.len(),
+            undo_bytes: doc.undo.iter().map(|g| bytes(&g.inverse)).sum(),
+            redo_groups: doc.redo.len(),
+            redo_bytes: doc.redo.iter().map(|g| bytes(&g.inverse)).sum(),
+            history_entries: doc.history.len(),
+            history_bytes: doc.history.iter().map(|e| bytes(&e.patches)).sum(),
+        })
+    }
+
+    /// The document's info and text at one revision, sharing the buffer
+    /// (no copy of the text, unlike [`Self::state`]).
+    pub fn shared_state(&self, id: &DocumentId) -> Result<(DocumentInfo, Arc<str>), TransactionError> {
+        let inner = self.lock();
+        let doc = get(&inner, id)?;
+        Ok((doc.info(), Arc::clone(&doc.text)))
     }
 
     pub fn snapshot(&self, id: &DocumentId) -> Result<DocumentSnapshot, TransactionError> {
@@ -292,10 +365,11 @@ impl DocumentService {
         for plan in planned {
             let doc = get_mut(&mut inner, &plan.document).expect("validated above");
             let previous_revision = doc.revision;
-            let inverse = inverse_patches(&doc.text, &plan.patches);
-            let line_ending_changed = doc.commit(plan.text, plan.patches.clone(), request.origin.clone());
+            let inverse = inverse_patches(&doc.text, &plan.spans, &plan.patches);
+            let line_ending_changed =
+                doc.commit(plan.text, plan.patches.clone(), request.origin.clone(), plan.line_ending);
             doc.redo.clear();
-            record_undo(doc, &request, inverse, &plan.patches, previous_revision, &plan.before_text);
+            record_undo(doc, &request, inverse, &plan.patches, &plan.spans, previous_revision, &plan.before_text);
             let event = DocumentChanged {
                 document: doc.id.clone(),
                 transaction: Some(request.id.clone()),
@@ -358,14 +432,17 @@ impl DocumentService {
         }
         // The group's inverse is already relative to the current text.
         let patches = group.inverse.clone();
-        let text = apply_patches(&doc.text, &patches).map_err(|range| invalid_range(doc, range))?;
-        if doc.line_ending == LineEnding::Mixed && detect_line_ending(&text) == LineEnding::Mixed {
+        let spans = locate(&doc.text, &patches).map_err(|range| invalid_range(doc, range))?;
+        let text = splice(&doc.text, &spans, &patches);
+        let line_ending = line_ending_after(doc.line_ending, &doc.text, &spans, &patches)
+            .unwrap_or_else(|| detect_line_ending(&text));
+        if doc.line_ending == LineEnding::Mixed && line_ending == LineEnding::Mixed {
             return Err(TransactionError::MixedLineEndings { document: id.clone() });
         }
         let group = if kind == ChangeKind::Undo { doc.undo.pop() } else { doc.redo.pop() }.expect("checked above");
         let previous_revision = doc.revision;
-        let inverse = inverse_patches(&doc.text, &patches);
-        let line_ending_changed = doc.commit(text, patches.clone(), origin.clone());
+        let inverse = inverse_patches(&doc.text, &spans, &patches);
+        let line_ending_changed = doc.commit(text, patches.clone(), origin.clone(), line_ending);
         let selection =
             if kind == ChangeKind::Undo { group.selection_before.clone() } else { group.selection_after.clone() };
         // The opposite group keeps the original selections: undo restores
@@ -430,16 +507,17 @@ impl DocState {
         }
     }
 
-    /// Record a new revision. Returns true when the text's line-ending
-    /// convention changed (the caller announces the new info).
-    fn commit(&mut self, text: String, patches: Vec<TextPatch>, origin: EditOrigin) -> bool {
+    /// Record a new revision whose text has the line-ending convention
+    /// `line_ending`. Returns true when that convention changed (the caller
+    /// announces the new info).
+    fn commit(&mut self, text: String, patches: Vec<TextPatch>, origin: EditOrigin, line_ending: LineEnding) -> bool {
         self.revision += 1;
+        work::copied(text.len());
         self.text = Arc::from(text);
         self.history.push_back(HistoryEntry { revision: self.revision, patches, origin });
         while self.history.len() > HISTORY_LIMIT {
             self.history.pop_front();
         }
-        let line_ending = detect_line_ending(&self.text);
         let changed = line_ending != self.line_ending;
         self.line_ending = line_ending;
         changed
@@ -449,7 +527,11 @@ impl DocState {
 struct PlannedEdit {
     document: DocumentId,
     patches: Vec<TextPatch>,
+    /// Byte span of each patch in the text before the edit.
+    spans: Vec<Span>,
     text: String,
+    /// Line-ending convention of `text`.
+    line_ending: LineEnding,
     rebased: bool,
     /// Text before the edit, kept so merged undo groups can be recomputed.
     before_text: Arc<str>,
@@ -482,14 +564,25 @@ fn plan_edit(
             ConflictPolicy::RebaseDisjoint => (rebase(doc, edit.base_revision, &edit.patches)?, true),
         }
     };
-    let text = apply_patches(&doc.text, &patches).map_err(|range| invalid_range(doc, range))?;
+    let spans = locate(&doc.text, &patches).map_err(|range| invalid_range(doc, range))?;
+    let text = splice(&doc.text, &spans, &patches);
+    let line_ending =
+        line_ending_after(doc.line_ending, &doc.text, &spans, &patches).unwrap_or_else(|| detect_line_ending(&text));
     // Mixed line endings: only a change that makes them consistent, or one
     // that restores content from disk or a journal, is accepted.
     let restores = matches!(origin, EditOrigin::External | EditOrigin::Recovery);
-    if doc.line_ending == LineEnding::Mixed && !restores && detect_line_ending(&text) == LineEnding::Mixed {
+    if doc.line_ending == LineEnding::Mixed && !restores && line_ending == LineEnding::Mixed {
         return Err(TransactionError::MixedLineEndings { document: doc.id.clone() });
     }
-    Ok(PlannedEdit { document: doc.id.clone(), patches, text, rebased, before_text: Arc::clone(&doc.text) })
+    Ok(PlannedEdit {
+        document: doc.id.clone(),
+        patches,
+        spans,
+        text,
+        line_ending,
+        rebased,
+        before_text: Arc::clone(&doc.text),
+    })
 }
 
 fn invalid_range(doc: &DocState, range: TextRange) -> TransactionError {
@@ -528,19 +621,57 @@ struct Utf16Cursor<'a> {
     unit: usize,
 }
 
+/// Bytes whose UTF-16 length is counted at once by [`Utf16Cursor::seek`].
+const SEEK_BLOCK: usize = 4096;
+
+/// UTF-16 units of the characters that start in `bytes` (UTF-8): one per
+/// lead byte, two for the lead of a four-byte character, none for a
+/// continuation byte.
+fn utf16_units_started(bytes: &[u8]) -> usize {
+    bytes.iter().map(|&b| usize::from((b as i8) >= -0x40) + usize::from(b >= 0xF0)).sum()
+}
+
 impl<'a> Utf16Cursor<'a> {
     fn new(text: &'a str) -> Self {
         Self { text, byte: 0, unit: 0 }
     }
 
+    /// A cursor at a known position: `byte` is a character boundary of `text`
+    /// at UTF-16 offset `unit`.
+    fn at(text: &'a str, byte: usize, unit: usize) -> Self {
+        debug_assert!(text.is_char_boundary(byte));
+        Self { text, byte, unit }
+    }
+
     /// Byte offset of UTF-16 offset `target`; `None` if it lies before the
     /// previous target, inside a surrogate pair, or past the end.
     fn seek(&mut self, target: u32) -> Option<usize> {
-        let target = target as usize;
+        let from = self.byte;
+        let found = self.seek_chars(target as usize);
+        work::scanned(self.byte - from);
+        found
+    }
+
+    fn seek_chars(&mut self, target: usize) -> Option<usize> {
         if target < self.unit {
             return None;
         }
         let text = self.text;
+        // Whole blocks that end before the target are counted bytewise, not
+        // decoded. A block may end inside a character: its units are already
+        // counted, so the bytes up to the next boundary add nothing.
+        let bytes = text.as_bytes();
+        while let Some(block) = bytes.get(self.byte..self.byte + SEEK_BLOCK) {
+            let units = utf16_units_started(block);
+            if self.unit + units >= target {
+                break;
+            }
+            self.unit += units;
+            self.byte += SEEK_BLOCK;
+        }
+        while !text.is_char_boundary(self.byte) {
+            self.byte += 1;
+        }
         for ch in text[self.byte..].chars() {
             if self.unit == target {
                 return Some(self.byte);
@@ -556,35 +687,57 @@ impl<'a> Utf16Cursor<'a> {
     }
 }
 
-/// Apply sorted, non-overlapping patches to `text` in one pass. Returns the
-/// offending range on failure.
-fn apply_patches(text: &str, patches: &[TextPatch]) -> Result<String, TextRange> {
-    let mut out = String::with_capacity(text.len() + patches.iter().map(|p| p.text.len()).sum::<usize>());
-    let mut cursor = Utf16Cursor::new(text);
-    let mut copied = 0usize;
+/// Byte span `(start, end)` of a patch range in the text it applies to.
+type Span = (usize, usize);
+
+/// Byte spans of sorted, non-overlapping patches in `text`, found in one
+/// forward pass that continues from `cursor`. Returns the offending range on
+/// failure.
+fn locate_from(cursor: &mut Utf16Cursor<'_>, patches: &[TextPatch]) -> Result<Vec<Span>, TextRange> {
+    let mut spans = Vec::with_capacity(patches.len());
     for patch in patches {
         if !patch.range.is_ordered() {
             return Err(patch.range);
         }
         let start = cursor.seek(patch.range.start).ok_or(patch.range)?;
         let end = cursor.seek(patch.range.end).ok_or(patch.range)?;
+        spans.push((start, end));
+    }
+    Ok(spans)
+}
+
+fn locate(text: &str, patches: &[TextPatch]) -> Result<Vec<Span>, TextRange> {
+    locate_from(&mut Utf16Cursor::new(text), patches)
+}
+
+/// `text` with each span replaced by the text of its patch.
+fn splice(text: &str, spans: &[Span], patches: &[TextPatch]) -> String {
+    let mut out = String::with_capacity(text.len() + patches.iter().map(|p| p.text.len()).sum::<usize>());
+    let mut copied = 0usize;
+    for (&(start, end), patch) in spans.iter().zip(patches) {
         out.push_str(&text[copied..start]);
         out.push_str(&patch.text);
         copied = end;
     }
     out.push_str(&text[copied..]);
-    Ok(out)
+    work::copied(out.len());
+    out
 }
 
-/// Patches that undo `patches` (sorted, relative to `old`), relative to the new text.
-fn inverse_patches(old: &str, patches: &[TextPatch]) -> Vec<TextPatch> {
-    let mut cursor = Utf16Cursor::new(old);
+/// Apply sorted, non-overlapping patches to `text` in one pass. Returns the
+/// offending range on failure.
+fn apply_patches(text: &str, patches: &[TextPatch]) -> Result<String, TextRange> {
+    Ok(splice(text, &locate(text, patches)?, patches))
+}
+
+/// Patches that undo `patches` (sorted, relative to `old`, at byte `spans`),
+/// relative to the new text.
+fn inverse_patches(old: &str, spans: &[Span], patches: &[TextPatch]) -> Vec<TextPatch> {
     let mut shift: i64 = 0;
-    patches
+    spans
         .iter()
-        .map(|patch| {
-            let from = cursor.seek(patch.range.start).expect("validated patch");
-            let to = cursor.seek(patch.range.end).expect("validated patch");
+        .zip(patches)
+        .map(|(&(from, to), patch)| {
             let start = (i64::from(patch.range.start) + shift) as u32;
             let inserted = utf16_len(&patch.text) as u32;
             shift += i64::from(inserted) - i64::from(patch.range.len());
@@ -687,6 +840,7 @@ fn record_undo(
     request: &TransactionRequest,
     inverse: Vec<TextPatch>,
     applied: &[TextPatch],
+    spans: &[Span],
     previous_revision: u64,
     before_text: &Arc<str>,
 ) {
@@ -707,10 +861,10 @@ fn record_undo(
         && std::mem::discriminant(&top.origin) == std::mem::discriminant(&request.origin)
         && top.end_revision == previous_revision
     {
-        // Recompute the merged group's inverse: restore the group's start text
-        // from the text before this edit, then diff against the new text.
-        let start_text = apply_patches(before_text, &top.inverse).expect("undo group matches its end revision");
-        top.inverse = diff_patch(&doc.text, &start_text).into_iter().collect();
+        // The merged group's inverse is the single patch from the new text
+        // to the group's start text.
+        top.inverse = merged_inverse(before_text, &doc.text, &top.inverse, applied, spans)
+            .unwrap_or_else(|| merged_inverse_by_rebuilding(before_text, &doc.text, &top.inverse));
         top.end_revision = doc.revision;
         top.selection_after = selection_after;
         return;
@@ -726,6 +880,165 @@ fn record_undo(
     });
     if doc.undo.len() > UNDO_LIMIT {
         doc.undo.remove(0);
+    }
+}
+
+/// The inverse of an undo group after one more edit merged into it, the
+/// plain way: restore the group's start text from the text before the edit
+/// (`before`, to which `group` is relative), then diff the new text (`after`)
+/// against it. Two full copies and passes of the text.
+fn merged_inverse_by_rebuilding(before: &str, after: &str, group: &[TextPatch]) -> Vec<TextPatch> {
+    let start_text = apply_patches(before, group).expect("undo group matches its end revision");
+    diff_patch(after, &start_text).into_iter().collect()
+}
+
+/// The same result as [`merged_inverse_by_rebuilding`], computed from the
+/// part of the text that the group and the edit (`applied`, at byte `spans`
+/// of `before`) touch: outside it `after` and the group's start text are both
+/// `before`. `None` when the group cannot be located in `before` from the
+/// edit's position; the caller then rebuilds.
+fn merged_inverse(
+    before: &str,
+    after: &str,
+    group: &[TextPatch],
+    applied: &[TextPatch],
+    spans: &[Span],
+) -> Option<Vec<TextPatch>> {
+    let (&(edit_start, _), &(_, edit_end)) = (spans.first()?, spans.last()?);
+    let edit_unit = applied.first()?.range.start as usize;
+    // Where the group's patches lie in `before`, found from the edit's
+    // position (typing merges next to its group) instead of from the start.
+    let (group_spans, lo, lo_unit, hi) = match group.first() {
+        None => (Vec::new(), edit_start, edit_unit, edit_end),
+        Some(first) => {
+            let first_unit = first.range.start as usize;
+            let (byte, unit) = if first_unit >= edit_unit {
+                (edit_start, edit_unit)
+            } else {
+                // Walk back from the edit to the group's first offset.
+                let mut byte = edit_start;
+                let mut unit = edit_unit;
+                for ch in before[..edit_start].chars().rev() {
+                    if unit <= first_unit {
+                        break;
+                    }
+                    unit = unit.checked_sub(ch.len_utf16())?;
+                    byte -= ch.len_utf8();
+                }
+                work::scanned(edit_start - byte);
+                if unit != first_unit {
+                    return None;
+                }
+                (byte, unit)
+            };
+            let group_spans = locate_from(&mut Utf16Cursor::at(before, byte, unit), group).ok()?;
+            let (&(group_start, _), &(_, group_end)) = (group_spans.first()?, group_spans.last()?);
+            let (lo, lo_unit) =
+                if group_start < edit_start { (group_start, first_unit) } else { (edit_start, edit_unit) };
+            (group_spans, lo, lo_unit, group_end.max(edit_end))
+        }
+    };
+    let tail = before.len() - hi;
+    // The touched part: as it is now, and as it was at the start of the group.
+    let now = after.get(lo..after.len().checked_sub(tail)?)?;
+    let mut then = String::with_capacity(hi - lo);
+    let mut copied = lo;
+    for (&(start, end), patch) in group_spans.iter().zip(group) {
+        then.push_str(&before[copied..start]);
+        then.push_str(&patch.text);
+        copied = end;
+    }
+    then.push_str(&before[copied..hi]);
+    if now == then {
+        return Some(Vec::new());
+    }
+    // Common prefix, compared as `diff_patch` does (it may run on into the
+    // unchanged text after the touched part).
+    let prefix: usize = after[lo..]
+        .chars()
+        .zip(then.chars().chain(before[hi..].chars()))
+        .take_while(|(a, b)| a == b)
+        .map(|(c, _)| c.len_utf8())
+        .sum();
+    let start = (lo_unit + utf16_len(&after[lo..lo + prefix])) as u32;
+    if prefix > now.len() || prefix > then.len() {
+        // The common prefix ran on into the unchanged text (typing "the"
+        // right before "then"). What is left of the shorter side is then a
+        // suffix of what is left of the longer one, so the texts differ by
+        // the length difference of the touched parts, right after the prefix.
+        work::scanned(2 * prefix);
+        let at = lo + prefix;
+        return Some(vec![if now.len() > then.len() {
+            let removed = &after[at..at + (now.len() - then.len())];
+            TextPatch { range: TextRange::new(start, start + utf16_len(removed) as u32), text: String::new() }
+        } else {
+            // The start text from the same point: the rest of its touched
+            // part, then the unchanged text.
+            let missing = then.len() - now.len();
+            let own = then.get(prefix..).unwrap_or("");
+            let mut text = String::with_capacity(missing);
+            text.push_str(&own[..own.len().min(missing)]);
+            let from_tail = hi + prefix.saturating_sub(then.len());
+            text.push_str(&before[from_tail..from_tail + (missing - text.len())]);
+            TextPatch { range: TextRange::empty(start), text }
+        }]);
+    }
+    let (now_rest, then_rest) = (&now[prefix..], &then[prefix..]);
+    // The unchanged text after the touched part is common to both; the
+    // common suffix continues from there into the touched part.
+    let suffix: usize = now_rest
+        .chars()
+        .rev()
+        .zip(then_rest.chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(c, _)| c.len_utf8())
+        .sum();
+    work::scanned(2 * prefix + suffix);
+    let end = start + utf16_len(&now_rest[..now_rest.len() - suffix]) as u32;
+    Some(vec![TextPatch { range: TextRange::new(start, end), text: then_rest[..then_rest.len() - suffix].to_owned() }])
+}
+
+/// The line-ending convention of a text after `patches` (at byte `spans` of
+/// `text`, whose convention is `old`), when the edit itself decides it: no
+/// terminator is removed, split, or joined, so the conventions present are
+/// the old ones plus those of the inserted text. `None` when only a scan of
+/// the result can tell.
+fn line_ending_after(old: LineEnding, text: &str, spans: &[Span], patches: &[TextPatch]) -> Option<LineEnding> {
+    let bytes = text.as_bytes();
+    let is_break = |b: &u8| *b == b'\r' || *b == b'\n';
+    let mut added = LineEnding::None;
+    let mut previous_end = None;
+    for (&(start, end), patch) in spans.iter().zip(patches) {
+        // Patches that touch can form a terminator between them.
+        if previous_end == Some(start) {
+            return None;
+        }
+        previous_end = Some(end);
+        if bytes[start..end].iter().any(is_break) {
+            return None;
+        }
+        let before = start.checked_sub(1).map(|i| bytes[i]);
+        let after = bytes.get(end).copied();
+        if patch.text.as_bytes().iter().any(is_break) {
+            // An inserted terminator next to an existing `\r` or `\n` can merge with it.
+            if before == Some(b'\r') || after == Some(b'\n') {
+                return None;
+            }
+            added = merge_line_endings(added, detect_line_ending(&patch.text));
+        } else if before == Some(b'\r') && after == Some(b'\n') {
+            // Splits a CRLF (insertion) or joins a CR and an LF (deletion).
+            return None;
+        }
+    }
+    Some(merge_line_endings(old, added))
+}
+
+/// The convention of a text that has the terminators of both arguments.
+fn merge_line_endings(a: LineEnding, b: LineEnding) -> LineEnding {
+    match (a, b) {
+        (LineEnding::None, other) | (other, LineEnding::None) => other,
+        (a, b) if a == b => a,
+        _ => LineEnding::Mixed,
     }
 }
 
@@ -746,6 +1059,7 @@ fn diff_patch(from: &str, to: &str) -> Option<TextPatch> {
         .sum::<usize>()
         .min(from_rest.len())
         .min(to_rest.len());
+    work::scanned(2 * prefix + suffix);
     let start = utf16_len(&from[..prefix]) as u32;
     let end = start + utf16_len(&from_rest[..from_rest.len() - suffix]) as u32;
     Some(TextPatch { range: TextRange::new(start, end), text: to_rest[..to_rest.len() - suffix].to_owned() })
@@ -754,6 +1068,7 @@ fn diff_patch(from: &str, to: &str) -> Option<TextPatch> {
 /// The text's line-ending convention, in one pass (run on every revision).
 fn detect_line_ending(text: &str) -> LineEnding {
     let bytes = text.as_bytes();
+    work::scanned(bytes.len());
     let (mut lf, mut crlf, mut cr) = (false, false, false);
     for (i, &byte) in bytes.iter().enumerate() {
         match byte {
@@ -1321,5 +1636,207 @@ mod tests {
         assert_eq!(cursor.seek(1), None);
         assert_eq!(cursor.seek(4), Some(6));
         assert_eq!(cursor.seek(5), None);
+    }
+
+    // ----- perf WS-2: the shortcuts agree with the plain computations -------------
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, bound: usize) -> usize {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as usize) % bound.max(1)
+        }
+
+        fn text(&mut self, alphabet: &[&str], max_len: usize) -> String {
+            (0..self.next(max_len + 1)).map(|_| alphabet[self.next(alphabet.len())]).collect()
+        }
+
+        /// Up to three sorted, non-overlapping patches at character boundaries of `text`.
+        fn patches(&mut self, text: &str, alphabet: &[&str]) -> Vec<TextPatch> {
+            let mut boundaries = vec![0u32];
+            let mut unit = 0u32;
+            for ch in text.chars() {
+                unit += ch.len_utf16() as u32;
+                boundaries.push(unit);
+            }
+            let mut picks: Vec<u32> =
+                (0..2 * (1 + self.next(3))).map(|_| boundaries[self.next(boundaries.len())]).collect();
+            picks.sort_unstable();
+            let mut patches: Vec<TextPatch> = Vec::new();
+            for pair in picks.chunks(2) {
+                // Two insertions at one offset are not a valid patch list.
+                if patches.last().is_some_and(|p| p.range.end == pair[0] && (p.range.is_empty() || pair[0] == pair[1]))
+                {
+                    continue;
+                }
+                let text = self.text(alphabet, 3);
+                if pair[0] == pair[1] && text.is_empty() {
+                    continue;
+                }
+                patches.push(TextPatch { range: TextRange::new(pair[0], pair[1]), text });
+            }
+            patches
+        }
+    }
+
+    #[test]
+    fn block_seek_agrees_with_decoding_every_character() {
+        let mut rng = Lcg(7);
+        let alphabet = ["a", "b", "é", "∀", "😀", "\n"];
+        for round in 0..40 {
+            let text: String =
+                (0..SEEK_BLOCK * 3 / 2 + rng.next(SEEK_BLOCK * 2)).map(|_| alphabet[rng.next(6)]).collect();
+            let total = utf16_len(&text) as u32;
+            let mut targets: Vec<u32> = (0..12).map(|_| rng.next(total as usize + 3) as u32).collect();
+            targets.extend([0, total, total + 1]);
+            targets.sort_unstable();
+            let mut cursor = Utf16Cursor::new(&text);
+            for target in targets {
+                let expected = exposition_core::text::utf16_to_byte(&text, target as usize).ok();
+                let mut fresh = Utf16Cursor::new(&text);
+                assert_eq!(fresh.seek(target), expected, "round {round} target {target} (fresh cursor)");
+                if let Some(byte) = expected {
+                    assert_eq!(cursor.seek(target), Some(byte), "round {round} target {target} (continued cursor)");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn incremental_line_ending_agrees_with_a_scan() {
+        let mut rng = Lcg(11);
+        let alphabet = ["a", "\r", "\n", "\r\n", "é", "b"];
+        let (mut decided, mut rounds) = (0, 0);
+        for _ in 0..20_000 {
+            let text = rng.text(&alphabet, 10);
+            let patches = rng.patches(&text, &alphabet);
+            if patches.is_empty() {
+                continue;
+            }
+            let spans = locate(&text, &patches).unwrap();
+            let result = splice(&text, &spans, &patches);
+            rounds += 1;
+            if let Some(ending) = line_ending_after(detect_line_ending(&text), &text, &spans, &patches) {
+                decided += 1;
+                assert_eq!(ending, detect_line_ending(&result), "{text:?} + {patches:?} = {result:?}");
+            }
+        }
+        assert!(decided * 50 > rounds, "the shortcut decides some of these edits ({decided} of {rounds})");
+        // Plain typing never needs a scan.
+        let text = "line one\r\nline two\r\n";
+        let typed = [TextPatch::insert(4, "x")];
+        let spans = locate(text, &typed).unwrap();
+        assert_eq!(line_ending_after(LineEnding::Crlf, text, &spans, &typed), Some(LineEnding::Crlf));
+        // Typing between the two bytes of a CRLF needs one.
+        let split = [TextPatch::insert(9, "x")];
+        let spans = locate(text, &split).unwrap();
+        assert_eq!(line_ending_after(LineEnding::Crlf, text, &spans, &split), None);
+    }
+
+    #[test]
+    fn merged_inverse_agrees_with_rebuilding_the_start_text() {
+        let mut rng = Lcg(13);
+        let alphabets: [&[&str]; 3] = [&["a"], &["a", "b"], &["a", "b", "é", "😀", "\n", "∀"]];
+        for round in 0..30_000 {
+            let alphabet = alphabets[round % 3];
+            let before = rng.text(alphabet, 12);
+            let group = rng.patches(&before, alphabet);
+            let applied = rng.patches(&before, alphabet);
+            if applied.is_empty() {
+                continue;
+            }
+            let spans = locate(&before, &applied).unwrap();
+            let after = splice(&before, &spans, &applied);
+            let expected = merged_inverse_by_rebuilding(&before, &after, &group);
+            let fast = merged_inverse(&before, &after, &group, &applied, &spans);
+            assert_eq!(fast, Some(expected), "before {before:?} group {group:?} applied {applied:?}");
+        }
+        // Far from the start of a text larger than one seek block.
+        let before = format!("{}{}", "é😀 lemma\n".repeat(2_000), "tail");
+        let at = utf16_len(&before) as u32 - 4;
+        let group = [TextPatch::delete(at - 6, at)];
+        for applied in [[TextPatch::insert(at, "t")], [TextPatch::insert(at, "x")], [TextPatch::delete(at - 1, at)]] {
+            let spans = locate(&before, &applied).unwrap();
+            let after = splice(&before, &spans, &applied);
+            assert_eq!(
+                merged_inverse(&before, &after, &group, &applied, &spans),
+                Some(merged_inverse_by_rebuilding(&before, &after, &group)),
+            );
+        }
+    }
+
+    /// Typing and deleting in one merged group, at random places: undo
+    /// returns to the text at the start of the group and redo to its end.
+    #[test]
+    fn merged_groups_undo_to_their_start_text() {
+        let mut rng = Lcg(17);
+        for round in 0..200 {
+            let start = rng.text(&["a", "b", "é", "😀", "\n", "\r\n"], 30);
+            if detect_line_ending(&start) == LineEnding::Mixed {
+                continue;
+            }
+            let (service, id) = service_with(&start);
+            let mut revision = 1;
+            let mut edits = 0;
+            for _ in 0..1 + rng.next(8) {
+                let current = text(&service, &id);
+                let patches = rng.patches(&current, &["x", "y", "é", "😀"]);
+                if patches.is_empty() {
+                    continue;
+                }
+                let request =
+                    tx(&id, revision, patches, UndoBehavior::Merge { key: "typing".into() }, ConflictPolicy::Reject);
+                if service.apply(request).is_ok() {
+                    revision += 1;
+                    edits += 1;
+                }
+            }
+            if edits == 0 {
+                continue;
+            }
+            let end = text(&service, &id);
+            assert_eq!(service.retained(&id).unwrap().undo_groups, 1, "round {round}");
+            service.undo(&id, EditOrigin::Source).unwrap();
+            assert_eq!(text(&service, &id), start, "round {round}: undo of the merged group");
+            service.redo(&id, EditOrigin::Source).unwrap();
+            assert_eq!(text(&service, &id), end, "round {round}: redo of the merged group");
+        }
+    }
+
+    /// Perf WS-2 regression: one typed character costs two copies of the text
+    /// (the new buffer and its shared form) and at most one scan up to the
+    /// edit. It does not rebuild the undo group's start text, compare the
+    /// texts from the start, or scan for line endings.
+    #[test]
+    fn a_typed_character_does_a_bounded_amount_of_work() {
+        for body in ["plain ascii line of text\n", "ünïcödé 😀 ∀x ∈ ℝ line\r\n"] {
+            let content = body.repeat(1_000_000 / body.len());
+            let size = content.len() as u64;
+            let (service, id) = service_with(&content);
+            let end = utf16_len(&content) as u32;
+            let typing = || UndoBehavior::Merge { key: "typing".into() };
+            for (i, at) in [end, end + 1, end + 2].into_iter().enumerate() {
+                service
+                    .apply(tx(&id, 1 + i as u64, vec![TextPatch::insert(at, "x")], typing(), ConflictPolicy::Reject))
+                    .unwrap();
+            }
+            for (name, patch) in
+                [("insert", TextPatch::insert(end + 3, "y")), ("backspace", TextPatch::delete(end + 3, end + 4))]
+            {
+                let revision = service.info(&id).unwrap().revision;
+                work::reset();
+                service.apply(tx(&id, revision, vec![patch], typing(), ConflictPolicy::Reject)).unwrap();
+                let (copied, scanned) = work::totals();
+                assert!(copied <= 2 * size + 4096, "{name}: copied {copied} bytes of a {size}-byte text");
+                assert!(scanned <= size + 4096, "{name}: scanned {scanned} bytes of a {size}-byte text");
+            }
+            assert_eq!(service.retained(&id).unwrap().undo_groups, 1);
+            work::reset();
+            service.undo(&id, EditOrigin::Source).unwrap();
+            let (copied, scanned) = work::totals();
+            assert!(copied <= 2 * size + 4096 && scanned <= size + 4096, "undo: copied {copied}, scanned {scanned}");
+            assert_eq!(text(&service, &id), content);
+        }
     }
 }

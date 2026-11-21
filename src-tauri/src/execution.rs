@@ -249,8 +249,8 @@ pub fn forward_trust(app: AppHandle) {
 fn concerns_open_workspace(state: &AppState, change: &TrustChanged) -> bool {
     use exposition_execution::paths::{canonicalize, is_within};
     use std::path::Path;
-    let Some(open) = state.workspace.current() else { return false };
-    let open = canonicalize(Path::new(&open.root)).unwrap_or_else(|_| open.root.clone().into());
+    let Some(open) = state.workspace.open_display_root() else { return false };
+    let open = canonicalize(Path::new(&open)).unwrap_or_else(|_| open.clone().into());
     let changed = Path::new(&change.root);
     is_within(&open, changed) || is_within(changed, &open)
 }

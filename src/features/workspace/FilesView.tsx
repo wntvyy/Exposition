@@ -219,16 +219,32 @@ function entryIndex(dirs: Record<string, DirState>): Map<string, FileEntry> {
   return index;
 }
 
-function renderEntries(entries: FileEntry[], dirs: Record<string, DirState>, expanded: Set<string>): ReactNode {
+/**
+ * The row of each entry that is not a folder, by entry object. Such a row
+ * depends on its entry alone, and the store keeps the object of an entry
+ * that did not change (`shareEntries`), so listing a folder again builds
+ * rows only for what changed in it.
+ */
+const fileRows = new WeakMap<FileEntry, ReactNode>();
+
+/** The tree rows of `entries` (exported for tests). */
+export function renderEntries(entries: FileEntry[], dirs: Record<string, DirState>, expanded: Set<string>): ReactNode {
   return entries.map((entry) => {
     const isDir = entry.kind === "directory" && !entry.unavailable;
-    const children = isDir ? dirs[entry.path] : undefined;
-    return (
+    if (!isDir) {
+      const row = fileRows.get(entry);
+      if (row) return row;
+    }
+    // Only an expanded folder contributes its entries: the listing of a
+    // collapsed folder is kept in the store, not built into the tree.
+    const open = isDir && expanded.has(entry.path);
+    const children = open ? dirs[entry.path] : undefined;
+    const row = (
       <TreeItem
         key={entry.path}
         id={entry.path}
         title={entry.name}
-        icon={entryIcon(entry, expanded.has(entry.path))}
+        icon={entryIcon(entry, open)}
         trailing={
           entry.unavailable ? (
             <span title={entry.unavailable}>{entry.link ? "outside folder" : "unavailable"}</span>
@@ -245,8 +261,8 @@ function renderEntries(entries: FileEntry[], dirs: Record<string, DirState>, exp
           entry.kind === "file" && !entry.unavailable ? () => openFile(entry) : isDir ? () => toggleFolder(entry.path, "keyboard") : undefined
         }
       >
-        {isDir && children?.entries && renderEntries(children.entries, dirs, expanded)}
-        {isDir && !children?.entries && (
+        {open && children?.entries && renderEntries(children.entries, dirs, expanded)}
+        {open && !children?.entries && (
           <TreeItem
             id={`${entry.path}/\u0000status`}
             title={children?.error ? `Could not list: ${children.error}` : "Loading…"}
@@ -255,6 +271,8 @@ function renderEntries(entries: FileEntry[], dirs: Record<string, DirState>, exp
         )}
       </TreeItem>
     );
+    if (!isDir) fileRows.set(entry, row);
+    return row;
   });
 }
 

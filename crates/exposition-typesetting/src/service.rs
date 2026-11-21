@@ -398,7 +398,7 @@ impl TypesettingService {
                 .map_err(TypesettingError::InvalidDestination)?,
             None => {
                 // The display root (no verbatim prefix) of the open folder.
-                let root = PathBuf::from(self.workspace.current().ok_or(TypesettingError::NoWorkspace)?.root);
+                let root = PathBuf::from(self.workspace.open_display_root().ok_or(TypesettingError::NoWorkspace)?);
                 let mut path = root;
                 for component in record.entry.components() {
                     path.push(component);

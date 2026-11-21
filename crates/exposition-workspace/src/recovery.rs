@@ -10,14 +10,14 @@
 //!   (which first re-journals the restored buffer) or discard.
 
 use std::fs;
-use std::io;
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use exposition_core::document::TextEncoding;
 use exposition_core::path::WorkspacePath;
 use serde::{Deserialize, Serialize};
 
-use crate::fsutil::{now_millis, sha256_hex, write_atomic};
+use crate::fsutil::{StagedWrite, now_millis, sha256_hex};
 
 pub const JOURNAL_VERSION: u32 = 1;
 
@@ -33,6 +33,37 @@ pub struct Journal {
     pub saved_at: u64,
     pub text: String,
 }
+
+impl Journal {
+    pub fn borrowed(&self) -> JournalRef<'_> {
+        JournalRef {
+            version: self.version,
+            path: &self.path,
+            base_hash: self.base_hash.as_deref(),
+            revision: self.revision,
+            encoding: self.encoding,
+            saved_at: self.saved_at,
+            text: &self.text,
+        }
+    }
+}
+
+/// A [`Journal`] that borrows its text: what is written (the same JSON,
+/// field for field), without copying the buffer.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JournalRef<'a> {
+    pub version: u32,
+    pub path: &'a WorkspacePath,
+    pub base_hash: Option<&'a str>,
+    pub revision: u64,
+    pub encoding: TextEncoding,
+    pub saved_at: u64,
+    pub text: &'a str,
+}
+
+/// Bytes read from the start of a journal to learn the file it belongs to.
+const HEAD_BYTES: u64 = 8 * 1024;
 
 /// Stable key for a workspace root (case-insensitive on Windows).
 pub fn workspace_key(display_root: &str) -> String {
@@ -68,9 +99,46 @@ impl RecoveryStore {
 
     /// Atomically write the live journal for one buffer.
     pub fn write_live(&self, journal: &Journal) -> io::Result<()> {
+        self.stage_live(&journal.borrowed())?.commit()
+    }
+
+    /// Write the live journal for one buffer completely (flushed to disk)
+    /// next to its place; committing the result installs it. The JSON is
+    /// streamed to the file, so the text is never copied in memory.
+    pub fn stage_live(&self, journal: &JournalRef<'_>) -> io::Result<StagedWrite> {
         fs::create_dir_all(&self.dir)?;
-        let json = serde_json::to_vec(journal).map_err(io::Error::other)?;
-        write_atomic(&self.live_file(&journal.path), &json)
+        StagedWrite::create(&self.live_file(journal.path), |file| {
+            let mut out = BufWriter::with_capacity(64 * 1024, file);
+            serde_json::to_writer(&mut out, journal).map_err(io::Error::other)?;
+            out.flush()
+        })
+    }
+
+    /// Whether a recovery entry (readable or not) names `path`: the answer
+    /// [`Self::entries`] gives, found from the start of each journal instead
+    /// of loading and parsing its text. Nothing is quarantined here.
+    pub fn has_entry_for(&self, path: &WorkspacePath) -> bool {
+        let Ok(read) = fs::read_dir(&self.dir) else { return false };
+        for entry in read.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(id) = name.strip_suffix(".json").filter(|id| is_entry_id(id)) else { continue };
+            let named = head_path(&entry.path()).unwrap_or_else(|| {
+                // Not laid out as this application writes journals, or the
+                // path does not end within the head: decide as `entries` does.
+                let bytes = fs::read(entry.path()).unwrap_or_default();
+                if id.starts_with("bad-") {
+                    return salvage_path(&bytes);
+                }
+                match parse(&bytes) {
+                    Ok(journal) => Some(journal.path),
+                    Err(_) => salvage_path(&bytes),
+                }
+            });
+            if named.as_ref() == Some(path) {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn remove_live(&self, path: &WorkspacePath) -> io::Result<()> {
@@ -192,6 +260,27 @@ impl StoredEntry {
             Self::Unreadable { modified, .. } => *modified,
         }
     }
+}
+
+/// The workspace path named by a journal file, read from its first bytes.
+/// `Some(answer)` only for a file that starts exactly as this application
+/// writes journals (`{"version":N,"path":"..."`) and whose path string ends
+/// within the head: `"path"` is then the field a full parse reads and the
+/// first one [`salvage_path`] finds, so the answer is the same for a valid
+/// and for a damaged journal. `None`: the caller must read the whole file.
+fn head_path(file: &Path) -> Option<Option<WorkspacePath>> {
+    let mut head = Vec::with_capacity(HEAD_BYTES as usize);
+    fs::File::open(file).ok()?.take(HEAD_BYTES).read_to_end(&mut head).ok()?;
+    let rest = head.strip_prefix(b"{\"version\":")?;
+    let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 {
+        return None;
+    }
+    let rest = rest[digits..].strip_prefix(b",\"path\":")?;
+    let text = String::from_utf8_lossy(rest);
+    let mut stream = serde_json::Deserializer::from_str(&text).into_iter::<String>();
+    let raw = stream.next()?.ok()?;
+    Some(WorkspacePath::parse(&raw).ok())
 }
 
 /// Best effort: the workspace path named in damaged journal data (validated).
@@ -320,6 +409,85 @@ mod tests {
             assert!(!location.exists());
         }
         assert_eq!(store.entries().len(), 1);
+    }
+
+    #[test]
+    fn borrowed_journals_are_written_byte_for_byte_like_owned_ones() {
+        let owned = journal("dir/a b ü.typ", "line one\r\n\ttab \u{1F600} \u{0} end");
+        assert_eq!(serde_json::to_vec(&owned).unwrap(), serde_json::to_vec(&owned.borrowed()).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(dir.path(), "k");
+        // A staged journal is not there until it is committed; dropping it leaves nothing behind.
+        let staged = store.stage_live(&owned.borrowed()).unwrap();
+        let live = store.dir().join(format!("live-{}.json", path_key(&owned.path)));
+        assert!(!live.exists());
+        drop(staged);
+        assert_eq!(fs::read_dir(store.dir()).unwrap().count(), 0, "an abandoned staged journal is removed");
+        store.stage_live(&owned.borrowed()).unwrap().commit().unwrap();
+        assert_eq!(fs::read(&live).unwrap(), serde_json::to_vec(&owned).unwrap());
+        assert_eq!(parse(&fs::read(&live).unwrap()).unwrap(), owned);
+    }
+
+    /// Perf WS-3: asking whether a file has a pending recovery entry gives
+    /// the answer of the full listing for journals of every shape.
+    #[test]
+    fn pending_entry_lookup_agrees_with_the_full_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RecoveryStore::new(dir.path(), "k");
+        store.write_live(&journal("ok.typ", &"intact ".repeat(4_000))).unwrap();
+        store.write_live(&journal("dir/sub/deep ü.tex", "x")).unwrap();
+        store.promote_live().unwrap();
+        let long = format!("{}/long.txt", "d".repeat(200));
+        let far = format!("{}/far.txt", "p".repeat(HEAD_BYTES as usize));
+        let files: [(&str, String); 7] = [
+            // Written by a newer version.
+            ("rec-1123456789abcdef-5.json", r#"{"version":99,"path":"newer.txt","baseHash":null,"revision":2,"encoding":"utf8","savedAt":1,"text":"x"}"#.into()),
+            // An invalid path is not trusted.
+            ("rec-2123456789abcdef-5.json", r#"{"version":1,"path":"../../escape.txt","baseHash":null,"revision":2,"encoding":"utf8","savedAt":1,"text":"x"}"#.into()),
+            // Truncated after the path.
+            ("rec-3123456789abcdef-5.json", r#"{"version":1,"path":"cut.txt","baseHash":null,"revi"#.into()),
+            // Valid, but not laid out as this application writes it.
+            ("rec-4123456789abcdef-5.json", r#"{ "revision": 2, "version": 1, "encoding": "utf8", "savedAt": 1, "text": "x", "baseHash": null, "path" : "spaced.txt" }"#.into()),
+            // Already quarantined.
+            ("bad-5123456789abcdef-5.json", r#"{"version":1,"path":"quarantined.txt","baseHash":null"#.into()),
+            // A path that does not end within the head.
+            ("rec-6123456789abcdef-5.json", format!(r#"{{"version":1,"path":"{far}","baseHash":null,"revision":2,"encoding":"utf8","savedAt":1,"text":"x"}}"#)),
+            ("rec-7123456789abcdef-5.json", format!(r#"{{"version":1,"path":"{long}","baseHash":null,"revision":2,"encoding":"utf8","savedAt":1,"text":"x"}}"#)),
+        ];
+        for (name, content) in &files {
+            fs::write(store.dir().join(name), content).unwrap();
+        }
+        let candidates = [
+            "ok.typ",
+            "dir/sub/deep ü.tex",
+            "newer.txt",
+            "escape.txt",
+            "cut.txt",
+            "spaced.txt",
+            "quarantined.txt",
+            far.as_str(),
+            long.as_str(),
+            "absent.txt",
+            "x",
+        ];
+        let paths: Vec<WorkspacePath> = candidates.iter().filter_map(|p| WorkspacePath::parse(p).ok()).collect();
+        assert!(paths.len() >= 9);
+        // Before the listing quarantines anything, and after.
+        let quick_before: Vec<bool> = paths.iter().map(|p| store.has_entry_for(p)).collect();
+        let listed = store.entries();
+        let full: Vec<bool> = paths
+            .iter()
+            .map(|p| {
+                listed.iter().any(|entry| match entry {
+                    StoredEntry::Valid { journal, .. } => journal.path == *p,
+                    StoredEntry::Unreadable { path, .. } => path.as_ref() == Some(p),
+                })
+            })
+            .collect();
+        let quick_after: Vec<bool> = paths.iter().map(|p| store.has_entry_for(p)).collect();
+        assert_eq!(quick_before, full, "{candidates:?}");
+        assert_eq!(quick_after, full, "{candidates:?}");
+        assert!(full[0] && full[1] && full[2] && !full[3] && full[4] && full[5] && full[6], "{full:?}");
     }
 
     #[test]

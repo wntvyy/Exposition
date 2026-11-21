@@ -125,6 +125,8 @@ class Registry {
   private pageMap = new Map<string, PageContribution>();
   private listeners = new Set<Listener>();
   private version = 0;
+  /** `allCommands` in order, for the registry version it was sorted at. */
+  private sortedCommands: { version: number; list: CommandContribution[] } | null = null;
 
   registerPage(page: PageContribution): () => void {
     if (page.id === "editor") throw new Error("the editor page is built into the shell");
@@ -177,9 +179,15 @@ class Registry {
   }
 
   allCommands(): CommandContribution[] {
-    return [...this.commands.values()].sort((a, b) =>
-      `${a.category ?? ""}${a.title}`.localeCompare(`${b.category ?? ""}${b.title}`),
-    );
+    // Sorted once per registration change, not per call: the key dispatcher
+    // asks on every key press. Callers get their own array.
+    if (this.sortedCommands?.version !== this.version) {
+      const list = [...this.commands.values()].sort((a, b) =>
+        `${a.category ?? ""}${a.title}`.localeCompare(`${b.category ?? ""}${b.title}`),
+      );
+      this.sortedCommands = { version: this.version, list };
+    }
+    return [...this.sortedCommands.list];
   }
 
   command(id: string): CommandContribution | undefined {

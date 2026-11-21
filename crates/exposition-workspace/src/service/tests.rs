@@ -777,3 +777,302 @@ fn exact_save_refuses_recovered_text_and_pending_recovery_data() {
     service.save_document_exact(&id, revision).unwrap();
     assert_eq!(fs::read(f.file("main.typ")).unwrap(), b"later unsaved = Title\n\nBody.\n");
 }
+
+// ----- performance assignment: journal, watcher, disk checks ---------------------
+
+fn live_journals(service: &WorkspaceService) -> Vec<crate::recovery::Journal> {
+    let dir = service.recovery_store().unwrap().dir().to_path_buf();
+    let Ok(read) = fs::read_dir(dir) else { return Vec::new() };
+    read.flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("live-"))
+        .map(|e| serde_json::from_slice(&fs::read(e.path()).unwrap()).unwrap())
+        .collect()
+}
+
+fn recovery_files(service: &WorkspaceService) -> Vec<String> {
+    let dir = service.recovery_store().unwrap().dir().to_path_buf();
+    let Ok(read) = fs::read_dir(dir) else { return Vec::new() };
+    let mut names: Vec<String> = read.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    names
+}
+
+/// Perf WS-1: what a kill leaves behind is what it left before. After every
+/// journal write the journal on disk holds the text of that moment; a kill
+/// at any later point (simulated by a new session over the same data folder,
+/// with the old one neither saved nor closed) offers exactly that text.
+#[test]
+fn a_kill_after_each_journal_write_recovers_the_text_of_that_write() {
+    let f = fixture();
+    let id = f.service.open_document(&wp("main.typ")).unwrap().state.info.id;
+    let ids = HashSet::from([id.clone()]);
+    let mut expected = String::new();
+    for round in 0..4 {
+        edit(&f.service, &id, vec![TextPatch::insert(0, format!("burst {round} "))]);
+        f.service.journal_documents(&ids);
+        expected = text(&f.service, &id);
+        let journals = live_journals(&f.service);
+        assert_eq!(journals.len(), 1);
+        assert_eq!(journals[0].text, expected, "the journal holds the text at the time of the write");
+        assert_eq!(journals[0].revision, f.service.documents().info(&id).unwrap().revision);
+        assert_eq!(recovery_files(&f.service).len(), 1, "no temporary file is left next to the journal");
+        // Typed after the write and before the kill: not journaled yet (as before).
+        edit(&f.service, &id, vec![TextPatch::insert(0, "x")]);
+    }
+    // Kill. An interrupted journal write of the dead session left its temporary file.
+    let dir = f.service.recovery_store().unwrap().dir().to_path_buf();
+    fs::write(dir.join(".live-0123456789abcdef.json.exposition-save-dead.tmp"), b"{\"version\":1,\"pa").unwrap();
+    let service = f.restart();
+    let entries = service.recovery_entries().unwrap();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert!(entries[0].problem.is_none());
+    let restored = service.restore_recovery(&entries[0].id).unwrap();
+    assert_eq!(restored.state.text, expected);
+    assert!(recovery_files(&service).iter().all(|name| !name.ends_with(".tmp")), "{:?}", recovery_files(&service));
+}
+
+/// Perf WS-1: a journal staged outside the I/O lock is installed only while
+/// it is still the journal a write under the lock would produce.
+#[test]
+fn a_staged_journal_never_replaces_newer_state() {
+    let f = fixture();
+    let id = f.service.open_document(&wp("main.typ")).unwrap().state.info.id;
+    let ids = HashSet::from([id.clone()]);
+
+    // Saved while the journal was being written: no journal may appear.
+    edit(&f.service, &id, vec![TextPatch::insert(0, "one ")]);
+    let staged = f.service.stage_journals(&ids);
+    assert_eq!(staged.len(), 1);
+    f.service.save_document(&id, false).unwrap();
+    {
+        let _io = lock(&f.service.io);
+        f.service.install_journals(&ids, staged);
+    }
+    assert!(recovery_files(&f.service).is_empty(), "{:?}", recovery_files(&f.service));
+
+    // Saved and edited again meanwhile: the journal is the current text
+    // (based on the saved file), not the staged one from before the save.
+    edit(&f.service, &id, vec![TextPatch::insert(0, "two ")]);
+    let staged = f.service.stage_journals(&ids);
+    f.service.save_document(&id, false).unwrap();
+    edit(&f.service, &id, vec![TextPatch::insert(0, "three ")]);
+    {
+        let _io = lock(&f.service.io);
+        f.service.install_journals(&ids, staged);
+    }
+    let journals = live_journals(&f.service);
+    assert_eq!(journals.len(), 1);
+    assert_eq!(journals[0].text, "three two one = Title\n\nBody.\n");
+    assert_eq!(journals[0].base_hash, f.service.disk_base(&id).unwrap());
+    assert_eq!(recovery_files(&f.service).len(), 1, "the stale staged file is gone");
+
+    // An older staged journal does not replace a newer installed one.
+    let older = f.service.stage_journals(&ids);
+    edit(&f.service, &id, vec![TextPatch::insert(0, "four ")]);
+    f.service.journal_documents(&ids);
+    {
+        let _io = lock(&f.service.io);
+        f.service.install_journals(&ids, older);
+    }
+    let journals = live_journals(&f.service);
+    assert_eq!(journals[0].text, "four three two one = Title\n\nBody.\n");
+    assert_eq!(recovery_files(&f.service).len(), 1);
+
+    // Typing that continues during the write: the staged journal is not the
+    // journal of the current state, so the current text is written.
+    edit(&f.service, &id, vec![TextPatch::insert(0, "five ")]);
+    let staged = f.service.stage_journals(&ids);
+    edit(&f.service, &id, vec![TextPatch::insert(0, "six ")]);
+    let counts = f.service.journal_write_counts();
+    {
+        let _io = lock(&f.service.io);
+        assert_eq!(f.service.install_journals(&ids, staged), ids, "reported as outdated");
+    }
+    assert_eq!(live_journals(&f.service)[0].text, "six five four three two one = Title\n\nBody.\n");
+    assert_eq!(f.service.journal_write_counts(), (counts.0, counts.1 + 1));
+    assert_eq!(recovery_files(&f.service).len(), 1);
+
+    // Nothing changed during the write: the staged journal is installed.
+    edit(&f.service, &id, vec![TextPatch::insert(0, "seven ")]);
+    let staged = f.service.stage_journals(&ids);
+    {
+        let _io = lock(&f.service.io);
+        assert!(f.service.install_journals(&ids, staged).is_empty());
+    }
+    assert_eq!(live_journals(&f.service)[0].text, "seven six five four three two one = Title\n\nBody.\n");
+    assert_eq!(f.service.journal_write_counts(), (counts.0 + 1, counts.1 + 1));
+
+    // Renamed while the journal was being written: the journal follows the
+    // new path and nothing is left under the old one.
+    let staged = f.service.stage_journals(&ids);
+    f.service.rename_entry(&wp("main.typ"), "renamed.typ").unwrap();
+    {
+        let _io = lock(&f.service.io);
+        f.service.install_journals(&ids, staged);
+    }
+    let journals = live_journals(&f.service);
+    assert_eq!(journals.len(), 1, "{:?}", recovery_files(&f.service));
+    assert_eq!(journals[0].path, wp("renamed.typ"));
+    assert_eq!(journals[0].text, "seven six five four three two one = Title\n\nBody.\n");
+
+    // Closed while the journal was being written: nothing is installed.
+    let staged = f.service.stage_journals(&ids);
+    f.service.close_document(&id).unwrap();
+    {
+        let _io = lock(&f.service.io);
+        f.service.install_journals(&ids, staged);
+    }
+    assert!(recovery_files(&f.service).is_empty(), "{:?}", recovery_files(&f.service));
+}
+
+/// Perf WS-1 / WS-9: journaling and saving share the buffer; neither copies
+/// the text out of the document service.
+#[test]
+fn journal_save_and_disk_check_do_not_copy_the_buffer() {
+    use crate::documents::work;
+    let f = fixture();
+    fs::write(f.file("big.txt"), "line of text\n".repeat(20_000)).unwrap();
+    let id = f.service.open_document(&wp("big.txt")).unwrap().state.info.id;
+    let ids = HashSet::from([id.clone()]);
+    edit(&f.service, &id, vec![TextPatch::insert(0, "x")]);
+    work::reset();
+    f.service.journal_documents(&ids);
+    assert_eq!(work::totals().0, 0, "journal write");
+    f.service.save_document(&id, false).unwrap();
+    assert_eq!(work::totals().0, 0, "save");
+    f.service.journal_documents(&ids);
+    f.service.check_document(&id);
+    assert_eq!(work::totals(), (0, 0), "journal removal and the check of an unchanged file");
+    assert!(!dirty(&f.service, &id));
+}
+
+fn create_event(path: PathBuf) -> notify::Result<notify::Event> {
+    Ok(notify::Event::new(EventKind::Create(notify::event::CreateKind::File)).add_path(path))
+}
+
+/// Perf WS-5: notifications from ignored trees are dropped in the watcher's
+/// callback, before they are queued; everything else is queued as before.
+#[test]
+fn notifications_from_ignored_trees_are_not_queued() {
+    let f = fixture();
+    let root = f.service.open_root().unwrap();
+    let display = PathBuf::from(f.service.open_display_root().unwrap());
+    let before = f.service.fs_signals_queued();
+    for base in [&root, &display] {
+        for ignored in [
+            ".git/objects/ab/cdef",
+            ".lake/build/lib/A.olean",
+            "node_modules/pkg/index.js",
+            "target/debug/deps/x.rlib",
+            "chapters/.main.typ.exposition-save-1.tmp",
+            ".exposition/graph.sqlite3-journal",
+        ] {
+            f.service.inject_fs_event(create_event(base.join(ignored)));
+        }
+    }
+    let access = notify::Event::new(EventKind::Access(notify::event::AccessKind::Any)).add_path(root.join("main.typ"));
+    f.service.inject_fs_event(Ok(access));
+    assert_eq!(f.service.fs_signals_queued(), before, "nothing from an ignored tree is queued");
+
+    // Queued: a visible file, a rename out of an ignored tree into view, a
+    // path outside the root (left to the full check), a request to rescan,
+    // and a watcher error.
+    f.service.inject_fs_event(create_event(root.join("chapters/new.typ")));
+    let rename =
+        notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Name(notify::event::RenameMode::Both)))
+            .add_path(root.join("target/out.pdf"))
+            .add_path(root.join("out.pdf"));
+    f.service.inject_fs_event(Ok(rename));
+    f.service.inject_fs_event(create_event(f.dir.path().join("elsewhere/.git/x")));
+    let rescan =
+        notify::Event::new(EventKind::Other).add_path(root.join(".git/index")).set_flag(notify::event::Flag::Rescan);
+    f.service.inject_fs_event(Ok(rescan));
+    f.service.inject_fs_event(Err(notify::Error::generic("watcher failed")));
+    assert_eq!(f.service.fs_signals_queued(), before + 5);
+}
+
+/// Perf WS-5: the watcher backlog is bounded. Notifications beyond the limit
+/// are dropped, and the batch is reported as a rescan, so no consumer is
+/// left with a stale view.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watcher_backlog_beyond_the_limit_becomes_a_rescan() {
+    let f = fixture();
+    let service = Arc::clone(&f.service);
+    let root = service.open_root().unwrap();
+    let id = service.open_document(&wp("main.typ")).unwrap().state.info.id;
+    let mut events = service.subscribe();
+    let before = service.fs_signals_queued();
+    // The loop is not running yet: everything waits.
+    for i in 0..FS_BACKLOG_LIMIT + 500 {
+        service.inject_fs_event(create_event(root.join(format!("data/f{i}.csv"))));
+    }
+    assert_eq!(service.fs_signals_queued() - before, FS_BACKLOG_LIMIT as u64 + 1, "the limit, plus one rescan signal");
+    // Changed on disk meanwhile; its notification was among those dropped.
+    fs::write(f.file("main.typ"), b"= Title\n\nChanged during the burst.\n").unwrap();
+    tokio::spawn(Arc::clone(&service).run());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut rescan = false;
+    while !rescan && Instant::now() < deadline {
+        if let Ok(Ok(WorkspaceEvent::FilesChanged { rescan: true, .. })) =
+            tokio::time::timeout(Duration::from_secs(1), events.recv()).await
+        {
+            rescan = true;
+        }
+    }
+    assert!(rescan, "a rescan is reported");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while text(&service, &id) != "= Title\n\nChanged during the burst.\n" && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(text(&service, &id), "= Title\n\nChanged during the burst.\n", "open documents are re-read on a rescan");
+
+    // The backlog was released: later notifications are queued and reported again.
+    let mut events = service.subscribe();
+    service.inject_fs_event(create_event(root.join("after.typ")));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut reported = false;
+    while !reported && Instant::now() < deadline {
+        if let Ok(Ok(WorkspaceEvent::FilesChanged { changes, .. })) =
+            tokio::time::timeout(Duration::from_secs(1), events.recv()).await
+        {
+            reported = changes.iter().any(|c| c.path.as_str() == "after.typ");
+        }
+    }
+    assert!(reported, "notifications after the overflow are reported");
+}
+
+/// Perf WS-6: a batch is matched against open documents by path and by the
+/// folders above each document, as the pairwise comparison did.
+#[test]
+fn changed_documents_are_found_by_file_and_by_folder() {
+    let f = fixture();
+    fs::create_dir_all(f.project().join("chapters/part")).unwrap();
+    fs::write(f.file("chapters/part/a.typ"), b"a\n").unwrap();
+    fs::write(f.file("chapters2.typ"), b"b\n").unwrap();
+    let a = f.service.open_document(&wp("chapters/part/a.typ")).unwrap().state.info.id;
+    let b = f.service.open_document(&wp("chapters2.typ")).unwrap().state.info.id;
+    let main = f.service.open_document(&wp("main.typ")).unwrap().state.info.id;
+    let rewrite = |f: &Fixture| {
+        for (path, body) in [("chapters/part/a.typ", "a2\n"), ("chapters2.typ", "b2\n"), ("main.typ", "m2\n")] {
+            let current = fs::read_to_string(f.file(path)).unwrap();
+            fs::write(f.file(path), format!("{current}{body}")).unwrap();
+        }
+    };
+    let change = |path: &str| FileChange { path: wp(path), kind: FileChangeKind::Modified };
+    let revisions = |f: &Fixture| [&a, &b, &main].map(|id| f.service.documents().info(id).unwrap().revision);
+
+    // A folder above the document (not a sibling whose name starts the same).
+    rewrite(&f);
+    f.service.check_changed_documents(&[change("chapters"), change("other/x.typ")], false);
+    assert_eq!(revisions(&f), [2, 1, 1]);
+    // The file itself.
+    f.service.check_changed_documents(&[change("chapters2.typ")], false);
+    assert_eq!(revisions(&f), [2, 2, 1]);
+    // A nested folder, and an unrelated deeper path.
+    rewrite(&f);
+    f.service.check_changed_documents(&[change("chapters/part"), change("main.typ/x")], false);
+    assert_eq!(revisions(&f), [3, 2, 1]);
+    // A rescan checks every document.
+    f.service.check_changed_documents(&[], true);
+    assert_eq!(revisions(&f), [3, 3, 2]);
+}

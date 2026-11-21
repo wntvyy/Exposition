@@ -369,20 +369,20 @@ pub fn language_for(path: &WorkspacePath) -> &'static str {
 /// in use); otherwise a message explaining why the agent cannot act.
 pub fn check_root(workspace: Option<&WorkspaceService>, root: &Path) -> Result<(), String> {
     let Some(workspace) = workspace else { return Ok(()) };
-    let Some(current) = workspace.current() else {
+    let Some(current_root) = workspace.open_display_root() else {
         return Err(format!(
             "No project folder is open. Open {} in Exposition to let the agent work on it.",
             display_path(root)
         ));
     };
-    let open = fs::canonicalize(&current.root).unwrap_or_else(|_| PathBuf::from(&current.root));
+    let open = fs::canonicalize(&current_root).unwrap_or_else(|_| PathBuf::from(&current_root));
     let task = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     if open == task {
         Ok(())
     } else {
         Err(format!(
             "The open project folder is {}, not this task's folder {}. Open the task's folder to continue.",
-            current.root,
+            current_root,
             display_path(root)
         ))
     }

@@ -5,7 +5,7 @@
 // build. Rows navigate; nothing here edits the document or the graph, and
 // rows are not graph entities (nesting is layout, not dependence).
 import { BookOpen, Braces, CornerDownRight, FileText, Hash, Sigma } from "lucide-react";
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { memo, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import { useActiveEditor } from "../../app/editors";
 import { registry } from "../../app/registry";
@@ -85,7 +85,9 @@ function CoverageNote({ outline }: { outline: DocumentOutline }) {
   );
 }
 
-function SourceOutline({ outline }: { outline: DocumentOutline }) {
+// Memoized: the view re-renders on every document change (twice per typed
+// character), the outline changes only when a refresh answers.
+const SourceOutline = memo(function SourceOutline({ outline }: { outline: DocumentOutline }) {
   const all = useMemo(() => flatten(outline.items), [outline]);
   // Collapsed rows are remembered by key while the document stays the same.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
@@ -120,7 +122,7 @@ function SourceOutline({ outline }: { outline: DocumentOutline }) {
       {renderItems(outline.items)}
     </Tree>
   );
-}
+});
 
 function PageList({ path, handle }: { path: string; handle: DocumentHandle }) {
   const entry = useTypesetting((s) => s.entries[path]);
