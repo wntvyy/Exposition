@@ -138,6 +138,16 @@ pub struct ResearchService {
     shared: Arc<Shared>,
 }
 
+/// What [`ResearchService::retained_runs`] reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RetainedRuns {
+    pub runs: usize,
+    pub finished: usize,
+    /// Output text retained across those runs.
+    pub output_chars: usize,
+    pub code_bytes: usize,
+}
+
 struct Shared {
     config: ResearchConfig,
     events: broadcast::Sender<ResearchEvent>,
@@ -193,6 +203,17 @@ impl ResearchService {
 
     pub fn subscribe(&self) -> broadcast::Receiver<ResearchEvent> {
         self.shared.events.subscribe()
+    }
+
+    /// Run states held in memory now (benchmarks and retention tests).
+    pub fn retained_runs(&self) -> RetainedRuns {
+        let runs = lock(&self.shared.runs);
+        RetainedRuns {
+            runs: runs.len(),
+            finished: runs.values().filter(|r| r.finished).count(),
+            output_chars: runs.values().map(|r| r.retained_chars).sum(),
+            code_bytes: runs.values().map(|r| r.code.len()).sum(),
+        }
     }
 
     // ---- workspace ------------------------------------------------------

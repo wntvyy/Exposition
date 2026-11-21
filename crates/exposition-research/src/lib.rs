@@ -43,4 +43,6 @@ pub mod types;
 pub use error::ResearchError;
 pub use project::ResearchProject;
 pub use runs::media_type_for;
-pub use service::{ResearchConfig, ResearchService, ResolvedSource, SourceReader, StartSessionRequest, hash_file};
+pub use service::{
+    ResearchConfig, ResearchService, ResolvedSource, RetainedRuns, SourceReader, StartSessionRequest, hash_file,
+};

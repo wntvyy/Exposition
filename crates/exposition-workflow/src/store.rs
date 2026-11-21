@@ -43,6 +43,20 @@ pub struct RunStore {
     conn: Connection,
     /// The database file (`None`: in memory).
     path: Option<PathBuf>,
+    counters: std::cell::Cell<StoreCounters>,
+}
+
+/// Work the store has done since it was opened (benchmarks and
+/// cost-regression tests; deterministic, unlike timings).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StoreCounters {
+    /// Record writes (each is one durable transaction).
+    pub puts: u64,
+    /// Bytes of record text given to those writes.
+    pub put_bytes: u64,
+    /// Whole run records decoded from their stored text.
+    pub bodies_decoded: u64,
+    pub decoded_bytes: u64,
 }
 
 /// A run removed from the history with app-managed recovery (P1 project
@@ -116,7 +130,26 @@ impl RunStore {
         )
         .map_err(store_error)?;
         migrate(&conn)?;
-        Ok(Self { conn, path: path.map(Path::to_path_buf) })
+        Ok(Self { conn, path: path.map(Path::to_path_buf), counters: Default::default() })
+    }
+
+    pub fn counters(&self) -> StoreCounters {
+        self.counters.get()
+    }
+
+    fn count(&self, change: impl FnOnce(&mut StoreCounters)) {
+        let mut counters = self.counters.get();
+        change(&mut counters);
+        self.counters.set(counters);
+    }
+
+    /// [`decode`], counted.
+    fn decoded(&self, id: &str, state: &str, body: &str) -> Result<WorkflowRun, String> {
+        self.count(|c| {
+            c.bodies_decoded += 1;
+            c.decoded_bytes += body.len() as u64;
+        });
+        decode(id, state, body)
     }
 
     /// Insert or replace a run record (one transaction).
@@ -125,6 +158,10 @@ impl RunStore {
         if body.len() > MAX_BODY {
             return Err(WorkflowRunError::new("workflow.tooLarge", "The run record is too large to keep."));
         }
+        self.count(|c| {
+            c.puts += 1;
+            c.put_bytes += body.len() as u64;
+        });
         self.conn
             .execute(
                 "INSERT INTO runs (id, project, workflow, state, started_at, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -155,7 +192,7 @@ impl RunStore {
             .map_err(store_error)?;
         match row {
             None => Ok(None),
-            Some((rid, project, state, body)) => decode(&rid, &state, &body)
+            Some((rid, project, state, body)) => self.decoded(&rid, &state, &body)
                 .map(|run| Some((project, run)))
                 .map_err(|m| WorkflowRunError::new("workflow.untrusted", m)),
         }
@@ -185,7 +222,7 @@ impl RunStore {
         for row in rows {
             // A malformed row is skipped, never fatal.
             let Ok((Some(id), Some(state), Some(body))) = row else { continue };
-            if let Ok(run) = decode(&id, &state, &body) {
+            if let Ok(run) = self.decoded(&id, &state, &body) {
                 out.push(summary(&run));
             }
         }
@@ -212,7 +249,7 @@ impl RunStore {
         let mut count = 0;
         for (id, project, state, body) in rows {
             let decoded = match (&project, &body) {
-                (Some(_), Some(body)) => decode(&id, &state, body),
+                (Some(_), Some(body)) => self.decoded(&id, &state, body),
                 _ => Err("malformed run row".to_owned()),
             };
             match decoded {
@@ -245,7 +282,7 @@ impl RunStore {
             .map_err(store_error)?;
         match row {
             None => Ok(None),
-            Some((rid, project, state, body, deleted)) => decode(&rid, &state, &body)
+            Some((rid, project, state, body, deleted)) => self.decoded(&rid, &state, &body)
                 .map(|run| Some((project, run, deleted.map(|d| d.max(0) as u64))))
                 .map_err(|m| WorkflowRunError::new("workflow.untrusted", m)),
         }
@@ -289,7 +326,7 @@ impl RunStore {
         let mut out = Vec::new();
         for row in rows {
             let Ok((Some(id), Some(state), Some(body), Some(at), bytes)) = row else { continue };
-            if let Ok(run) = decode(&id, &state, &body) {
+            if let Ok(run) = self.decoded(&id, &state, &body) {
                 out.push(DeletedRun {
                     summary: summary(&run),
                     deleted_at_ms: at.max(0) as u64,

@@ -125,6 +125,9 @@ pub(crate) struct Inner {
     events: broadcast::Sender<WorkflowRunEvent>,
     /// Execution slots shared by every active run (the global limits).
     pub(crate) slots: Arc<Slots>,
+    /// Scheduler loop iterations of every run so far (benchmarks and
+    /// cost-regression tests).
+    pub(crate) scheduler_wakeups: std::sync::atomic::AtomicU64,
 }
 
 impl Inner {
@@ -377,12 +380,23 @@ impl WorkflowRunService {
                 edits: Mutex::new(()),
                 events,
                 slots: Slots::new(limits),
+                scheduler_wakeups: Default::default(),
             }),
         })
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<WorkflowRunEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// Work the run store has done since the service started.
+    pub fn store_counters(&self) -> store::StoreCounters {
+        self.inner.store.lock().unwrap_or_else(|p| p.into_inner()).counters()
+    }
+
+    /// Scheduler loop iterations of every run since the service started.
+    pub fn scheduler_wakeups(&self) -> u64 {
+        self.inner.scheduler_wakeups.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// One event per listed run of the open project with its state now, for
