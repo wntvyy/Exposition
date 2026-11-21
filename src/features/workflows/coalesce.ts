@@ -17,13 +17,27 @@ export function coalesced(task: () => Promise<unknown>): () => void {
       return;
     }
     running = true;
-    void task()
+    let read: Promise<unknown>;
+    try {
+      read = task();
+    } catch (error) {
+      // Thrown before a promise existed: a failed read like any other. It
+      // must not leave `running` set, or no later call would ever read.
+      running = false;
+      again = false;
+      throw error;
+    }
+    void read
       .catch(() => undefined)
       .finally(() => {
         running = false;
         if (again) {
           again = false;
-          run();
+          try {
+            run();
+          } catch {
+            // A trailing read that failed at once; the next call reads again.
+          }
         }
       });
   };

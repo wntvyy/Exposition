@@ -78,9 +78,8 @@ describe("review: coalesced", () => {
   });
 
   // Not reachable from the two call sites today (both pass an async
-  // function, which cannot throw before returning its promise): a task that
-  // throws synchronously leaves the wrapper marked as running for good.
-  it.fails("review: suspicion: a task that throws synchronously does not stop later reads", () => {
+  // function, which cannot throw before returning its promise).
+  it("review: a task that throws synchronously does not stop later reads", () => {
     let n = 0;
     const run = coalesced(() => {
       n += 1;
