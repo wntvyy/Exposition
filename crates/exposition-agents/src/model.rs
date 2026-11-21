@@ -780,6 +780,15 @@ pub struct TaskDetail {
     #[serde(default)]
     #[ts(as = "Option<Vec<crate::questions::QuestionRequest>>", optional)]
     pub questions: Vec<crate::questions::QuestionRequest>,
+    /// Set on a partial read (the reader named the sequence number from
+    /// which its copy may be out of date): `transcript` holds only the items
+    /// from this sequence number on, and `graph.context` is left out. The
+    /// reader keeps its earlier items and its context. It must read the
+    /// whole detail instead when it holds none, or when `graph.contexts`
+    /// differs from what it holds (a new run attached a new context).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub transcript_from: Option<u64>,
 }
 
 /// Events on the `agents:event` channel.

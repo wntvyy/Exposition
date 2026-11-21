@@ -587,6 +587,11 @@ impl AgentService {
         self.inner.events.subscribe()
     }
 
+    /// Cost counters of the task store (measurement only).
+    pub fn store_stats(&self) -> crate::store::StoreStats {
+        self.inner.store.stats()
+    }
+
     /// How long a tool call waits for the graph to reconcile its targets
     /// before it is paused (tests shorten it).
     pub fn set_graph_settle(&self, settle: Duration) {
@@ -935,16 +940,27 @@ impl AgentService {
     }
 
     pub fn task_detail(&self, id: &TaskId) -> Result<TaskDetail> {
+        self.task_detail_from(id, None)
+    }
+
+    /// The task's detail; with `from`, a partial read for a reader that
+    /// holds an earlier one: only the transcript items with that sequence
+    /// number or a later one, and no graph context (see
+    /// [`TaskDetail::transcript_from`]). Everything else is complete and
+    /// current either way. Stored rows before the latest assistant message
+    /// never change, so a reader that asks from there (or from its earliest
+    /// unfinished tool call) misses nothing.
+    pub fn task_detail_from(&self, id: &TaskId, from: Option<u64>) -> Result<TaskDetail> {
         let summary = self.inner.summary(id)?;
-        let transcript = self.inner.transcript(id)?;
+        let transcript = self.inner.transcript(id, from.unwrap_or(0))?;
         let approvals = lock(&self.inner.running)
             .get(id)
             .map(|r| r.approvals.values().map(|(a, _)| a.clone()).collect())
             .unwrap_or_default();
-        let graph = self.inner.graph_info(id)?;
+        let graph = self.inner.graph_info(id, from.is_none())?;
         let allowances = self.inner.task_allowances(id)?;
         let questions = self.inner.store.questions(id)?;
-        Ok(TaskDetail { summary, transcript, approvals, graph, allowances, questions })
+        Ok(TaskDetail { summary, transcript, approvals, graph, allowances, questions, transcript_from: from })
     }
 
     pub fn create_task(&self, request: CreateTaskRequest) -> Result<TaskSummary> {
@@ -1108,7 +1124,9 @@ impl AgentService {
         };
         let target = switched.clone().unwrap_or_else(|| row.spec.provider.clone());
         let _reserved = self.inner.reserve(&attachments);
-        let (all, bytes) = self.inner.history_attachments(id, &attachments)?;
+        // The stored conversation, read once for everything below.
+        let history = self.inner.store.messages(id)?;
+        let (all, bytes) = self.inner.history_attachments(&history, &attachments);
         preflight(&target, &all, self.inner.known_model(&target).as_ref()).map_err(|e| match &switched {
             Some(_) => AgentError::new(
                 &e.code,
@@ -1172,7 +1190,7 @@ impl AgentService {
                 ),
             )?;
         }
-        let mut content = self.inner.dangling_tool_results(id)?;
+        let mut content = self.inner.dangling_tool_results(id, &history)?;
         // The approvals and the files' saved and review state as they are
         // now (the user may have approved, revoked, saved, kept, or reverted
         // since the last run): the model must not infer them from the graph.
@@ -1184,8 +1202,18 @@ impl AgentService {
             "text": prompt::context_update(&row.spec, &self.inner.documents, &authority, &outlook, &changed),
         }));
         if let Some(graph_context) = &graph_context {
+            // When the latest context block the application itself put into
+            // the conversation carries exactly this context, and nothing the
+            // user wrote since could be taken for a context block, say that
+            // it still holds instead of sending a second copy.
+            let held = held_graph_context(&history).is_some_and(|sent| graph::context::same(&sent, graph_context));
             self.inner.store.insert_graph_context(id, graph_context)?;
-            content.push(json!({"type": "text", "text": graph::context::block(graph_context)}));
+            let text = if held {
+                graph::context::unchanged_block(graph_context)
+            } else {
+                graph::context::block(graph_context)
+            };
+            content.push(json!({"type": "text", "text": text}));
         }
         content.push(json!({"type": "text", "text": if prompt.is_empty() { ATTACHMENTS_ONLY } else { prompt }}));
         content.extend(attachments.iter().map(att::reference_block));
@@ -2297,8 +2325,11 @@ impl Inner {
             .map_err(|refusal| AgentError::from_refusal(&refusal))
     }
 
-    fn graph_info(&self, id: &TaskId) -> Result<TaskGraphInfo> {
-        let (context, contexts) = self.store.graph_context(id)?;
+    /// The task's graph record; without `context`, only the number of
+    /// contexts attached is read (a partial detail read).
+    fn graph_info(&self, id: &TaskId, context: bool) -> Result<TaskGraphInfo> {
+        let (context, contexts) =
+            if context { self.store.graph_context(id)? } else { (None, self.store.graph_context_count(id)?) };
         Ok(TaskGraphInfo {
             project: self.store.graph_project(id)?,
             context,
@@ -2425,9 +2456,13 @@ impl Inner {
     }
 
     /// Every attachment in a task's history plus `extra`, and their encoded size.
-    fn history_attachments(&self, id: &TaskId, extra: &[AttachmentInfo]) -> Result<(Vec<AttachmentInfo>, u64)> {
+    fn history_attachments(
+        &self,
+        history: &[(String, Vec<Value>)],
+        extra: &[AttachmentInfo],
+    ) -> (Vec<AttachmentInfo>, u64) {
         let mut all: Vec<AttachmentInfo> = extra.to_vec();
-        for (_, content) in self.store.messages(id)? {
+        for (_, content) in history {
             for block in content.iter().filter(|b| block_type(b) == "exposition_attachment") {
                 if let Some(aid) = block.get("attachment_id").and_then(Value::as_str)
                     && let Ok(Some(info)) = self.store.attachment(&AttachmentId(aid.to_owned()))
@@ -2437,7 +2472,7 @@ impl Inner {
             }
         }
         let bytes = all.iter().map(|a| encoded_size(a.size_bytes)).sum();
-        Ok((all, bytes))
+        (all, bytes)
     }
 
     /// The history as a provider receives it: attachment references become
@@ -2445,13 +2480,15 @@ impl Inner {
     /// snapshot), and another provider's private state is dropped (OpenAI
     /// reasoning items are only replayed to OpenAI; the OpenAI adapter drops
     /// Anthropic thinking itself). A missing snapshot fails the request with
-    /// an explanation; nothing is silently omitted.
+    /// an explanation; nothing is silently omitted. `total` is the encoded
+    /// size of the attachments of the conversation so far (the per-request
+    /// limit counts all of them); it grows by what `messages` carry.
     fn provider_messages(
         &self,
         kind: ProviderKind,
         messages: Vec<(String, Vec<Value>)>,
+        total: &mut u64,
     ) -> std::result::Result<Vec<ProviderMessage>, String> {
-        let mut total = 0u64;
         let mut out = Vec::with_capacity(messages.len());
         for (role, content) in messages {
             let mut blocks = Vec::with_capacity(content.len());
@@ -2470,8 +2507,8 @@ impl Inner {
                             .attachments
                             .get(&info.sha256)
                             .ok_or_else(|| format!("The attachment “{name}” is missing from storage, so this conversation cannot be sent again."))?;
-                        total += encoded_size(bytes.len() as u64);
-                        if total > att::MAX_REQUEST_BYTES {
+                        *total += encoded_size(bytes.len() as u64);
+                        if *total > att::MAX_REQUEST_BYTES {
                             return Err(format!(
                                 "The conversation's attachments exceed {} per request; start a new task to continue.",
                                 att::human_size(att::MAX_REQUEST_BYTES)
@@ -2621,22 +2658,53 @@ impl Inner {
 
     /// Files whose changes still await review, judged from content once the
     /// task has stopped (a change the user undid is not pending).
-    fn pending_review(&self, row: &TaskRow, files: &[crate::store::TaskFileRow]) -> u32 {
-        let stored = |f: &crate::store::TaskFileRow| f.state == ReviewState::Pending;
+    ///
+    /// The stored texts stay in the database: a file at the task's tip or
+    /// back at its baseline is decided by comparing there, and only a file
+    /// that has moved on from both has its texts read and diffed.
+    fn pending_review(&self, row: &TaskRow, files: &[crate::store::TaskFileState]) -> Result<u32> {
         let project = if row.status.is_active() { None } else { self.content_files(row) };
-        let Some(project) = project else { return files.iter().filter(|f| stored(f)).count() as u32 };
-        files
-            .iter()
-            .filter(|f| matches!(f.state, ReviewState::Pending | ReviewState::Reverted))
-            .filter(|f| {
-                let current = review::current(&f.path, &self.documents, &project);
-                review::effective_state(f, &current).0 == ReviewState::Pending
-            })
-            .count() as u32
+        let Some(project) = project else {
+            return Ok(files.iter().filter(|f| f.state == ReviewState::Pending).count() as u32);
+        };
+        let mut pending = 0;
+        for file in files.iter().filter(|f| matches!(f.state, ReviewState::Pending | ReviewState::Reverted)) {
+            let current = review::current(&file.path, &self.documents, &project);
+            let compared = match current.text() {
+                Some(text) if file.kind == ReviewChangeKind::Edited && !file.entangled => {
+                    Some(self.net_change_in(&row.id, &file.path, text)?)
+                }
+                _ => None,
+            };
+            // `judge` consults the comparison exactly when it was made above.
+            let judged = review::judge(file.kind, file.state, file.entangled, &current, |_| {
+                compared.unwrap_or((review::Presence::Present, true))
+            });
+            if judged.map_or(file.state, |(state, _)| state) == ReviewState::Pending {
+                pending += 1;
+            }
+        }
+        Ok(pending)
+    }
+
+    /// Whether the task's net change to an edited file is in `text`, and
+    /// whether `text` is the file without that change (its stored baseline).
+    fn net_change_in(&self, id: &TaskId, path: &WorkspacePath, text: &str) -> Result<(review::Presence, bool)> {
+        if let Some(compared) = self.store.task_file_match(id, path, text)?
+            && let Some(presence) = review::presence_of(compared)
+        {
+            return Ok((presence, compared.at_baseline));
+        }
+        // The file has moved on from both stored texts: diff them.
+        Ok(match self.store.task_file(id, path)? {
+            Some(row) => (review::presence(&row.baseline_text, &row.tip_text, text), text == row.baseline_text),
+            // The record is gone: the stored state stands.
+            None => (review::Presence::Present, true),
+        })
     }
 
     fn summary_of(&self, row: &TaskRow) -> Result<TaskSummary> {
-        let files = self.store.task_files(&row.id)?;
+        let files = self.store.task_file_states(&row.id)?;
         Ok(TaskSummary {
             id: row.id.clone(),
             title: row.title.clone(),
@@ -2645,7 +2713,7 @@ impl Inner {
             status: row.status.clone(),
             spec: row.spec.clone(),
             usage: row.usage.clone(),
-            pending_review: self.pending_review(row, &files),
+            pending_review: self.pending_review(row, &files)?,
             changed_files: files.len() as u32,
         })
     }
@@ -2657,11 +2725,19 @@ impl Inner {
         }
     }
 
-    fn transcript(&self, id: &TaskId) -> Result<Vec<TranscriptItem>> {
-        let calls: HashMap<String, ToolCallRow> =
-            self.store.tool_calls(id)?.into_iter().map(|c| (c.tool_use_id.clone(), c)).collect();
+    /// The rendered transcript from sequence number `from` on (0: all of it).
+    fn transcript(&self, id: &TaskId, from: u64) -> Result<Vec<TranscriptItem>> {
+        // Results are shown cut to `TRANSCRIPT_RESULT_LIMIT` bytes: read no
+        // more of each than that can need (one more character than the
+        // limit has bytes, so a longer result is still seen to be longer).
+        let calls: HashMap<String, ToolCallRow> = self
+            .store
+            .tool_call_previews(id, TRANSCRIPT_RESULT_LIMIT + 1)?
+            .into_iter()
+            .map(|c| (c.tool_use_id.clone(), c))
+            .collect();
         let mut items = Vec::new();
-        for row in self.store.transcript(id)? {
+        for row in self.store.transcript_from(id, from)? {
             let seq = row.seq;
             // A discussion entry renders like a message; its user text is
             // marked with the question it is about.
@@ -2771,9 +2847,9 @@ impl Inner {
         Ok(items)
     }
 
-    /// Results for tool calls left unanswered by an interrupted run.
-    fn dangling_tool_results(&self, id: &TaskId) -> Result<Vec<Value>> {
-        let messages = self.store.messages(id)?;
+    /// Results for tool calls left unanswered by an interrupted run
+    /// (`messages`: the task's stored conversation).
+    fn dangling_tool_results(&self, id: &TaskId, messages: &[(String, Vec<Value>)]) -> Result<Vec<Value>> {
         let Some((role, content)) = messages.last() else { return Ok(Vec::new()) };
         if role != "assistant" {
             return Ok(Vec::new());
@@ -2852,6 +2928,8 @@ impl Inner {
                         started: Instant::now(),
                         paused: Duration::ZERO,
                         seen: SeenTexts::default(),
+                        history: None,
+                        attachment_bytes: 0,
                         authorized: HashMap::new(),
                         granted: HashMap::new(),
                         files,
@@ -2929,6 +3007,46 @@ impl Inner {
         self.emit(AgentEvent::TranscriptChanged { task_id: id.clone() });
         self.emit(AgentEvent::ReviewChanged { task_id: id.clone() });
     }
+}
+
+/// The graph context the model certainly holds as its latest: the one of
+/// the latest whole context block the application itself put into the
+/// conversation. `None` (the caller then sends the whole context) whenever
+/// that is not certain.
+///
+/// The application's block is identified by where the application puts it,
+/// never by looking at text a user wrote: a user message the application
+/// builds for a run has, as its text blocks, the task context first, then
+/// the graph context, then the user's prompt last (tool results and
+/// attachments are not text blocks). Messages are walked from the latest;
+/// the short "unchanged" form refers to an earlier block, so the walk goes
+/// on past it. Anything else in that position, or a prompt at or after the
+/// block that itself begins like a context block (the model could take it
+/// for the latest one), ends the walk with `None`.
+fn held_graph_context(history: &[(String, Vec<Value>)]) -> Option<graph::GraphContext> {
+    for (_, content) in history.iter().rev().filter(|(role, _)| role == "user") {
+        let texts: Vec<&str> = content
+            .iter()
+            .filter(|block| block_type(block) == "text")
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect();
+        // A message of tool results only (with a question's discussion, if any).
+        let [first, middle @ .., prompt] = texts.as_slice() else { continue };
+        if !first.starts_with("<task_context>") {
+            continue;
+        }
+        if prompt.starts_with("<graph_context>") {
+            return None;
+        }
+        match middle {
+            // A run without a graph context block.
+            [] => continue,
+            [block] if graph::context::is_unchanged_block(block) => continue,
+            [block] => return graph::context::parse_block(block),
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// The record of a graph proposal whose approval can no longer be given.
@@ -3051,6 +3169,102 @@ fn stop_message(stop_reason: &str, unrun_calls: usize, output_limit: u32) -> Str
     }
 }
 
+/// How long streamed text is held to be sent with what follows it. A model
+/// streams many small deltas per second; each event sent to the webview
+/// costs an IPC message and a render there.
+const DELTA_INTERVAL: Duration = Duration::from_millis(25);
+/// Held text is sent at this size whatever the time.
+const DELTA_MAX_BYTES: usize = 16 * 1024;
+
+/// The stream of one model request, forwarded to the task's events with
+/// consecutive text (or thinking) deltas joined: the first delta after a
+/// pause goes out at once; what arrives within [`DELTA_INTERVAL`] of the last
+/// event is held and sent together. Nothing is dropped or reordered: a delta
+/// of the other kind, a reset, or a fallback sends the held text first, a
+/// timer sends it while the stream is quiet, and the end of the stream sends
+/// it before any other event of the task.
+struct StreamDeltas {
+    events: broadcast::Sender<AgentEvent>,
+    task_id: TaskId,
+    turn: u32,
+    held: Mutex<HeldDelta>,
+}
+
+struct HeldDelta {
+    thinking: bool,
+    text: String,
+    /// When this stream last sent a delta event.
+    sent: Option<Instant>,
+}
+
+impl StreamDeltas {
+    fn push(&self, event: StreamEvent) {
+        let event = match event {
+            StreamEvent::TextDelta(text) => return self.delta(false, &text),
+            StreamEvent::ThinkingDelta(text) => return self.delta(true, &text),
+            StreamEvent::Reset { reason } => {
+                AgentEvent::StreamReset { task_id: self.task_id.clone(), turn: self.turn, reason }
+            }
+            StreamEvent::Fallback { from, to } => AgentEvent::Fallback { task_id: self.task_id.clone(), from, to },
+            StreamEvent::MessageStart { .. } | StreamEvent::ToolUseStart { .. } => return,
+        };
+        self.flush();
+        let _ = self.events.send(event);
+    }
+
+    fn delta(&self, thinking: bool, text: &str) {
+        let mut held = lock(&self.held);
+        if held.thinking != thinking {
+            self.send(&mut held);
+            held.thinking = thinking;
+        }
+        held.text.push_str(text);
+        let due = held.sent.is_none_or(|sent| sent.elapsed() >= DELTA_INTERVAL);
+        if due || held.text.len() >= DELTA_MAX_BYTES {
+            self.send(&mut held);
+        }
+    }
+
+    fn send(&self, held: &mut HeldDelta) {
+        if held.text.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut held.text);
+        let (task_id, turn) = (self.task_id.clone(), self.turn);
+        let event = if held.thinking {
+            AgentEvent::ThinkingDelta { task_id, turn, text }
+        } else {
+            AgentEvent::TextDelta { task_id, turn, text }
+        };
+        held.sent = Some(Instant::now());
+        let _ = self.events.send(event);
+    }
+
+    /// Send what is held.
+    fn flush(&self) {
+        self.send(&mut lock(&self.held));
+    }
+
+    /// Run the provider's stream to its end, sending held text while the
+    /// stream is quiet (so the tail of a burst never waits for the next
+    /// delta) and when it ends.
+    async fn drive<T>(&self, stream: impl Future<Output = T>) -> T {
+        tokio::pin!(stream);
+        let mut tick = tokio::time::interval(DELTA_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                biased;
+                out = &mut stream => {
+                    self.flush();
+                    return out;
+                }
+                _ = tick.tick() => self.flush(),
+            }
+        }
+    }
+}
+
 /// One run of the task loop.
 struct Run<'a> {
     inner: &'a Arc<Inner>,
@@ -3063,6 +3277,14 @@ struct Run<'a> {
     paused: Duration,
     base_elapsed: u64,
     seen: SeenTexts,
+    /// The conversation as the provider receives it, kept between the
+    /// requests of this run: read and converted once (attachments encoded
+    /// once), then extended by what each turn stores. `None` until the first
+    /// request, and whenever it must be read again. Only this run appends
+    /// messages while it is active, so it always equals the stored history.
+    history: Option<Vec<ProviderMessage>>,
+    /// Encoded size of the attachments in `history`.
+    attachment_bytes: u64,
     /// How each call of this run that is about to run, or ran, was authorized.
     authorized: HashMap<String, AuthorizedBy>,
     /// What the approval of a call granted for the rest of the task.
@@ -3130,6 +3352,36 @@ impl Run<'_> {
         None
     }
 
+    /// The conversation for the next request: the run's own copy, or (first
+    /// request of the run) the stored history, converted for the provider.
+    fn take_history(&mut self, kind: ProviderKind) -> Result<Vec<ProviderMessage>, TaskStatus> {
+        if let Some(history) = self.history.take() {
+            return Ok(history);
+        }
+        let stored = self.inner.store.messages(&self.id).map_err(|e| TaskStatus::Failed { message: e.to_string() })?;
+        self.attachment_bytes = 0;
+        self.inner
+            .provider_messages(kind, stored, &mut self.attachment_bytes)
+            .map_err(|message| TaskStatus::Failed { message })
+    }
+
+    /// Add a message this run just stored to its copy of the conversation:
+    /// exactly what a read of the store returns for it (the content as the
+    /// store serializes and parses it, not as it was handed in), converted
+    /// as a stored message is. A later run reads the store, so both send
+    /// the same.
+    fn remember(&mut self, kind: ProviderKind, role: &str, content: &[Value]) {
+        let Some(history) = self.history.as_mut() else { return };
+        let added = Store::stored_form(content).map_err(|e| e.to_string()).and_then(|stored| {
+            self.inner.provider_messages(kind, vec![(role.to_owned(), stored)], &mut self.attachment_bytes)
+        });
+        match added {
+            Ok(added) => history.extend(added),
+            // The next request reads the stored history again (and reports why it cannot).
+            Err(_) => self.history = None,
+        }
+    }
+
     async fn drive(&mut self, provider: &dyn Provider) -> TaskStatus {
         self.set_status(TaskStatus::Running);
         if let Err(e) = self.inner.checkpoint(&self.id) {
@@ -3142,12 +3394,9 @@ impl Run<'_> {
             if let Some(status) = self.budget_before_request() {
                 return status;
             }
-            let messages = match self.inner.store.messages(&self.id) {
-                Ok(m) => match self.inner.provider_messages(provider.kind(), m) {
-                    Ok(messages) => messages,
-                    Err(message) => return TaskStatus::Failed { message },
-                },
-                Err(e) => return TaskStatus::Failed { message: e.to_string() },
+            let messages = match self.take_history(provider.kind()) {
+                Ok(messages) => messages,
+                Err(status) => return status,
             };
             // One request asks for the remaining output budget, at most the
             // per-turn limit or the model's own smaller limit. Only a request
@@ -3164,12 +3413,17 @@ impl Run<'_> {
             };
             let turn = self.usage.turns + 1;
             self.inner.emit(AgentEvent::StreamStarted { task_id: self.id.clone(), turn });
-            let sink = self.sink(turn);
+            let deltas = self.deltas(turn);
+            let sink = |event: StreamEvent| deltas.push(event);
             let result = tokio::select! {
-                r = provider.stream(&request, &sink, &self.cancel) => Ok(r),
+                r = deltas.drive(provider.stream(&request, &sink, &self.cancel)) => Ok(r),
                 _ = self.cancel.cancelled() => Err(Interrupt::Canceled),
                 _ = tokio::time::sleep(self.remaining_wall()) => Err(Interrupt::WallTime),
             };
+            // Whatever the stream delivered is sent before anything else is.
+            deltas.flush();
+            // The conversation goes back to the run for the next request.
+            self.history = Some(request.messages);
             let response = match result {
                 Err(Interrupt::Stop(status)) => return status,
                 Err(Interrupt::Canceled) | Ok(Err(ProviderError::Canceled)) => return TaskStatus::Canceled,
@@ -3211,6 +3465,7 @@ impl Run<'_> {
                 if let Err(e) = self.inner.store.append_message(&self.id, "assistant", &content) {
                     return TaskStatus::Failed { message: e.to_string() };
                 }
+                self.remember(provider.kind(), "assistant", &content);
                 self.inner.emit(AgentEvent::TranscriptChanged { task_id: self.id.clone() });
             }
             // Only a response that ended normally completes the task, and only
@@ -3379,6 +3634,7 @@ impl Run<'_> {
         if let Err(e) = self.inner.store.append_message(&self.id, "user", &results) {
             return Some(TaskStatus::Failed { message: e.to_string() });
         }
+        self.remember(provider.kind(), "user", &results);
         self.set_status(TaskStatus::Running);
         self.inner.emit(AgentEvent::TranscriptChanged { task_id: self.id.clone() });
         self.inner.emit(AgentEvent::ReviewChanged { task_id: self.id.clone() });
@@ -3612,19 +3868,13 @@ impl Run<'_> {
         Err((interrupt, Some(output)))
     }
 
-    /// Forward a model request's stream to the task's events.
-    fn sink(&self, turn: u32) -> impl Fn(StreamEvent) + Send + Sync + use<> {
-        let events = self.inner.events.clone();
-        let task_id = self.id.clone();
-        move |event: StreamEvent| {
-            let event = match event {
-                StreamEvent::TextDelta(text) => AgentEvent::TextDelta { task_id: task_id.clone(), turn, text },
-                StreamEvent::ThinkingDelta(text) => AgentEvent::ThinkingDelta { task_id: task_id.clone(), turn, text },
-                StreamEvent::Reset { reason } => AgentEvent::StreamReset { task_id: task_id.clone(), turn, reason },
-                StreamEvent::Fallback { from, to } => AgentEvent::Fallback { task_id: task_id.clone(), from, to },
-                StreamEvent::MessageStart { .. } | StreamEvent::ToolUseStart { .. } => return,
-            };
-            let _ = events.send(event);
+    /// Forwards a model request's stream to the task's events.
+    fn deltas(&self, turn: u32) -> StreamDeltas {
+        StreamDeltas {
+            events: self.inner.events.clone(),
+            task_id: self.id.clone(),
+            turn,
+            held: Mutex::new(HeldDelta { thinking: false, text: String::new(), sent: None }),
         }
     }
 
@@ -3816,12 +4066,14 @@ impl Run<'_> {
             };
             let turn = self.usage.turns + 1;
             self.inner.emit(AgentEvent::StreamStarted { task_id: self.id.clone(), turn });
-            let sink = self.sink(turn);
+            let deltas = self.deltas(turn);
+            let sink = |event: StreamEvent| deltas.push(event);
             // `abort` is a child of the task's token: Cancel ends it too.
             let result = tokio::select! {
-                r = provider.stream(&request, &sink, abort) => Some(r),
+                r = deltas.drive(provider.stream(&request, &sink, abort)) => Some(r),
                 _ = tokio::time::sleep(self.remaining_wall()) => None,
             };
+            deltas.flush();
             let response = match result {
                 None => {
                     return Err(budget_exceeded(
@@ -3961,7 +4213,7 @@ impl Run<'_> {
                 _ => messages.push((role, content)),
             }
         }
-        self.inner.provider_messages(kind, messages)
+        self.inner.provider_messages(kind, messages, &mut 0)
     }
 
     /// A tool call of a discussion turn: read-only tools under the gate, and

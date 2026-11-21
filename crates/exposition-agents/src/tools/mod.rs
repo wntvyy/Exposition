@@ -80,14 +80,17 @@ pub fn definitions() -> Vec<ToolDefinition> {
             strict: true,
             description: "List files and folders of the user's project (only those inside this task's scope). \
                 Call it first to discover the project's structure, and whenever you need a path you have not seen. \
-                Paths are relative to the project root and use forward slashes.",
+                Paths are relative to the project root and use forward slashes. A result with truncated: true is \
+                not the whole listing: it gives nextOffset and listing to continue with.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Folder to list, relative to the project root. Use \"\" for the root."},
-                    "recursive": {"type": "boolean", "description": "Include subfolders (up to 500 entries)."}
+                    "recursive": {"type": "boolean", "description": "Include subfolders (up to 500 entries per call)."},
+                    "offset": {"type": "integer", "description": "Entries to skip: 0, or the nextOffset of a truncated result."},
+                    "listing": {"type": "string", "description": "With an offset: the listing value of that truncated result; otherwise \"\"."}
                 },
-                "required": ["path", "recursive"],
+                "required": ["path", "recursive", "offset", "listing"],
                 "additionalProperties": false
             }),
         },
@@ -97,13 +100,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
             description: "Read a text file of the project. Returns the current text, including unsaved changes in \
                 the user's open editor, its revision number, and unsavedChanges (whether the editor text differs \
                 from the file saved on disk). Always read a file (again) before editing it: edit_document needs the \
-                revision you read, and the user may have changed the file since.",
+                revision you read, and the user may have changed the file since. To read part of a long file, give \
+                start_line and max_lines: the result then states the lines it holds, totalLines, and nextStartLine.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File path relative to the project root."}
+                    "path": {"type": "string", "description": "File path relative to the project root."},
+                    "start_line": {"type": "integer", "description": "First line to return (1-based); 0 for the start."},
+                    "max_lines": {"type": "integer", "description": "Lines to return at most; 0 for the whole file."}
                 },
-                "required": ["path"],
+                "required": ["path", "start_line", "max_lines"],
                 "additionalProperties": false
             }),
         },
@@ -653,12 +659,26 @@ fn operation_schemas() -> Value {
 pub struct ListFilesInput {
     pub path: String,
     pub recursive: bool,
+    /// Entries to skip (a truncated result's `nextOffset`). Calls recorded
+    /// before the parameter existed have none.
+    #[serde(default)]
+    pub offset: u64,
+    /// The `listing` value of the truncated result being continued (empty:
+    /// none given): the continuation then says when the listing changed.
+    #[serde(default)]
+    pub listing: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadFileInput {
     pub path: String,
+    /// First line (1-based) of a partial read; 0: from the start.
+    #[serde(default)]
+    pub start_line: u64,
+    /// Lines of a partial read at most; 0: to the end.
+    #[serde(default)]
+    pub max_lines: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

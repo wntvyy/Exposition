@@ -7,6 +7,7 @@
 //! `PRAGMA user_version` and applied in order.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use exposition_core::document::TextPatch;
@@ -332,6 +333,27 @@ pub struct TaskFileRow {
     pub op_ref: Option<String>,
 }
 
+/// A changed file's review record without its texts (summaries and counts).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaskFileState {
+    pub path: WorkspacePath,
+    pub kind: ReviewChangeKind,
+    pub entangled: bool,
+    pub state: ReviewState,
+}
+
+/// How a text compares with the texts stored for a changed file, decided
+/// inside SQLite: none of the stored texts is read out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextMatch {
+    /// The stored baseline and tip are the same text (no net change).
+    pub unchanged: bool,
+    /// The text is the stored tip (the file after the task's latest change).
+    pub at_tip: bool,
+    /// The text is the stored baseline (the file without the task's changes).
+    pub at_baseline: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChangeRow {
     pub id: i64,
@@ -351,6 +373,31 @@ pub struct Store {
     conn: Mutex<Connection>,
     /// The database file (`None`: in memory).
     path: Option<PathBuf>,
+    counters: Counters,
+}
+
+#[derive(Default)]
+struct Counters {
+    ops: AtomicU64,
+    review_text_bytes: AtomicU64,
+    transcript_bytes: AtomicU64,
+    tool_result_bytes: AtomicU64,
+}
+
+/// Deterministic cost counters of a store since it was opened (measurement
+/// only: nothing reads them to decide anything).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoreStats {
+    /// Store operations (each takes the connection once).
+    pub ops: u64,
+    /// Rows inserted, updated, or deleted.
+    pub changes: u64,
+    /// Bytes of review texts (checkpoint, baseline, tip) read from `task_files`.
+    pub review_text_bytes: u64,
+    /// Bytes of transcript content read (and parsed).
+    pub transcript_bytes: u64,
+    /// Bytes of tool results read from `tool_calls`.
+    pub tool_result_bytes: u64,
 }
 
 pub fn now_ms() -> u64 {
@@ -391,11 +438,24 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&conn, path.as_deref())?;
-        Ok(Self { conn: Mutex::new(conn), path })
+        Ok(Self { conn: Mutex::new(conn), path, counters: Counters::default() })
     }
 
     fn lock(&self) -> MutexGuard<'_, Connection> {
+        self.counters.ops.fetch_add(1, Ordering::Relaxed);
         self.conn.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Cost counters since this store was opened.
+    pub fn stats(&self) -> StoreStats {
+        let changes = self.conn.lock().unwrap_or_else(|p| p.into_inner()).total_changes();
+        StoreStats {
+            ops: self.counters.ops.load(Ordering::Relaxed),
+            changes,
+            review_text_bytes: self.counters.review_text_bytes.load(Ordering::Relaxed),
+            transcript_bytes: self.counters.transcript_bytes.load(Ordering::Relaxed),
+            tool_result_bytes: self.counters.tool_result_bytes.load(Ordering::Relaxed),
+        }
     }
 
     pub fn schema_version(&self) -> StoreResult<i64> {
@@ -705,6 +765,14 @@ impl Store {
         Ok(u(seq))
     }
 
+    /// A message's content as a read of the store returns it after it was
+    /// appended: through the same serialization and parse. They differ from
+    /// what was handed in where JSON text does not survive the round trip
+    /// (some floating-point numbers).
+    pub fn stored_form(content: &[Value]) -> StoreResult<Vec<Value>> {
+        from_json(&to_json(&content)?)
+    }
+
     pub fn append_message(&self, task: &TaskId, role: &str, content: &[Value]) -> StoreResult<u64> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
@@ -730,11 +798,17 @@ impl Store {
     }
 
     pub fn transcript(&self, task: &TaskId) -> StoreResult<Vec<TranscriptRow>> {
+        self.transcript_from(task, 0)
+    }
+
+    /// The transcript rows with sequence number `from` or later, in order.
+    pub fn transcript_from(&self, task: &TaskId, from: u64) -> StoreResult<Vec<TranscriptRow>> {
         let conn = self.lock();
-        let mut stmt = conn
-            .prepare("SELECT seq, created_at, kind, role, content FROM transcript WHERE task_id = ?1 ORDER BY seq")?;
+        let mut stmt = conn.prepare(
+            "SELECT seq, created_at, kind, role, content FROM transcript WHERE task_id = ?1 AND seq >= ?2 ORDER BY seq",
+        )?;
         let raws = stmt
-            .query_map([&task.0], |r| {
+            .query_map(params![task.0, i(from)], |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, i64>(1)?,
@@ -744,6 +818,8 @@ impl Store {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let bytes: usize = raws.iter().map(|raw| raw.4.len()).sum();
+        self.counters.transcript_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         raws.into_iter()
             .map(|(seq, created, kind, role, content)| {
                 let entry = match kind.as_str() {
@@ -965,12 +1041,24 @@ impl Store {
     }
 
     pub fn tool_calls(&self, task: &TaskId) -> StoreResult<Vec<ToolCallRow>> {
+        self.tool_call_rows(task, None)
+    }
+
+    /// The task's tool calls with each result cut to its first `chars`
+    /// characters (for previews: a whole result can be hundreds of kilobytes).
+    pub fn tool_call_previews(&self, task: &TaskId, chars: usize) -> StoreResult<Vec<ToolCallRow>> {
+        self.tool_call_rows(task, Some(chars))
+    }
+
+    fn tool_call_rows(&self, task: &TaskId, result_chars: Option<usize>) -> StoreResult<Vec<ToolCallRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT tool_use_id, turn, name, input, status, result, is_error, authorized_by, figures FROM tool_calls WHERE task_id = ?1 ORDER BY rowid",
+            "SELECT tool_use_id, turn, name, input, status,
+                CASE WHEN ?2 IS NULL THEN result ELSE substr(result, 1, ?2) END,
+                is_error, authorized_by, figures FROM tool_calls WHERE task_id = ?1 ORDER BY rowid",
         )?;
         let raws = stmt
-            .query_map([&task.0], |r| {
+            .query_map(params![task.0, result_chars.map(|n| n as i64)], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, u32>(1)?,
@@ -984,6 +1072,8 @@ impl Store {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let bytes: usize = raws.iter().map(|raw| raw.5.as_ref().map_or(0, String::len)).sum();
+        self.counters.tool_result_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         raws.into_iter()
             .map(|(tool_use_id, turn, name, input, status, result, is_error, authorized_by, figures)| {
                 Ok(ToolCallRow {
@@ -1147,15 +1237,60 @@ impl Store {
         Ok(())
     }
 
+    /// One changed file's record (only that file's texts are read).
     pub fn task_file(&self, task: &TaskId, path: &WorkspacePath) -> StoreResult<Option<TaskFileRow>> {
-        Ok(self.task_files(task)?.into_iter().find(|f| &f.path == path))
+        Ok(self.task_file_rows(task, Some(path))?.into_iter().next())
     }
 
     pub fn task_files(&self, task: &TaskId) -> StoreResult<Vec<TaskFileRow>> {
+        self.task_file_rows(task, None)
+    }
+
+    /// The task's changed files without their texts, in path order.
+    pub fn task_file_states(&self, task: &TaskId) -> StoreResult<Vec<TaskFileState>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("SELECT path, kind, entangled, state FROM task_files WHERE task_id = ?1 ORDER BY path")?;
+        let raws: Vec<(String, String, bool, String)> = stmt
+            .query_map([&task.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        raws.into_iter()
+            .map(|(path, kind, entangled, state)| {
+                Ok(TaskFileState {
+                    path: WorkspacePath::parse(&path).map_err(|e| StoreError(e.to_string()))?,
+                    kind: from_json(&kind)?,
+                    entangled,
+                    state: from_json(&state)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Compare `current` with a changed file's stored baseline and tip
+    /// (`None`: the task has no record for the path).
+    pub fn task_file_match(
+        &self,
+        task: &TaskId,
+        path: &WorkspacePath,
+        current: &str,
+    ) -> StoreResult<Option<TextMatch>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "SELECT baseline_text = tip_text, tip_text = ?3, baseline_text = ?3 FROM task_files
+                 WHERE task_id = ?1 AND path = ?2",
+                params![task.0, path.as_str(), current],
+                |r| Ok(TextMatch { unchanged: r.get(0)?, at_tip: r.get(1)?, at_baseline: r.get(2)? }),
+            )
+            .optional()?)
+    }
+
+    fn task_file_rows(&self, task: &TaskId, only: Option<&WorkspacePath>) -> StoreResult<Vec<TaskFileRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT path, kind, document, checkpoint_text, baseline_text, tip_text, tip_revision, entangled, state,
-                change_count, message, op_ref FROM task_files WHERE task_id = ?1 ORDER BY path",
+                change_count, message, op_ref FROM task_files
+             WHERE task_id = ?1 AND (?2 IS NULL OR path = ?2) ORDER BY path",
         )?;
         type Raw = (
             String,
@@ -1172,7 +1307,7 @@ impl Store {
             Option<String>,
         );
         let raws: Vec<Raw> = stmt
-            .query_map([&task.0], |r| {
+            .query_map(params![task.0, only.map(WorkspacePath::as_str)], |r| {
                 Ok((
                     r.get(0)?,
                     r.get(1)?,
@@ -1189,6 +1324,8 @@ impl Store {
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let bytes: usize = raws.iter().map(|raw| raw.3.len() + raw.4.len() + raw.5.len()).sum();
+        self.counters.review_text_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         raws.into_iter()
             .map(
                 |(
@@ -1340,6 +1477,14 @@ impl Store {
     }
 
     /// The latest graph context of a task and how many were attached.
+    /// How many graph contexts were attached to the task (one per run).
+    pub fn graph_context_count(&self, task: &TaskId) -> StoreResult<u32> {
+        let count: i64 =
+            self.lock()
+                .query_row("SELECT count(*) FROM task_graph_contexts WHERE task_id = ?1", [&task.0], |r| r.get(0))?;
+        Ok(count as u32)
+    }
+
     pub fn graph_context(&self, task: &TaskId) -> StoreResult<(Option<crate::graph::GraphContext>, u32)> {
         let conn = self.lock();
         let count: i64 =

@@ -33,8 +33,8 @@ use exposition_core::text::utf16_to_byte;
 use exposition_execution::ExecutionService;
 use exposition_lean::{LeanCheckRequest, LeanCheckTarget, LeanService, LeanStatus};
 use exposition_research::types::{
-    Availability, ExecuteRequest, OutputItem, ResearchEvent, RunSource, RunSummary, RuntimeLanguage, SessionOwner,
-    SessionState, StreamName,
+    Availability, ExecuteRequest, OutputItem, ResearchEvent, RunOutputPage, RunSource, RunSummary, RuntimeLanguage,
+    SessionOwner, SessionState, StreamName,
 };
 use exposition_research::{ResearchService, StartSessionRequest};
 use exposition_tex::{TexBuildMode, TexEvent, TexService};
@@ -451,29 +451,11 @@ impl AppToolServices {
                 Err(RecvError::Closed) => return Err(ServiceError::Failed("the research service stopped".into())),
             }
         };
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        let mut results = Vec::new();
-        let mut error = Value::Null;
-        if let Ok(page) = research.run_output(&run_id, None, 500) {
-            for entry in page.entries {
-                match entry.item {
-                    OutputItem::Stream { name: StreamName::Stdout, text } => stdout.push_str(&text),
-                    OutputItem::Stream { name: StreamName::Stderr, text } => stderr.push_str(&text),
-                    OutputItem::Display { text, artifacts, .. } => results.push(json!({
-                        "text": text.map(|t| tail(&t)),
-                        "artifacts": artifacts.iter().map(|a| a.0.clone()).collect::<Vec<_>>(),
-                    })),
-                    OutputItem::Error { ename, evalue, traceback } => {
-                        let traceback: Vec<String> =
-                            traceback.iter().rev().take(12).rev().map(|l| strip_ansi(l)).collect();
-                        error = json!({"ename": ename, "evalue": evalue, "traceback": traceback});
-                    }
-                    OutputItem::Notice { message } => stderr.push_str(&format!("[notice] {message}\n")),
-                    OutputItem::ClearOutput { .. } => {}
-                }
-            }
-        }
+        let RunOutput { stdout, stderr, results, results_omitted, error, incomplete } =
+            collect_output(|after| research.run_output(&run_id, after, OUTPUT_PAGE).ok());
+        // Whether anything the run printed is missing from this result.
+        let output_truncated =
+            incomplete || results_omitted > 0 || stdout.len() > RESULT_TAIL_BYTES || stderr.len() > RESULT_TAIL_BYTES;
         let artifacts: Vec<Value> = finished
             .outputs
             .iter()
@@ -494,11 +476,124 @@ impl AppToolServices {
             "stdout": tail(&stdout),
             "stderr": tail(&stderr),
             "results": results,
+            "resultsOmitted": results_omitted,
+            "outputTruncated": output_truncated,
             "error": error,
             "artifacts": artifacts,
             "note": "Ran in this task's own research session. Artifacts can be inserted into a document with insert_artifact.",
         });
         if matches!(finished.status, RunStatus::Succeeded) { Ok(value) } else { Err(ServiceError::Outcome(value)) }
+    }
+}
+
+/// Output entries read per page of a finished run.
+const OUTPUT_PAGE: u32 = 500;
+/// Pages read at most (the run's retained output is bounded by the research service).
+const MAX_OUTPUT_PAGES: usize = 40;
+/// Rich results returned at most (the latest ones).
+const MAX_RESULTS: usize = 500;
+/// Diagnostics of a Lean report returned at most.
+const MAX_LEAN_DIAGNOSTICS: usize = 60;
+
+/// A finished run's output as a tool result reports it.
+#[derive(Debug, Default, PartialEq)]
+struct RunOutput {
+    stdout: String,
+    stderr: String,
+    results: Vec<Value>,
+    /// Earlier rich results left out of `results`.
+    results_omitted: usize,
+    error: Value,
+    /// Part of the output is missing: the research service no longer holds
+    /// the beginning, a page could not be read, or there was more than
+    /// [`MAX_OUTPUT_PAGES`] pages of it.
+    incomplete: bool,
+}
+
+/// Read a finished run's output to its end (`page(after)` returns the entries
+/// after sequence number `after`; `None`: it could not be read). The error a
+/// failed run ends with and the last lines it printed come last, so stopping
+/// at the first page would report a long run without them.
+fn collect_output(mut page: impl FnMut(Option<u32>) -> Option<RunOutputPage>) -> RunOutput {
+    let mut out = RunOutput::default();
+    let mut after = None;
+    for _ in 0..MAX_OUTPUT_PAGES {
+        let Some(page) = page(after) else {
+            out.incomplete = true;
+            break;
+        };
+        out.incomplete |= page.truncated;
+        let last = page.entries.last().map(|entry| entry.seq);
+        for entry in page.entries {
+            match entry.item {
+                OutputItem::Stream { name: StreamName::Stdout, text } => out.stdout.push_str(&text),
+                OutputItem::Stream { name: StreamName::Stderr, text } => out.stderr.push_str(&text),
+                OutputItem::Display { text, artifacts, .. } => out.results.push(json!({
+                    "text": text.map(|t| tail(&t)),
+                    "artifacts": artifacts.iter().map(|a| a.0.clone()).collect::<Vec<_>>(),
+                })),
+                OutputItem::Error { ename, evalue, traceback } => {
+                    let traceback: Vec<String> = traceback.iter().rev().take(12).rev().map(|l| strip_ansi(l)).collect();
+                    out.error = json!({"ename": ename, "evalue": evalue, "traceback": traceback});
+                }
+                OutputItem::Notice { message } => out.stderr.push_str(&format!("[notice] {message}\n")),
+                OutputItem::ClearOutput { .. } => {}
+            }
+        }
+        match last {
+            Some(seq) if seq < page.last_seq => after = Some(seq),
+            // The end of the output.
+            _ => return finish_output(out),
+        }
+    }
+    // More pages than are read, or an unreadable one.
+    out.incomplete = true;
+    finish_output(out)
+}
+
+fn finish_output(mut out: RunOutput) -> RunOutput {
+    out.results_omitted = out.results.len().saturating_sub(MAX_RESULTS);
+    out.results.drain(..out.results_omitted);
+    out
+}
+
+/// Keep at most [`MAX_LEAN_DIAGNOSTICS`] diagnostics of a serialized Lean
+/// report: errors first, then warnings, then the rest, each in the report's
+/// order, and the kept ones in the report's order. `diagnosticsOmitted` says
+/// how many were left out (0: all are there). The verdict, its counts, the
+/// sorry and axiom lists, and the checked text's identity are untouched.
+fn bound_lean_diagnostics(report: &mut Value) {
+    let Some(object) = report.as_object_mut() else { return };
+    let Some(Value::Array(all)) = object.get_mut("diagnostics") else { return };
+    let total = all.len();
+    if total > MAX_LEAN_DIAGNOSTICS {
+        let rank = |d: &Value| match d.get("severity").and_then(Value::as_str) {
+            Some("error") => 0,
+            Some("warning") => 1,
+            _ => 2,
+        };
+        let mut order: Vec<usize> = (0..total).collect();
+        order.sort_by_key(|&index| (rank(&all[index]), index));
+        let mut keep = vec![false; total];
+        for &index in order.iter().take(MAX_LEAN_DIAGNOSTICS) {
+            keep[index] = true;
+        }
+        let mut index = 0;
+        all.retain(|_| {
+            index += 1;
+            keep[index - 1]
+        });
+    }
+    let omitted = total.saturating_sub(MAX_LEAN_DIAGNOSTICS);
+    object.insert("diagnosticsOmitted".into(), json!(omitted));
+    if omitted > 0 {
+        object.insert(
+            "diagnosticsNote".into(),
+            json!(format!(
+                "{omitted} of {total} diagnostics are not listed (errors are listed first). The status above counts \
+                 all of them; fix what is listed and check again to see the rest."
+            )),
+        );
     }
 }
 
@@ -625,6 +720,7 @@ impl ToolServices for AppToolServices {
             _ = cancel.cancelled() => return Err(ServiceError::Canceled),
         };
         let mut value = serde_json::to_value(&report).map_err(|e| ServiceError::Failed(e.to_string()))?;
+        bound_lean_diagnostics(&mut value);
         let note = match &report.status {
             _ if report.checked => "Lean finished exactly this text with no errors, no sorry (also none through \
                  imports or suppressed warnings), kernel checking on, and only the standard axioms: the file is checked. \
@@ -798,5 +894,130 @@ impl ToolServices for AppToolServices {
             .map(|s| format!("its research session {} has not stopped", s.id))
             .chain(setup)
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod output_tests {
+    use exposition_core::artifact::RunId;
+    use exposition_research::types::OutputEntry;
+
+    use super::*;
+
+    fn stdout(seq: u32, text: &str) -> OutputEntry {
+        OutputEntry { seq, item: OutputItem::Stream { name: StreamName::Stdout, text: text.to_owned() } }
+    }
+
+    /// Pages over `entries` as the research service serves them.
+    fn pager(entries: Vec<OutputEntry>, truncated: bool) -> impl FnMut(Option<u32>) -> Option<RunOutputPage> {
+        move |after| {
+            let last_seq = entries.last().map_or(0, |e| e.seq);
+            Some(RunOutputPage {
+                run_id: RunId("run".into()),
+                entries: entries
+                    .iter()
+                    .filter(|e| after.is_none_or(|a| e.seq > a))
+                    .take(OUTPUT_PAGE as usize)
+                    .cloned()
+                    .collect(),
+                first_retained_seq: entries.first().map_or(1, |e| e.seq),
+                last_seq,
+                truncated,
+            })
+        }
+    }
+
+    /// AGENTS-14: a run that printed more than one page of entries is
+    /// reported to its end, with the error it ended with.
+    #[test]
+    fn a_long_run_is_read_to_its_end() {
+        let mut entries: Vec<OutputEntry> = (1..=2_000).map(|seq| stdout(seq, &format!("line {seq}\n"))).collect();
+        entries.push(OutputEntry {
+            seq: 2_001,
+            item: OutputItem::Error { ename: "ValueError".into(), evalue: "bad".into(), traceback: vec!["tb".into()] },
+        });
+        let mut pages = 0;
+        let mut page = pager(entries, false);
+        let out = collect_output(|after| {
+            pages += 1;
+            page(after)
+        });
+        assert_eq!(pages, 5);
+        assert!(out.stdout.starts_with("line 1\n") && out.stdout.ends_with("line 2000\n"));
+        assert_eq!(out.error["ename"], json!("ValueError"));
+        assert!(!out.incomplete && out.results_omitted == 0);
+        // What the model is shown of it is the tail, marked as cut.
+        assert!(out.stdout.len() > RESULT_TAIL_BYTES);
+        assert!(tail(&out.stdout).starts_with("… (") && tail(&out.stdout).ends_with("line 2000\n"));
+    }
+
+    #[test]
+    fn missing_output_is_reported_as_incomplete() {
+        // The research service dropped the beginning.
+        assert!(collect_output(pager(vec![stdout(900, "late\n")], true)).incomplete);
+        // The output cannot be read.
+        assert!(collect_output(|_| None).incomplete);
+        // More than is read.
+        let many: Vec<OutputEntry> =
+            (1..=(OUTPUT_PAGE * MAX_OUTPUT_PAGES as u32 + 10)).map(|seq| stdout(seq, "x")).collect();
+        let out = collect_output(pager(many, false));
+        assert!(out.incomplete);
+        assert_eq!(out.stdout.len(), OUTPUT_PAGE as usize * MAX_OUTPUT_PAGES);
+        // A short, complete run.
+        let out = collect_output(pager(vec![stdout(1, "hello\n")], false));
+        assert_eq!((out.stdout.as_str(), out.incomplete), ("hello\n", false));
+        assert_eq!(collect_output(pager(Vec::new(), false)), RunOutput::default());
+    }
+
+    #[test]
+    fn only_the_latest_rich_results_are_kept_and_the_rest_counted() {
+        let entries: Vec<OutputEntry> = (1..=(MAX_RESULTS as u32 + 7))
+            .map(|seq| OutputEntry {
+                seq,
+                item: OutputItem::Display {
+                    output_type: "execute_result".into(),
+                    execution_count: None,
+                    text: Some(format!("r{seq}")),
+                    artifacts: Vec::new(),
+                },
+            })
+            .collect();
+        let out = collect_output(pager(entries, false));
+        assert_eq!((out.results.len(), out.results_omitted), (MAX_RESULTS, 7));
+        assert_eq!(out.results[0]["text"], json!("r8"));
+        assert_eq!(out.results[MAX_RESULTS - 1]["text"], json!(format!("r{}", MAX_RESULTS + 7)));
+    }
+
+    /// AGENTS-14: a Lean report's diagnostics are bounded, errors first, and
+    /// the result says how many are not listed; the verdict is untouched.
+    #[test]
+    fn lean_diagnostics_are_bounded_with_errors_first_and_a_count() {
+        let diagnostic = |i: usize, severity: &str| json!({"severity": severity, "message": format!("m{i}")});
+        let mut all: Vec<Value> = (0..100).map(|i| diagnostic(i, "warning")).collect();
+        all.extend((100..130).map(|i| diagnostic(i, "error")));
+        let mut report = json!({"status": {"kind": "errors", "count": 30}, "checked": false, "diagnostics": all,
+            "sorries": [], "contentHash": "abc"});
+        let untouched = report.clone();
+        bound_lean_diagnostics(&mut report);
+        let kept = report["diagnostics"].as_array().unwrap();
+        assert_eq!(kept.len(), MAX_LEAN_DIAGNOSTICS);
+        assert_eq!(kept.iter().filter(|d| d["severity"] == json!("error")).count(), 30, "every error is listed");
+        // In the report's order: the first warnings, then the errors.
+        let messages: Vec<&str> = kept.iter().map(|d| d["message"].as_str().unwrap()).collect();
+        assert_eq!(messages[0], "m0");
+        assert_eq!(messages[29], "m29");
+        assert_eq!(messages[30], "m100");
+        assert_eq!(report["diagnosticsOmitted"], json!(70));
+        assert!(report["diagnosticsNote"].as_str().unwrap().contains("70 of 130"));
+        for key in ["status", "checked", "sorries", "contentHash"] {
+            assert_eq!(report[key], untouched[key], "{key}");
+        }
+
+        // A short report is complete and says so.
+        let mut short = json!({"checked": true, "diagnostics": [diagnostic(0, "info")]});
+        bound_lean_diagnostics(&mut short);
+        assert_eq!(short["diagnostics"].as_array().unwrap().len(), 1);
+        assert_eq!(short["diagnosticsOmitted"], json!(0));
+        assert!(short.get("diagnosticsNote").is_none());
     }
 }

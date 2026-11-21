@@ -343,8 +343,47 @@ export function permissionsNotification(change: PermissionsChange): EventEffect[
   };
 }
 
+const FINISHED_CALLS = new Set(["succeeded", "failed", "declined", "canceled", "notRun"]);
+
 /**
- * Merge a freshly read detail. Once the streamed output has been persisted the
+ * The sequence number from which a held detail may be out of date, for a
+ * partial re-read: stored rows before the latest assistant message never
+ * change, except a tool call that has not finished (a question that waits
+ * while a discussion follows it). `null`: nothing to build on, read it all.
+ */
+export function changedFrom(detail: TaskDetail): number | null {
+  let from: number | null = null;
+  for (const item of detail.transcript) {
+    if (item.kind === "assistantText" || item.kind === "thinking" || item.kind === "toolCall") from = item.seq;
+  }
+  if (from === null) return null;
+  for (const item of detail.transcript) {
+    if (item.kind === "toolCall" && !FINISHED_CALLS.has(item.status)) return Math.min(from, item.seq);
+  }
+  return from;
+}
+
+/**
+ * A partial read (`transcriptFrom` set) completed with the detail it extends:
+ * the held items before that sequence number, then the items read, and the
+ * held graph context (a partial read leaves it out). `null` when it cannot
+ * be completed: no detail is held, or a new run attached a new context.
+ */
+export function completeDetail(held: TaskDetail | undefined, read: TaskDetail): TaskDetail | null {
+  const from = read.transcriptFrom;
+  if (from == null) return read;
+  if (!held || held.graph.contexts !== read.graph.contexts) return null;
+  const complete: TaskDetail = {
+    ...read,
+    transcript: [...held.transcript.filter((item) => item.seq < from), ...read.transcript],
+    graph: { ...read.graph, context: held.graph.context },
+  };
+  delete complete.transcriptFrom;
+  return complete;
+}
+
+/**
+ * Merge a freshly read (complete) detail. Once the streamed output has been persisted the
  * transcript contains it, so the draft text is dropped (a running tool name is
  * kept); a draft that is still streaming is left alone.
  */
@@ -364,18 +403,39 @@ export function mergeDetail(state: AgentsState, detail: TaskDetail): Partial<Age
   return { details: { ...state.details, [id]: detail }, drafts, tasks: upsertTask(state.tasks, detail.summary) };
 }
 
-const inflight = new Map<TaskId, boolean>();
+/** Per task with a read in flight: the read to make once it finishes, if any. */
+const inflight = new Map<TaskId, "tail" | "all" | null>();
 
-async function refetch(id: TaskId): Promise<void> {
-  if (inflight.has(id)) {
-    inflight.set(id, true); // re-read once more when the current read finishes
+/** Read the whole detail, or (`tail`) only what may have changed in the one held. */
+async function readDetail(id: TaskId, tail: boolean): Promise<TaskDetail> {
+  const held = useAgents.getState().details[id];
+  const from = tail && held ? changedFrom(held) : null;
+  if (from === null) return commands.agentsTaskDetail(id);
+  const read = await commands.agentsTaskDetail(id, from);
+  // Completed only with the very transcript the read was made for.
+  const now = useAgents.getState().details[id];
+  const complete = now?.transcript === held?.transcript ? completeDetail(now, read) : null;
+  return complete ?? commands.agentsTaskDetail(id);
+}
+
+/**
+ * Re-read a task's detail. `tail`: a transcript event of a running task, so
+ * only the end of the conversation is read; everything else (showing a task,
+ * a resync, a question's refusal) reads it all.
+ */
+async function refetch(id: TaskId, tail = false): Promise<void> {
+  const queued = inflight.get(id);
+  if (queued !== undefined) {
+    // Re-read once more when the current read finishes (all of it if anyone asked for all).
+    inflight.set(id, queued === "all" || !tail ? "all" : "tail");
     return;
   }
-  inflight.set(id, false);
+  let next: "tail" | "all" | null = tail ? "tail" : "all";
+  inflight.set(id, null);
   try {
     do {
-      inflight.set(id, false);
-      const detail = await commands.agentsTaskDetail(id);
+      inflight.set(id, null);
+      const detail = await readDetail(id, next === "tail");
       // The read can show the task finished before its `taskChanged` arrives
       // (or when that event was missed): announce it from here as well. The
       // later event then finds the task already finished and adds nothing.
@@ -383,7 +443,8 @@ async function refetch(id: TaskId): Promise<void> {
       useAgents.setState((state) => mergeDetail(state, detail));
       const finished = finishedNotification(previous, detail.summary);
       if (finished) notify(finished);
-    } while (inflight.get(id));
+      next = inflight.get(id) ?? null;
+    } while (next);
   } catch (e) {
     useAgents.setState({ error: errorMessage(e) });
   } finally {
@@ -483,7 +544,7 @@ function handleEvent(event: AgentEvent) {
     (event.kind === "approvalRequested" && approvalShowing(event.approval.taskId)) ||
     (event.kind === "questionRequested" && approvalShowing(event.request.taskId));
   if (notification && !shown) notify(notification);
-  if (id && (useAgents.getState().details[id] || useAgents.getState().selected === id)) void refetch(id);
+  if (id && (useAgents.getState().details[id] || useAgents.getState().selected === id)) void refetch(id, true);
 }
 
 /** Bring approval notifications in line with the tasks (after a resync). */
@@ -636,7 +697,8 @@ export const agents = {
     useAgents.setState({ error });
   },
 
-  refetch,
+  /** Re-read a task's whole detail. */
+  refetch: (id: TaskId) => refetch(id),
 
   /** Run an IPC action, reporting failures in the panel. */
   async run<T>(action: () => Promise<T>): Promise<T | undefined> {

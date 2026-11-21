@@ -30,7 +30,7 @@ use exposition_workspace::{DocumentService, WorkspaceService};
 
 use crate::model::{FileDiff, FileReview, ReviewActionResult, ReviewChangeKind, ReviewState, TaskId};
 use crate::patch;
-use crate::store::{ChangeRow, Store, StoreResult, TaskFileRow, now_ms};
+use crate::store::{ChangeRow, Store, StoreResult, TaskFileRow, TextMatch, now_ms};
 use crate::tools::services::ProjectOperations;
 use crate::workspace::{self, FileError, ProjectFiles};
 
@@ -208,13 +208,15 @@ pub enum Presence {
 
 /// Decide from content alone whether the change `baseline → tip` is in `current`.
 pub fn presence(baseline: &str, tip: &str, current: &str) -> Presence {
+    // Decided by equality whenever it can be (the usual cases: the file is at
+    // the task's tip, or back at its baseline); texts are diffed only when
+    // the file has moved on from both.
+    if let Some(decided) =
+        presence_of(TextMatch { unchanged: baseline == tip, at_tip: current == tip, at_baseline: current == baseline })
+    {
+        return decided;
+    }
     let forward = patch::diff(baseline, tip);
-    if forward.is_empty() || current == tip {
-        return Presence::Present;
-    }
-    if current == baseline {
-        return Presence::Absent;
-    }
     let inverse = patch::diff(tip, baseline);
     if patch::rebase(&inverse, &patch::diff(tip, current)).is_some() {
         return Presence::Present;
@@ -225,6 +227,55 @@ pub fn presence(baseline: &str, tip: &str, current: &str) -> Presence {
     Presence::Overlapped
 }
 
+/// [`presence`] where equality alone decides it (`None`: the texts must be
+/// diffed). The same order of checks as the full decision.
+pub fn presence_of(compared: TextMatch) -> Option<Presence> {
+    if compared.unchanged || compared.at_tip {
+        return Some(Presence::Present);
+    }
+    compared.at_baseline.then_some(Presence::Absent)
+}
+
+/// The state content gives a file in place of its stored one, and why
+/// (`None`: the stored state stands). `compare` is consulted only for an
+/// edited, non-entangled file whose current text is known: it says whether
+/// the task's net change is in that text, and whether that text is the
+/// stored baseline.
+pub fn judge(
+    kind: ReviewChangeKind,
+    state: ReviewState,
+    entangled: bool,
+    current: &Current,
+    compare: impl FnOnce(&str) -> (Presence, bool),
+) -> Option<(ReviewState, &'static str)> {
+    match (kind, state) {
+        (ReviewChangeKind::Edited, ReviewState::Pending | ReviewState::Reverted) if !entangled => {
+            let text = current.text()?;
+            match (state, compare(text)) {
+                (ReviewState::Pending, (Presence::Absent, _)) => Some((
+                    ReviewState::Undone,
+                    "The agent's changes are no longer in the file: they were undone or discarded.",
+                )),
+                (ReviewState::Reverted, (Presence::Present, false)) => {
+                    Some((ReviewState::Pending, "The agent's changes are back in the file (the revert was undone)."))
+                }
+                _ => None,
+            }
+        }
+        (ReviewChangeKind::Created, ReviewState::Pending) if matches!(current, Current::Missing) => {
+            Some((ReviewState::Undone, "The file the agent created no longer exists."))
+        }
+        (ReviewChangeKind::Copied, ReviewState::Pending) if matches!(current, Current::Missing) => {
+            Some((ReviewState::Undone, "The copy the agent made no longer exists."))
+        }
+        (ReviewChangeKind::Deleted, ReviewState::Pending) if !matches!(current, Current::Missing) => Some((
+            ReviewState::Undone,
+            "Something is at this path again (restored or recreated); there is nothing to revert.",
+        )),
+        _ => None,
+    }
+}
+
 /// The review state a file is actually in, judged from its current content,
 /// and the message explaining a state that differs from the stored one.
 ///
@@ -233,32 +284,10 @@ pub fn presence(baseline: &str, tip: &str, current: &str) -> Presence {
 /// unsaved changes removes a pending change, and undoing a revert brings the
 /// change back. Accepted files stay accepted whatever happens to them later.
 pub fn effective_state(row: &TaskFileRow, current: &Current) -> (ReviewState, Option<String>) {
-    match (row.kind, row.state) {
-        (ReviewChangeKind::Edited, ReviewState::Pending | ReviewState::Reverted) if !row.entangled => {
-            let Some(text) = current.text() else { return (row.state, row.message.clone()) };
-            match (row.state, presence(&row.baseline_text, &row.tip_text, text)) {
-                (ReviewState::Pending, Presence::Absent) => (
-                    ReviewState::Undone,
-                    Some("The agent's changes are no longer in the file: they were undone or discarded.".into()),
-                ),
-                (ReviewState::Reverted, Presence::Present) if text != row.baseline_text.as_str() => (
-                    ReviewState::Pending,
-                    Some("The agent's changes are back in the file (the revert was undone).".into()),
-                ),
-                _ => (row.state, row.message.clone()),
-            }
-        }
-        (ReviewChangeKind::Created, ReviewState::Pending) if matches!(current, Current::Missing) => {
-            (ReviewState::Undone, Some("The file the agent created no longer exists.".into()))
-        }
-        (ReviewChangeKind::Copied, ReviewState::Pending) if matches!(current, Current::Missing) => {
-            (ReviewState::Undone, Some("The copy the agent made no longer exists.".into()))
-        }
-        (ReviewChangeKind::Deleted, ReviewState::Pending) if !matches!(current, Current::Missing) => (
-            ReviewState::Undone,
-            Some("Something is at this path again (restored or recreated); there is nothing to revert.".into()),
-        ),
-        _ => (row.state, row.message.clone()),
+    let compare = |text: &str| (presence(&row.baseline_text, &row.tip_text, text), text == row.baseline_text.as_str());
+    match judge(row.kind, row.state, row.entangled, current, compare) {
+        Some((state, message)) => (state, Some(message.into())),
+        None => (row.state, row.message.clone()),
     }
 }
 
@@ -694,5 +723,95 @@ fn revert_copied(
         }
         Some(o) => Err(o.message.unwrap_or_else(|| "The copy could not be removed.".into())),
         None => Err("The copy could not be removed.".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The decision made by diffing alone, as it was before equality decided
+    /// the usual cases: the reference for `presence`.
+    fn presence_by_diff(baseline: &str, tip: &str, current: &str) -> Presence {
+        let forward = patch::diff(baseline, tip);
+        if forward.is_empty() || current == tip {
+            return Presence::Present;
+        }
+        if current == baseline {
+            return Presence::Absent;
+        }
+        let inverse = patch::diff(tip, baseline);
+        if patch::rebase(&inverse, &patch::diff(tip, current)).is_some() {
+            return Presence::Present;
+        }
+        if patch::rebase(&forward, &patch::diff(baseline, current)).is_some() {
+            return Presence::Absent;
+        }
+        Presence::Overlapped
+    }
+
+    #[test]
+    fn presence_decided_by_equality_agrees_with_the_diff() {
+        let baseline = "alpha
+beta
+gamma
+";
+        let tip = "alpha
+BETA
+gamma
+";
+        let cases = [
+            (baseline, tip, tip, Presence::Present),
+            (baseline, tip, baseline, Presence::Absent),
+            // No net change: present whatever the file holds now.
+            (
+                baseline,
+                baseline,
+                "something else
+",
+                Presence::Present,
+            ),
+            (baseline, baseline, baseline, Presence::Present),
+            // Moved on: a separate later edit beside the change, or beside its absence.
+            (
+                baseline,
+                tip,
+                "alpha
+BETA
+gamma
+delta
+",
+                Presence::Present,
+            ),
+            (
+                baseline,
+                tip,
+                "alpha
+beta
+gamma
+delta
+",
+                Presence::Absent,
+            ),
+            // A later edit inside the agent's region.
+            (
+                baseline,
+                tip,
+                "alpha
+BxTA
+gamma
+",
+                Presence::Overlapped,
+            ),
+        ];
+        for (baseline, tip, current, expected) in cases {
+            assert_eq!(presence(baseline, tip, current), expected, "{current:?}");
+            assert_eq!(presence_by_diff(baseline, tip, current), expected, "{current:?}");
+            let compared =
+                TextMatch { unchanged: baseline == tip, at_tip: current == tip, at_baseline: current == baseline };
+            if let Some(decided) = presence_of(compared) {
+                assert_eq!(decided, expected, "{current:?}");
+            }
+        }
     }
 }

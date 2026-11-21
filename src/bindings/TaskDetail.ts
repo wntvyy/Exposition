@@ -19,4 +19,13 @@ allowances: Array<TaskAllowance>,
  * Every structured question of the task, in order, resolved ones
  * included. Each renders at the `ToolCall` item with its `tool_use_id`.
  */
-questions?: Array<QuestionRequest>, };
+questions?: Array<QuestionRequest>, 
+/**
+ * Set on a partial read (the reader named the sequence number from
+ * which its copy may be out of date): `transcript` holds only the items
+ * from this sequence number on, and `graph.context` is left out. The
+ * reader keeps its earlier items and its context. It must read the
+ * whole detail instead when it holds none, or when `graph.contexts`
+ * differs from what it holds (a new run attached a new context).
+ */
+transcriptFrom?: number, };
