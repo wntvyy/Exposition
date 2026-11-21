@@ -4,28 +4,49 @@
 //! on: the page object and every object reachable from it (content streams,
 //! resources with their fonts, images and forms, annotations), the geometry
 //! and resources it inherits from the page tree, and the document-level
-//! optional-content and output-intent settings. Object numbers are not part
-//! of it, so two builds that write the same page give it the same key, and a
-//! key names the same pixels at a given scale for as long as the renderer is
-//! the same (keys are used within one run of the application).
+//! output intents. Object numbers are not part of it, so two builds that
+//! write the same page give it the same key, and a key names the same pixels
+//! at a given scale for as long as the renderer is the same (keys are used
+//! within one run of the application).
 //!
-//! Anything this module cannot follow (a reference that does not resolve, an
-//! entry that does not parse, a file too large to walk) yields no key for that
-//! page; the caller then uses an identity that is unique to the build.
+//! Some pages get no key, and the caller then uses an identity that is unique
+//! to the build:
+//!
+//! * anything this module cannot follow: a reference that does not resolve,
+//!   an entry that does not parse, a walk that exceeds its bound;
+//! * optional content. The renderer tells layers apart by object, not by
+//!   content, so two layers with equal dictionaries are different to it and
+//!   equal to a content hash: a document whose catalog has `OCProperties`
+//!   has no keys at all, and neither has a page that reaches an optional
+//!   content group, membership dictionary or `OC` entry.
+//!
+//! The page tree is never walked: the other pages, the page's ancestors and
+//! the catalog hash as a marker when something refers to them (links,
+//! annotations' `/P`, outlines). They are recognized by being those objects,
+//! never by a `/Type` entry, which any dictionary may carry.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use hayro::hayro_syntax::Pdf;
-use hayro::hayro_syntax::object::{Array, Dict, MaybeRef, ObjRef, Object};
+use hayro::hayro_syntax::object::{Array, Dict, MaybeRef, Name, ObjRef, Object};
 use hayro::hayro_syntax::page::Rotation;
 use hayro::hayro_syntax::xref::XRef;
 use sha2::{Digest, Sha256};
 
 /// Changes whenever the hashed form below changes.
-const VERSION: &[u8] = b"exposition-tex-page-key-1";
+const VERSION: &[u8] = b"exposition-tex-page-key-2";
 
-/// Indirect objects visited per file before giving up.
+/// Indirect objects visited per file before giving up, at most.
 const MAX_VISITS: usize = 2_000_000;
+
+/// The visits a file of `objects` objects may take. An object whose content
+/// is self-contained is hashed once; only objects on a cycle through one of
+/// their ancestors are hashed again per path, and a graph that is dense in
+/// such cycles has exponentially many paths. Giving up after a small multiple
+/// of the object count keeps that case cheap (its pages get no key).
+fn visit_bound(objects: usize) -> usize {
+    objects.saturating_mul(16).saturating_add(4096).min(MAX_VISITS)
+}
 
 type Hash = [u8; 32];
 
@@ -39,7 +60,10 @@ struct Walker<'a> {
     done: HashMap<ObjRef, Hash>,
     /// Indirect objects being hashed, outermost first.
     open: Vec<ObjRef>,
+    /// The pages, their ancestors in the page tree, and the catalog.
+    page_tree: HashSet<ObjRef>,
     visits: usize,
+    bound: usize,
 }
 
 fn bytes(out: &mut Sha256, tag: u8, data: &[u8]) {
@@ -48,12 +72,11 @@ fn bytes(out: &mut Sha256, tag: u8, data: &[u8]) {
     out.update(data);
 }
 
-/// Page-tree nodes and the catalog: a page's rendering never depends on
-/// another page (links and outlines point at pages), so they hash as a marker.
-fn is_page_tree(object: &Object<'_>) -> bool {
-    let Object::Dict(dict) = object else { return false };
-    dict.get::<hayro::hayro_syntax::object::Name<'_>>("Type")
-        .is_some_and(|name| matches!(name.as_ref(), b"Page" | b"Pages" | b"Catalog"))
+/// Whether a dictionary is, or uses, optional content (see the module docs).
+fn optional_content(dict: &Dict<'_>) -> bool {
+    dict.contains_key("OC")
+        || dict.contains_key("OCGs")
+        || dict.get::<Name<'_>>("Type").is_some_and(|name| matches!(name.as_ref(), b"OCG" | b"OCMD"))
 }
 
 impl<'a> Walker<'a> {
@@ -78,13 +101,15 @@ impl<'a> Walker<'a> {
             out.update(((self.open.len() - position) as u64).to_le_bytes());
             return Some(position);
         }
-        let object = self.xref.get::<Object<'a>>(reference.into())?;
-        if is_page_tree(&object) {
+        // A page's rendering never depends on another page, on the page
+        // tree or on the catalog (links and outlines point at pages).
+        if self.page_tree.contains(&reference) {
             out.update([22]);
             return Some(CLOSED);
         }
+        let object = self.xref.get::<Object<'a>>(reference.into())?;
         self.visits += 1;
-        if self.visits > MAX_VISITS {
+        if self.visits > self.bound {
             return None;
         }
         let index = self.open.len();
@@ -135,6 +160,9 @@ impl<'a> Walker<'a> {
 
     /// Hash a dictionary's entries (in key order) except the keys in `skip`.
     fn dict(&mut self, dict: &Dict<'a>, skip: &[&[u8]], out: &mut Sha256) -> Option<usize> {
+        if optional_content(dict) {
+            return None;
+        }
         let entries: Vec<_> = dict.entries().collect();
         // An entry that does not parse is left out by `entries`.
         if entries.len() != dict.len() {
@@ -165,30 +193,55 @@ impl<'a> Walker<'a> {
 /// The content key of every page (40 hexadecimal characters), `None` for a
 /// page whose content could not be followed completely.
 pub fn page_keys(pdf: &Pdf) -> Vec<Option<String>> {
+    page_keys_counted(pdf).0
+}
+
+/// [`page_keys`] and the number of indirect objects the walk visited (at most
+/// the file's visit bound plus one).
+pub fn page_keys_counted(pdf: &Pdf) -> (Vec<Option<String>>, usize) {
     let xref = pdf.xref();
-    let mut walker = Walker { xref, done: HashMap::new(), open: Vec::new(), visits: 0 };
     let pages = pdf.pages();
+    // The page tree as objects: every page, its ancestors, the catalog.
+    let mut page_tree: HashSet<ObjRef> = HashSet::new();
+    page_tree.insert(xref.root_id().into());
+    for page in pages.iter() {
+        if let Some(id) = page.raw().obj_id() {
+            page_tree.insert(id.into());
+        }
+        let mut parent = page.raw().get_ref("Parent");
+        while let Some(reference) = parent {
+            if !page_tree.insert(reference) {
+                break; // reached from another page already (or a loop)
+            }
+            parent = xref.get::<Dict<'_>>(reference.into()).and_then(|node| node.get_ref("Parent"));
+        }
+    }
+    let mut walker =
+        Walker { xref, done: HashMap::new(), open: Vec::new(), page_tree, visits: 0, bound: visit_bound(pdf.len()) };
     // Document-level settings a page's rendering can depend on.
     let mut salt = Sha256::new();
     salt.update(VERSION);
     let document = xref.get::<Dict<'_>>(xref.root_id()).and_then(|catalog| {
-        for key in [&b"OCProperties"[..], &b"OutputIntents"[..]] {
-            match catalog.get_raw::<Object<'_>>(key) {
-                Some(value) => {
-                    bytes(&mut salt, 30, key);
-                    walker.item(value, &mut salt)?;
-                }
-                None if catalog.contains_key(key) => return None,
-                None => {}
+        // Layers are identified by object in the renderer: no content key.
+        if catalog.contains_key("OCProperties") {
+            return None;
+        }
+        let key = &b"OutputIntents"[..];
+        match catalog.get_raw::<Object<'_>>(key) {
+            Some(value) => {
+                bytes(&mut salt, 30, key);
+                walker.item(value, &mut salt)?;
             }
+            None if catalog.contains_key(key) => return None,
+            None => {}
         }
         Some(())
     });
     if document.is_none() {
-        return vec![None; pages.len()];
+        return (vec![None; pages.len()], walker.visits);
     }
     let salt: Hash = salt.finalize().into();
-    pages
+    let keys = pages
         .iter()
         .map(|page| {
             let mut out = Sha256::new();
@@ -222,7 +275,8 @@ pub fn page_keys(pdf: &Pdf) -> Vec<Option<String>> {
             let digest: Hash = out.finalize().into();
             Some(digest[..20].iter().map(|b| format!("{b:02x}")).collect())
         })
-        .collect()
+        .collect();
+    (keys, walker.visits)
 }
 
 #[cfg(test)]

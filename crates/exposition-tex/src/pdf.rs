@@ -161,6 +161,14 @@ impl PdfDocument {
         crate::page_key::page_keys(&self.pdf)
     }
 
+    /// [`Self::page_keys`] with the number of objects the walk visited and
+    /// the number of objects in the file (the walk gives up after a bounded
+    /// multiple of it; for tests of that bound).
+    pub fn page_keys_counted(&self) -> (Vec<Option<String>>, usize, usize) {
+        let (keys, visits) = crate::page_key::page_keys_counted(&self.pdf);
+        (keys, visits, self.pdf.len())
+    }
+
     /// Page size in points (after crop box and rotation).
     pub fn page_size(&self, index: usize) -> Result<(f64, f64), PdfError> {
         let page = self.pdf.pages().get(index).ok_or(PdfError::NoSuchPage(index))?;

@@ -273,14 +273,12 @@ fn the_renderer_hides_content_of_a_layer_that_is_off() {
 }
 
 #[test]
-#[ignore = "review: defect - two pages of one build that differ only in which same-named layer they use share a key"]
 fn pages_that_use_different_layers_with_equal_dictionaries_do_not_share_a_key() {
     let doc = layered(10, 10, 11);
     must_differ("two layers with the same name, one page each", &doc, 0, &doc, 1);
 }
 
 #[test]
-#[ignore = "review: defect - switching which of two same-named layers is off keeps every page key"]
 fn switching_off_the_other_layer_with_an_equal_dictionary_changes_the_key() {
     // Two builds: the same page, but the configuration hides the other layer.
     let before = layered(10, 10, 10);
@@ -319,7 +317,6 @@ fn a_layer_with_its_own_name_is_told_apart() {
 /// is hashed as a marker (page-tree nodes are not walked), whatever else it
 /// holds. The renderer does not look at `/Type` of a graphics state.
 #[test]
-#[ignore = "review: defect (contrived input) - an indirect resource dictionary with /Type /Page is not hashed"]
 fn a_resource_dictionary_typed_as_a_page_is_still_hashed() {
     let spoofed = |alpha: &str| {
         rendered(&one_page(
@@ -358,6 +355,13 @@ fn a_densely_cyclic_object_graph_terminates() {
     eprintln!("dense cycle of {N} objects: key {:?} after {elapsed:?}", keys[0]);
     assert_eq!(keys.len(), 1);
     assert!(elapsed.as_secs() < 120, "the walk must stay bounded: {elapsed:?}");
+    // Bounded by the size of the file, not by time: the walk gives up after a
+    // small multiple of the object count, and the page then has no key.
+    let (counted, visits, objects) = doc.page_keys_counted();
+    assert_eq!(counted, keys);
+    assert!(keys[0].is_none(), "a graph this cyclic is not hashed: {:?}", keys[0]);
+    assert!(objects >= 30 && objects < 64, "{objects} objects");
+    assert!(visits <= objects * 16 + 4096 + 1, "{visits} visits for {objects} objects");
     // A page that cannot be followed within the bound has no key (build-unique reference).
     doc.render_page(0, 1.0).expect("still renders");
 }
