@@ -32,7 +32,7 @@ use crate::query::{
 use crate::reconcile::engine::ReconcileState;
 use crate::reconcile::overlay::OverlayEntry;
 use crate::reconcile::{ReconcileOptions, ReconcileReport};
-use crate::store::{DATABASE_FILE, GraphStore, StoreError, Writer, now_ms};
+use crate::store::{DATABASE_FILE, Endpoint, GraphStore, MAX_ROWS, StoreError, Writer, now_ms};
 use crate::validate::{self, BatchOutcome, ServiceBatch};
 use crate::vocabulary::{EntityFamily, EntityKind, EvidenceKind, RelationKind};
 
@@ -124,6 +124,18 @@ struct ProposalCache {
 }
 
 const MAX_PROPOSALS: usize = 256;
+
+/// Neighbours and evidence records an entity detail lists.
+const MAX_DETAIL_NEIGHBORS: usize = 500;
+const MAX_DETAIL_EVIDENCE: usize = 200;
+/// Entities a source inspection lists, and relations it lists per entity.
+const MAX_INSPECTED_ENTITIES: usize = 200;
+const MAX_INSPECTED_RELATIONS: usize = 200;
+/// Relations an impact walk follows before it reports its work limit, and
+/// the evidence records and unknown-coverage files it lists.
+const IMPACT_WORK_LIMIT: usize = 20_000;
+const MAX_IMPACT_EVIDENCE: usize = 200;
+const MAX_IMPACT_UNKNOWN: usize = 200;
 
 /// Shared project graph service.
 pub struct GraphService {
@@ -352,10 +364,26 @@ impl GraphService {
         if inner.open.is_some() { self.compute_status(&inner) } else { inner.status.clone() }
     }
 
+    /// Whether a graph is attached and can be read (what
+    /// `status().is_usable()` says), without computing a status.
+    pub fn is_usable(&self) -> bool {
+        self.lock().open.is_some()
+    }
+
+    /// The attached graph's revision (what `status().revision` says; 0 when
+    /// none is attached), without computing a status.
+    pub fn revision(&self) -> u64 {
+        self.lock().open.as_ref().and_then(|o| o.store.revision().ok()).unwrap_or(0)
+    }
+
     fn compute_status(&self, inner: &Inner) -> GraphStatus {
         let Some(open) = &inner.open else { return inner.status.clone() };
-        let (entities, relations) = open.store.counts().unwrap_or((0, 0));
-        let coverage = open.store.coverage_summary().unwrap_or_default();
+        // A read that fails leaves its own part empty, never the other's:
+        // unreadable coverage must not hide the counts, nor the reverse.
+        let ((entities, relations), coverage) = match open.store.status_summary() {
+            Ok(summary) => summary,
+            Err(_) => (open.store.count_rows().unwrap_or((0, 0)), open.store.summarize_coverage().unwrap_or_default()),
+        };
         GraphStatus {
             state: match &open.temporary {
                 Some(reason) => GraphState::TemporaryReadOnly { reason: reason.clone() },
@@ -398,7 +426,7 @@ impl GraphService {
         if synchronized {
             let revision = self.with_store(|s| Ok(s.revision()?)).unwrap_or(0);
             self.emit(GraphEvent::Reconciled { revision, freshness: self.freshness() });
-        } else if changed && self.status().is_usable() {
+        } else if changed && self.is_usable() {
             self.emit(GraphEvent::Status { status: self.status() });
         }
     }
@@ -485,7 +513,7 @@ impl GraphService {
         }
         let token = self.next_change_token();
         self.with_store(|store| {
-            let w = Writer::new(store.transaction()?);
+            let w = store.writer()?;
             let n = w.mark_pending(paths, token)?;
             w.commit()?;
             Ok(n)
@@ -552,14 +580,14 @@ impl GraphService {
             changed
         };
         if changed {
-            self.emit(GraphEvent::Reconciled { revision: self.status().revision, freshness: self.freshness() });
+            self.emit(GraphEvent::Reconciled { revision: self.revision(), freshness: self.freshness() });
         }
     }
 
     /// Drop the overlay of a buffer (saved, reverted to its saved text, closed).
     pub fn clear_overlay(&self, path: &WorkspacePath) {
         if self.overlay_lock().remove(path).is_some() {
-            self.emit(GraphEvent::Reconciled { revision: self.status().revision, freshness: self.freshness() });
+            self.emit(GraphEvent::Reconciled { revision: self.revision(), freshness: self.freshness() });
         }
     }
 
@@ -646,7 +674,7 @@ impl GraphService {
                 }
             };
             let ids: BTreeSet<EntityId> = entities.iter().map(|e| e.id.clone()).collect();
-            let relations = store.relations_among(&ids)?;
+            let (relations, relations_truncated) = store.relations_among_bounded(&ids, MAX_ROWS)?;
             Ok(GraphSnapshot {
                 project: Some(store.project().clone()),
                 revision: store.revision()?,
@@ -654,6 +682,7 @@ impl GraphService {
                 total: total as u32,
                 entities,
                 relations,
+                relations_truncated,
                 coverage: store.coverage_summary()?,
                 freshness,
             })
@@ -666,26 +695,32 @@ impl GraphService {
                 .entity(id)?
                 .ok_or_else(|| GraphError::new("graph.unknownEntity", format!("entity {id} does not exist")))?;
             let bindings = store.bindings(id)?;
-            let outgoing = store.relations_from(id)?;
-            let incoming = store.relations_to(id)?;
+            // A presentation read: bounded, and it says what it left out
+            // (`relations_truncated`, `neighbors_truncated`,
+            // `evidence_truncated`). Impact and validation read the complete
+            // relations themselves.
+            let (outgoing, more_outgoing) = store.relations_from_bounded(id, MAX_ROWS)?;
+            let (incoming, more_incoming) = store.relations_to_bounded(id, MAX_ROWS)?;
             let mut neighbor_ids: Vec<EntityId> =
                 outgoing.iter().map(|r| r.to.clone()).chain(incoming.iter().map(|r| r.from.clone())).collect();
             neighbor_ids.sort();
             neighbor_ids.dedup();
-            neighbor_ids.truncate(500);
+            let neighbors_truncated = neighbor_ids.len() > MAX_DETAIL_NEIGHBORS;
+            neighbor_ids.truncate(MAX_DETAIL_NEIGHBORS);
             let neighbors = store.entities(&neighbor_ids)?;
             // An entity's evidence is what was recorded about it. Records a
             // relation cites stay on that relation (`Relation::evidence`):
             // adding, relabelling, or keeping a rejected relation never makes
             // another item's record this item's own.
-            let evidence = store.evidence_for_subject(id)?;
+            let (evidence, mut evidence_truncated) = store.evidence_for_subject_bounded(id, MAX_DETAIL_EVIDENCE)?;
             // What a standing `evidenceFor` relation of this entity cites is
             // returned apart from it, by the rule impact reads (`validate::cites`).
             let mut cited_evidence: Vec<Evidence> = Vec::new();
             'relations: for r in incoming.iter().chain(outgoing.iter()) {
                 for cited in &r.evidence {
                     // Bounded like the entity's own records.
-                    if cited_evidence.len() >= 200 {
+                    if cited_evidence.len() >= MAX_DETAIL_EVIDENCE {
+                        evidence_truncated = true;
                         break 'relations;
                     }
                     if evidence.iter().chain(cited_evidence.iter()).any(|e| &e.id == cited) {
@@ -716,6 +751,9 @@ impl GraphService {
                 evidence_freshness,
                 imported_evidence,
                 coverage,
+                relations_truncated: more_outgoing || more_incoming,
+                neighbors_truncated,
+                evidence_truncated,
                 graph_revision: store.revision()?,
             })
         })
@@ -757,24 +795,37 @@ impl GraphService {
                 }
             }
             let mut hits: Vec<(u32, InspectedEntity)> = Vec::new();
+            let mut entities_truncated = false;
+            // Relations of the saved graph an overlay withdraws are read past.
+            let withdrawn = overlay.as_ref().map_or(0, |o| o.removed.len());
             for b in candidates {
-                let Some(entity) = entity_of(&b.entity)? else { continue };
-                if entity.kind == EntityKind::Resource || (unsaved && entity.lifecycle == Lifecycle::Tombstoned) {
-                    continue;
-                }
+                // The position test first: it needs no read, and most
+                // bindings of a file are elsewhere.
                 let width = match (req.offset, b.range) {
                     (Some(o), Some(r)) if r.start <= o && o <= r.end => r.len(),
                     (Some(_), _) => continue,
                     (None, Some(r)) => r.len(),
                     (None, None) => u32::MAX,
                 };
-                let mut relations = store.relations_from(&entity.id)?;
-                relations.extend(store.relations_to(&entity.id)?);
+                let Some(entity) = entity_of(&b.entity)? else { continue };
+                if entity.kind == EntityKind::Resource || (unsaved && entity.lifecycle == Lifecycle::Tombstoned) {
+                    continue;
+                }
+                if hits.len() >= MAX_INSPECTED_ENTITIES {
+                    // Another entity is bound here and is not listed.
+                    entities_truncated = true;
+                    break;
+                }
+                let read = MAX_INSPECTED_RELATIONS.saturating_add(withdrawn);
+                let (mut relations, more_from) = store.relations_from_bounded(&entity.id, read)?;
+                let (incoming, more_to) = store.relations_to_bounded(&entity.id, read)?;
+                relations.extend(incoming);
                 if let Some(o) = &overlay {
                     relations.retain(|r| !o.removed.contains(&r.id));
                     relations.extend(o.added.iter().filter(|r| r.from == entity.id || r.to == entity.id).cloned());
                 }
-                relations.truncate(200);
+                let relations_truncated = more_from || more_to || relations.len() > MAX_INSPECTED_RELATIONS;
+                relations.truncate(MAX_INSPECTED_RELATIONS);
                 let mut related_ids: Vec<EntityId> =
                     relations.iter().map(|r| if r.from == entity.id { r.to.clone() } else { r.from.clone() }).collect();
                 related_ids.sort();
@@ -785,10 +836,7 @@ impl GraphService {
                         related.push(e);
                     }
                 }
-                hits.push((width, InspectedEntity { entity, binding: b, relations, related }));
-                if hits.len() >= 200 {
-                    break;
-                }
+                hits.push((width, InspectedEntity { entity, binding: b, relations, relations_truncated, related }));
             }
             hits.sort_by_key(|(w, _)| *w);
             let coverage = match overlay.as_ref().and_then(|o| o.coverage.clone()) {
@@ -801,6 +849,7 @@ impl GraphService {
                 unsaved,
                 resource,
                 entities: hits.into_iter().map(|(_, h)| h).collect(),
+                entities_truncated,
                 coverage,
                 freshness: freshness.clone(),
                 graph_revision: store.revision()?,
@@ -854,20 +903,34 @@ impl GraphService {
                     continue;
                 }
                 let current_kind = store.entity(&current)?.map(|e| e.kind);
+                // Every relation of the entity is visited (none is left
+                // out); the edges kept are those the walk can still follow
+                // before its work limit, plus the one that reaches it, so a
+                // hub costs bounded memory and the report says the limit
+                // was reached.
                 let mut edges: Vec<(Relation, EntityId)> = Vec::new();
-                for r in store.relations_to(&current)? {
+                let room = (IMPACT_WORK_LIMIT + 1).saturating_sub(work);
+                store.visit_relations(Endpoint::To, &current, |r| {
                     let anchored = r.kind == RelationKind::AnchoredIn && current_kind == Some(EntityKind::Resource);
                     if (propagates_reverse(r.kind) || anchored) && r.status != AssertionStatus::Rejected {
+                        if edges.len() >= room {
+                            return Ok(false);
+                        }
                         let other = r.from.clone();
                         edges.push((r, other));
                     }
-                }
-                for r in store.relations_from(&current)? {
+                    Ok(true)
+                })?;
+                store.visit_relations(Endpoint::From, &current, |r| {
                     if propagates_forward(r.kind) && r.status != AssertionStatus::Rejected {
+                        if edges.len() >= room {
+                            return Ok(false);
+                        }
                         let other = r.to.clone();
                         edges.push((r, other));
                     }
-                }
+                    Ok(true)
+                })?;
                 // Entities bound to a changed file without a relation that
                 // says so (curated bindings): located in it, by binding.
                 let mut located: Vec<Entity> = Vec::new();
@@ -895,7 +958,7 @@ impl GraphService {
                 }
                 for (r, other) in edges {
                     work += 1;
-                    if work > 20_000 {
+                    if work > IMPACT_WORK_LIMIT {
                         work_limit_reached = true;
                         break;
                     }
@@ -959,7 +1022,7 @@ impl GraphService {
                 // The same holds for an entity bound to the file.
                 for entity in located {
                     work += 1;
-                    if work > 20_000 {
+                    if work > IMPACT_WORK_LIMIT {
                         work_limit_reached = true;
                         break;
                     }
@@ -1006,7 +1069,10 @@ impl GraphService {
                     Some((i.entity.id.clone(), i.entity.label.clone(), None, Some(path.clone())))
                 }));
             'subjects: for (subject, label, why, only_input) in subjects {
-                let mut records = store.evidence_for_subject(&subject)?;
+                // The newest records of the subject; older ones beyond the
+                // bound are not listed, and the report says so.
+                let (mut records, more) = store.evidence_for_subject_bounded(&subject, MAX_IMPACT_EVIDENCE)?;
+                truncated |= more;
                 for r in store.relations_to(&subject)?.into_iter().chain(store.relations_from(&subject)?) {
                     for id in &r.evidence {
                         if let Some(e) = store.evidence(id)?
@@ -1017,7 +1083,9 @@ impl GraphService {
                     }
                 }
                 for e in records {
-                    if evidence.len() >= 200 {
+                    if evidence.len() >= MAX_IMPACT_EVIDENCE {
+                        // More evidence is affected than is listed.
+                        truncated = true;
                         break 'subjects;
                     }
                     if let Some(file) = &only_input
@@ -1059,13 +1127,15 @@ impl GraphService {
                     });
                 }
             }
+            // More files of unknown coverage than are listed: incomplete too.
+            let truncated = truncated || unknown.len() > MAX_IMPACT_UNKNOWN;
             Ok(ImpactReport {
                 roots: req.entities.clone(),
                 items,
                 cycles,
                 truncated,
                 work_limit_reached,
-                unknown_coverage: unknown.into_iter().take(200).collect(),
+                unknown_coverage: unknown.into_iter().take(MAX_IMPACT_UNKNOWN).collect(),
                 evidence,
                 graph_revision: store.revision()?,
             })
@@ -1081,28 +1151,53 @@ impl GraphService {
                 EntityKind::ALL.into_iter().filter(|k| k.family() == EntityFamily::Mathematics).collect();
             let (entities, total) = store.find_entities(Some(&kinds), None, false, 2000)?;
             let ids: BTreeSet<EntityId> = entities.iter().map(|e| e.id.clone()).collect();
-            let relations: Vec<Relation> =
-                store.relations_among(&ids)?.into_iter().filter(|r| r.status != AssertionStatus::Rejected).collect();
+            // One walk over the relations among the rows. What a row's state
+            // is decided from (its proofs, its formal links) is indexed by
+            // endpoint from every relation, so no row reads as unproved or
+            // unlinked because the returned list is bounded; the list says
+            // when it is (`relations_truncated`).
+            let mut relations: Vec<Relation> = Vec::new();
+            let mut relations_truncated = false;
+            // Per statement: (a proof is linked, a proof is linked or suggested).
+            let mut proofs: HashMap<EntityId, (bool, bool)> = HashMap::new();
+            let mut formal: HashMap<EntityId, Vec<Relation>> = HashMap::new();
+            store.visit_relations_among(&ids, |r| {
+                if r.status == AssertionStatus::Rejected {
+                    return Ok(true);
+                }
+                match r.kind {
+                    RelationKind::ProofOf => {
+                        let entry = proofs.entry(r.to.clone()).or_default();
+                        entry.0 |= r.status != AssertionStatus::Suggested;
+                        entry.1 = true;
+                    }
+                    RelationKind::Formalizes => {
+                        formal.entry(r.to.clone()).or_default().push(r.clone());
+                        formal.entry(r.from.clone()).or_default().push(r.clone());
+                    }
+                    _ => {}
+                }
+                if relations.len() < MAX_ROWS {
+                    relations.push(r);
+                } else {
+                    relations_truncated = true;
+                }
+                Ok(true)
+            })?;
+            let no_links: Vec<Relation> = Vec::new();
             let mut rows = Vec::with_capacity(entities.len());
             for entity in entities {
                 let binding = store.bindings(&entity.id)?.into_iter().next();
                 let informal = if entity.kind.is_statement() {
-                    let proofs: Vec<&Relation> =
-                        relations.iter().filter(|r| r.kind == RelationKind::ProofOf && r.to == entity.id).collect();
-                    if proofs.iter().any(|r| r.status != AssertionStatus::Suggested) {
-                        InformalState::ProofLinked
-                    } else if !proofs.is_empty() {
-                        InformalState::ProofSuggested
-                    } else {
-                        InformalState::NoProof
+                    match proofs.get(&entity.id) {
+                        Some((true, _)) => InformalState::ProofLinked,
+                        Some((false, true)) => InformalState::ProofSuggested,
+                        _ => InformalState::NoProof,
                     }
                 } else {
                     InformalState::NotApplicable
                 };
-                let formal_links: Vec<&Relation> = relations
-                    .iter()
-                    .filter(|r| r.kind == RelationKind::Formalizes && (r.to == entity.id || r.from == entity.id))
-                    .collect();
+                let formal_links: Vec<&Relation> = formal.get(&entity.id).unwrap_or(&no_links).iter().collect();
                 // One state per row: a reviewed link that needs attention
                 // is never hidden behind another link that does not.
                 let standings: Vec<(FormalAssociationState, &Relation)> =
@@ -1130,13 +1225,13 @@ impl GraphService {
                 let mut latest: Option<Evidence> = None;
                 let mut latest_of: Option<&EntityId> = None;
                 for d in &formal_declarations {
-                    for ev in store.evidence_for_subject(d)? {
-                        if ev.kind == EvidenceKind::FormalCheck
-                            && latest.as_ref().is_none_or(|l| ev.recorded_at_ms > l.recorded_at_ms)
-                        {
-                            latest = Some(ev);
-                            latest_of = Some(d);
-                        }
+                    // The newest formal check of the declaration, wherever
+                    // it falls among its records.
+                    if let Some(ev) = store.latest_evidence_of_kind(d, EvidenceKind::FormalCheck)?
+                        && latest.as_ref().is_none_or(|l| ev.recorded_at_ms > l.recorded_at_ms)
+                    {
+                        latest = Some(ev);
+                        latest_of = Some(d);
                     }
                 }
                 // The link the shown verdict comes through (none for a
@@ -1172,6 +1267,7 @@ impl GraphService {
                 truncated: total > rows.len(),
                 rows,
                 relations,
+                relations_truncated,
                 coverage: store.coverage_summary()?,
                 graph_revision: store.revision()?,
             })
@@ -1190,7 +1286,7 @@ impl GraphService {
         }
         let (project, run) = self.with_store(|store| {
             let project = store.project().clone();
-            let w = Writer::new(store.transaction()?);
+            let w = store.writer()?;
             let run = validate::run_operations(&w, &origin, &request.operations, false)?;
             // Dropped without commit: nothing changes.
             Ok((project, run))
@@ -1247,7 +1343,7 @@ impl GraphService {
                 ));
             }
             let current = store.revision()?;
-            let w = Writer::new(store.transaction()?);
+            let w = store.writer()?;
             let mut run = validate::run_operations(&w, origin, &proposal.operations, true)?;
             if !run.valid() {
                 // Dropping `w` rolls everything back.
@@ -1341,7 +1437,7 @@ impl GraphService {
             }
         }
         let outcome = self.with_store(|store| {
-            let w = Writer::new(store.transaction()?);
+            let w = store.writer()?;
             let (mut run, relation_ids) =
                 validate::run_batch(&w, origin, batch).map_err(|m| GraphError::new("graph.invalidBatch", m))?;
             let entity_ids: Vec<EntityId> = run.created.iter().map(|c| c.id.clone()).collect();
@@ -1490,7 +1586,7 @@ impl GraphService {
                     batch.summary = format!("Admit {path} (returned unchanged)");
                 }
             }
-            let w = Writer::new(store.transaction()?);
+            let w = store.writer()?;
             let (mut run, _) =
                 validate::run_batch(&w, &origin, &batch).map_err(|m| GraphError::new("graph.invalidBatch", m))?;
             let id = run.created.first().map(|c| c.id.clone());
@@ -1772,7 +1868,7 @@ fn ensure_project_entity(open: &mut OpenGraph) -> Result<(), StoreError> {
         ..Default::default()
     };
     let origin = Origin::Service { service: "workspace".into() };
-    let w = Writer::new(open.store.transaction()?);
+    let w = open.store.writer()?;
     let (mut run, _) = validate::run_batch(&w, &origin, &batch).map_err(StoreError::Corrupt)?;
     w.record_change(&origin, "Create the project graph", &mut run.delta)?;
     w.commit()

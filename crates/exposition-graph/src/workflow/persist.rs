@@ -22,7 +22,7 @@ use super::{
 use crate::ids::{EntityId, WorkflowId};
 use crate::model::{Entity, GraphDelta, Lifecycle, Origin};
 use crate::service::{GraphError, GraphResult, GraphService};
-use crate::store::{StoreError, Writer, now_ms};
+use crate::store::{StoreError, now_ms};
 use crate::vocabulary::EntityKind;
 
 /// Bodies larger than this are treated as hostile.
@@ -375,7 +375,7 @@ impl GraphService {
                 origin: origin.clone(),
                 imported: imported || (previous.is_some() && self.was_imported(store.connection(), &id)),
             };
-            let w = Writer::new(store.transaction()?);
+            let w = store.writer()?;
             w.tx.execute(
                 "INSERT INTO workflows (id, revision, hash, state, body, saved_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![

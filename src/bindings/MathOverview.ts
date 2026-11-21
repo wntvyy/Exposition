@@ -11,4 +11,9 @@ export type MathOverview = { rows: Array<MathRow>,
  * Mathematical relations among the rows (dependsOn, assumes, proofOf,
  * formalizes, references, evidenceFor).
  */
-relations: Array<Relation>, truncated: boolean, coverage: CoverageSummary, graphRevision: number, };
+relations: Array<Relation>, 
+/**
+ * More relations exist among the rows than `relations` lists. Each
+ * row's own state is computed from all of them regardless.
+ */
+relationsTruncated: boolean, truncated: boolean, coverage: CoverageSummary, graphRevision: number, };

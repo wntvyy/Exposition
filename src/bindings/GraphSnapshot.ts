@@ -14,6 +14,11 @@ export type GraphSnapshot = { project: ProjectId | null, revision: number, entit
  */
 relations: Array<Relation>, 
 /**
+ * More relations exist among the returned entities than `relations`
+ * lists (never read the list as complete then).
+ */
+relationsTruncated: boolean, 
+/**
  * More entities matched than were returned.
  */
 truncated: boolean, 

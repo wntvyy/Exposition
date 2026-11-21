@@ -628,6 +628,11 @@ export function Mathematics({ store }: { store: ViewStore }) {
           Search or filter to narrow the view.
         </Banner>
       )}
+      {data.relationsTruncated && (
+        <Banner tone="info" title={`Showing ${data.relations.length} relationships among these items; more exist`}>
+          Each item's state is computed from all of them.
+        </Banner>
+      )}
       <div className="xp-graph-body">
         <div className="xp-graph-main" data-region="graph-main" aria-label="Mathematics" ref={ops.ref} onContextMenu={ops.onContextMenu}>
           {mode === "dependencies" ? (

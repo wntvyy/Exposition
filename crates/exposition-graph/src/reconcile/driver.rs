@@ -253,7 +253,7 @@ impl Driver {
         self.overlays.clear();
         self.first_event = None;
         self.backed_up = false;
-        self.attached = self.graph.status().is_usable();
+        self.attached = self.graph.is_usable();
         if self.attached {
             self.full = true;
             self.due = Some(Instant::now());

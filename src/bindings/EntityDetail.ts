@@ -31,4 +31,16 @@ evidenceFreshness: Array<[EvidenceId, Freshness]>,
  * project's graph): historical claims of their recorded origin, never
  * current local verification.
  */
-importedEvidence: Array<EvidenceId>, coverage: ResourceCoverage | null, graphRevision: number, };
+importedEvidence: Array<EvidenceId>, coverage: ResourceCoverage | null, 
+/**
+ * The entity has more relations than `outgoing`/`incoming` list.
+ */
+relationsTruncated: boolean, 
+/**
+ * `neighbors` leaves out endpoints of the listed relations.
+ */
+neighborsTruncated: boolean, 
+/**
+ * More evidence (own or cited) exists than is listed.
+ */
+evidenceTruncated: boolean, graphRevision: number, };

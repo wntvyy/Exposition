@@ -58,6 +58,36 @@ describe("Dependency inspector", () => {
     expect(useGraphNavigation.getState().request).toMatchObject({ section: "mathematics", entity: "thm" });
   });
 
+  it("says when more items or relationships exist than it lists", async () => {
+    const fake = createFakeGraph({
+      entities: [
+        entity("thm", "theorem", "Main theorem", { attributes: { path: "paper.tex" } }),
+        entity("lem", "lemma", "Key lemma"),
+        entity("doc", "resource", "paper.tex", { roles: ["manuscript"], key: "paper.tex" }),
+      ],
+      relations: [relation("d1", "dependsOn", "thm", "lem")],
+    });
+    const inspect = fake.api.inspectAtSource.bind(fake.api);
+    setGraphApi({
+      ...fake.api,
+      inspectAtSource: async (request) => {
+        const full = await inspect(request);
+        return { ...full, entitiesTruncated: true, entities: full.entities.map((e) => ({ ...e, relationsTruncated: true })) };
+      },
+    });
+    render(<DependencyInspector />);
+    await screen.findByTestId("deps-entity", {}, { timeout: 3000 });
+    expect(screen.getByTestId("deps-entities-truncated").textContent).toMatch(/first 1 items bound here; more exist/);
+    expect(screen.getByTestId("deps-relations-truncated").textContent).toMatch(/first 1 relationships; this item has more/);
+  });
+
+  it("does not mention a limit when everything is listed", async () => {
+    render(<DependencyInspector />);
+    await screen.findByTestId("deps-entity", {}, { timeout: 3000 });
+    expect(screen.queryByTestId("deps-entities-truncated")).toBeNull();
+    expect(screen.queryByTestId("deps-relations-truncated")).toBeNull();
+  });
+
   it("lists records a relationship cites as cited support under the item's evidence", async () => {
     // Review finding 1: the theorem has no evidence of its own; a relationship cites one record.
     const fake = createFakeGraph({

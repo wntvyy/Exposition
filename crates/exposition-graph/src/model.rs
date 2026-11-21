@@ -662,5 +662,14 @@ pub struct EntityDetail {
     /// current local verification.
     pub imported_evidence: Vec<EvidenceId>,
     pub coverage: Option<ResourceCoverage>,
+    /// The entity has more relations than `outgoing`/`incoming` list.
+    #[serde(default)]
+    pub relations_truncated: bool,
+    /// `neighbors` leaves out endpoints of the listed relations.
+    #[serde(default)]
+    pub neighbors_truncated: bool,
+    /// More evidence (own or cited) exists than is listed.
+    #[serde(default)]
+    pub evidence_truncated: bool,
     pub graph_revision: u64,
 }

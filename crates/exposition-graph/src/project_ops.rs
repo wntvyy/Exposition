@@ -345,7 +345,7 @@ impl GraphService {
                 let bindings = store.bindings(id)?;
                 let mut relations = store.relations_from(id)?;
                 relations.extend(store.relations_to(id)?);
-                let w = Writer::new(store.transaction()?);
+                let w = store.writer()?;
                 let recoverable = if permanent {
                     None
                 } else {
@@ -410,7 +410,7 @@ impl GraphService {
         let check = self.check_relation_delete(id)?;
         let (delta, recoverable) = self
             .with_store(|store| {
-                let w = Writer::new(store.transaction()?);
+                let w = store.writer()?;
                 let Some(relation) = w.relation(id)? else {
                     return Ok(Err(refuse("ops.notFound", "That relationship no longer exists.")));
                 };
@@ -441,7 +441,7 @@ impl GraphService {
             let Some(view) = store.view(id)? else {
                 return Ok(Err(refuse("ops.notFound", "That saved view no longer exists.")));
             };
-            let w = Writer::new(store.transaction()?);
+            let w = store.writer()?;
             let recoverable = if permanent {
                 None
             } else {
@@ -565,7 +565,7 @@ impl GraphService {
                     None => Vec::new(),
                 };
                 let rid = recoverable_id(RECOVERABLE_WORKFLOW, id.as_str());
-                let w = Writer::new(store.transaction()?);
+                let w = store.writer()?;
                 let mut outcome = WorkflowDeletion::default();
                 if !retired {
                     w.tx.execute(
@@ -645,7 +645,7 @@ impl GraphService {
         self.check_revision_purge(id, revision)?;
         let delta = self
             .with_store(|store| {
-                let w = Writer::new(store.transaction()?);
+                let w = store.writer()?;
                 w.tx.execute(
                     "DELETE FROM workflows WHERE id = ?1 AND revision = ?2",
                     params![id.as_str(), revision as i64],
@@ -734,7 +734,7 @@ impl GraphService {
                 let Some((kind, _label, snapshot)) = load_snapshot(store.connection(), id)? else {
                     return Ok(Err(refuse("ops.notFound", "That deleted item is no longer recoverable.")));
                 };
-                let w = Writer::new(store.transaction()?);
+                let w = store.writer()?;
                 let mut delta = GraphDelta::default();
                 let mut skipped = 0usize;
                 let mut rebind: Vec<WorkspacePath> = Vec::new();
@@ -1162,7 +1162,7 @@ impl GraphService {
                 if ids.is_empty() {
                     return Ok(None);
                 }
-                let w = Writer::new(store.transaction()?);
+                let w = store.writer()?;
                 let mut delta = GraphDelta::default();
                 for id in &ids {
                     remove_entity_rows(&w, id)?;

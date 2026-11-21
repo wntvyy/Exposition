@@ -34,7 +34,7 @@ use crate::model::{
     ResourceCoverage, SourceBinding, SourceSelector, SourceVersion,
 };
 use crate::service::{GraphError, GraphResult, GraphService};
-use crate::store::{Checkpoint, GraphStore, IndexRecord, StoreResult, Writer, now_ms};
+use crate::store::{Checkpoint, GraphStore, IndexRecord, StoreResult, now_ms};
 use crate::vocabulary::{EntityKind, RelationKind, ResourceRole};
 
 /// Origin name of resources and folders admitted by scanning.
@@ -111,7 +111,25 @@ pub(crate) struct ProjectIndex {
     pub labels: HashMap<String, BTreeSet<WorkspacePath>>,
     pub by_path: HashMap<WorkspacePath, Vec<String>>,
     pub latex_mains: BTreeSet<WorkspacePath>,
+    /// Files waiting for each link target (the stored `wanted` lists, by
+    /// target), so a pass that introduces targets finds the files to resolve
+    /// again without reading every file's index row. Same owner, key and
+    /// lifetime as the label index: loaded once per attach generation and
+    /// root, then updated from each written plan (the reconciler is the
+    /// only writer of the stored lists); bounded by the stored lists.
+    waiting: HashMap<String, BTreeSet<WorkspacePath>>,
+    wanted_by_path: HashMap<WorkspacePath, Vec<String>>,
 }
+
+/// Stored in place of a file's wanted list when the file waits for more
+/// targets than a list holds: it is resolved again whenever any target
+/// appears, so no awaited target is dropped.
+pub(crate) const ANY_TARGET: &str = "*";
+/// Targets one stored wanted list names.
+pub(crate) const MAX_WANTED: usize = 200;
+/// A pass over at most this many paths reads only the records at and under
+/// them; a larger one reads the project's records once.
+const SCOPED_PATHS: usize = 16;
 
 impl ProjectIndex {
     pub fn set(&mut self, path: &WorkspacePath, labels: &[String], latex_main: bool) {
@@ -139,6 +157,42 @@ impl ProjectIndex {
         self.latex_mains.remove(path);
     }
 
+    /// Record the targets `path` waits for (replacing its earlier list).
+    pub fn set_wanted(&mut self, path: &WorkspacePath, wanted: &[String]) {
+        self.remove_wanted(path);
+        if wanted.is_empty() {
+            return;
+        }
+        for target in wanted {
+            self.waiting.entry(target.clone()).or_default().insert(path.clone());
+        }
+        self.wanted_by_path.insert(path.clone(), wanted.to_vec());
+    }
+
+    pub fn remove_wanted(&mut self, path: &WorkspacePath) {
+        if let Some(old) = self.wanted_by_path.remove(path) {
+            for target in old {
+                if let Some(set) = self.waiting.get_mut(&target) {
+                    set.remove(path);
+                    if set.is_empty() {
+                        self.waiting.remove(&target);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Files waiting for one of `targets` (or for any target).
+    pub fn waiting_for(&self, targets: &BTreeSet<String>) -> BTreeSet<WorkspacePath> {
+        let mut out: BTreeSet<WorkspacePath> = self.waiting.get(ANY_TARGET).cloned().unwrap_or_default();
+        for target in targets {
+            if let Some(paths) = self.waiting.get(target) {
+                out.extend(paths.iter().cloned());
+            }
+        }
+        out
+    }
+
     pub(crate) fn load(&mut self, store: &GraphStore) -> StoreResult<()> {
         #[derive(Deserialize)]
         struct Labels {
@@ -156,6 +210,9 @@ impl ProjectIndex {
             if let Ok(body) = serde_json::from_str::<Labels>(&record.body) {
                 self.set(&record.path, &body.extraction.labels, body.latex_main);
             }
+        }
+        for (path, wanted) in store.index_wanted()? {
+            self.set_wanted(&path, &wanted);
         }
         Ok(())
     }
@@ -207,7 +264,7 @@ pub(crate) fn run_locked(
         // A few paths are looked up directly; many (a burst of changes) are
         // cheaper to filter from one read.
         let prefixes = match &options.scope {
-            Scope::Paths(p) if p.len() <= 16 => Some(p.as_slice()),
+            Scope::Paths(p) if p.len() <= SCOPED_PATHS => Some(p.as_slice()),
             _ => None,
         };
         let checkpoints = match prefixes {
@@ -321,8 +378,14 @@ pub(crate) fn run_locked(
     for (path, update) in &plan.index_updates {
         match update {
             Some((labels, main)) => state.index.set(path, labels, *main),
-            None => state.index.remove(path),
+            None => {
+                state.index.remove(path);
+                state.index.remove_wanted(path);
+            }
         }
+    }
+    for (path, wanted) in &plan.wanted {
+        state.index.set_wanted(path, wanted);
     }
     let mut report = plan.report.clone();
     report.revision = revision;
@@ -408,7 +471,7 @@ impl Plan {
 
     /// Write the plan in one transaction. Returns the graph revision after it.
     fn write(&self, store: &mut GraphStore) -> StoreResult<u64> {
-        let w = Writer::new(store.transaction()?);
+        let w = store.writer()?;
         if let Some((scope, token)) = &self.clear_pending {
             w.clear_pending(scope.as_deref(), *token)?;
         }
@@ -466,6 +529,107 @@ impl Plan {
         };
         w.commit()?;
         Ok(revision)
+    }
+}
+
+/// The active resource of each path as a pass leaves it.
+///
+/// A pass over a few paths knows the resources in its scope and what it
+/// changed; any other path is looked up in the store when it is met, so the
+/// pass does not read every resource of the project. A full pass (or one
+/// that derives the folder structure) reads them all once. Lives for one
+/// pass; the store does not change while it plans.
+pub(crate) struct Resources<'a> {
+    store: &'a GraphStore,
+    /// Every stored resource was read: `known` is the whole answer.
+    complete: bool,
+    /// Paths read in scope or set by this pass (`None`: no live resource).
+    known: BTreeMap<WorkspacePath, Option<EntityId>>,
+    /// Lookups of other paths (a path set later is answered from `known`).
+    looked_up: std::cell::RefCell<HashMap<WorkspacePath, Option<EntityId>>>,
+}
+
+impl<'a> Resources<'a> {
+    fn new(store: &'a GraphStore) -> Self {
+        Self { store, complete: false, known: BTreeMap::new(), looked_up: std::cell::RefCell::new(HashMap::new()) }
+    }
+
+    /// The live resource at `path` after this pass's changes.
+    pub(crate) fn get(&self, path: &WorkspacePath) -> StoreResult<Option<EntityId>> {
+        if let Some(known) = self.known.get(path) {
+            return Ok(known.clone());
+        }
+        if self.complete {
+            return Ok(None);
+        }
+        if let Some(found) = self.looked_up.borrow().get(path) {
+            return Ok(found.clone());
+        }
+        let found = self.store.live_resource_id(path)?;
+        self.looked_up.borrow_mut().insert(path.clone(), found.clone());
+        Ok(found)
+    }
+
+    pub(crate) fn insert(&mut self, path: WorkspacePath, id: EntityId) {
+        self.known.insert(path, Some(id));
+    }
+
+    pub(crate) fn remove(&mut self, path: &WorkspacePath) {
+        self.known.insert(path.clone(), None);
+    }
+
+    /// The caller inserted every stored live resource.
+    fn set_complete(&mut self) {
+        self.complete = true;
+    }
+
+    /// Read every stored resource not known yet (the oldest live identity
+    /// of a path is its resource, as a full pass decides).
+    pub(crate) fn load_all(&mut self) -> StoreResult<()> {
+        if self.complete {
+            return Ok(());
+        }
+        let mut oldest: BTreeMap<WorkspacePath, (u64, EntityId)> = BTreeMap::new();
+        for k in self.store.resource_keys(None)? {
+            if k.tombstoned || self.known.contains_key(&k.path) {
+                continue;
+            }
+            match oldest.get(&k.path) {
+                Some(kept) if (kept.0, &kept.1) <= (k.created_at_ms, &k.id) => {}
+                _ => {
+                    oldest.insert(k.path, (k.created_at_ms, k.id));
+                }
+            }
+        }
+        for (path, (_, id)) in oldest {
+            self.known.insert(path, Some(id));
+        }
+        self.complete = true;
+        Ok(())
+    }
+
+    /// Every live resource (after [`Self::load_all`], or in a full pass).
+    pub(crate) fn live(&self) -> impl Iterator<Item = (&WorkspacePath, &EntityId)> {
+        debug_assert!(self.complete, "the resources of the whole project were not read");
+        self.known.iter().filter_map(|(path, id)| id.as_ref().map(|id| (path, id)))
+    }
+
+    /// Paths of the live resources whose file name is one of `names`.
+    pub(crate) fn named(&self, names: &[&str]) -> StoreResult<Vec<WorkspacePath>> {
+        let mut out: BTreeSet<WorkspacePath> = BTreeSet::new();
+        if !self.complete {
+            for path in self.store.live_resource_paths_named(names)? {
+                if !self.known.contains_key(&path) {
+                    out.insert(path);
+                }
+            }
+        }
+        for (path, id) in &self.known {
+            if id.is_some() && names.contains(&path.file_name()) {
+                out.insert(path.clone());
+            }
+        }
+        Ok(out.into_iter().collect())
     }
 }
 
@@ -535,7 +699,7 @@ pub(crate) struct Planner<'a> {
     /// Stored live entities by natural key (store state is fixed during planning).
     pub(crate) key_cache: std::cell::RefCell<HashMap<String, Vec<EntityId>>>,
     /// Active resource per path after this pass's changes.
-    pub(crate) resources: BTreeMap<WorkspacePath, EntityId>,
+    pub(crate) resources: Resources<'a>,
     /// Entities whose natural key was set in this pass (for resolution).
     pub(crate) keyed: HashMap<String, BTreeSet<EntityId>>,
     pub(crate) tombstoned_now: BTreeSet<EntityId>,
@@ -588,7 +752,7 @@ impl<'a> Planner<'a> {
             preloaded_bindings: None,
             created_now: std::collections::HashSet::new(),
             key_cache: std::cell::RefCell::new(HashMap::new()),
-            resources: BTreeMap::new(),
+            resources: Resources::new(store),
             keyed: HashMap::new(),
             tombstoned_now: BTreeSet::new(),
             moved_now: BTreeSet::new(),
@@ -863,13 +1027,23 @@ impl<'a> Planner<'a> {
         let mut created: HashMap<EntityId, u64> = HashMap::new();
         let mut tombs: HashMap<WorkspacePath, Vec<EntityId>> = HashMap::new();
         let mut duplicates: Vec<(WorkspacePath, EntityId)> = Vec::new();
-        for k in self.store.resource_keys(None)? {
+        // A pass over a few paths reads the resources at and under them (all
+        // it is responsible for); any other path it meets (a link target, a
+        // file waiting for a target) is looked up when met. A full pass, or
+        // one over many paths, reads every resource once.
+        let scoped: Option<Vec<WorkspacePath>> = match covered {
+            Covered::Prefixes(p) if p.len() <= SCOPED_PATHS => Some(p.clone()),
+            _ => None,
+        };
+        for k in self.store.resource_keys(scoped.as_deref())? {
             if k.tombstoned {
                 tombs.entry(k.path).or_default().push(k.id);
                 continue;
             }
             created.insert(k.id.clone(), k.created_at_ms);
             match active.get(&k.path) {
+                // The same identity read again is not a second identity.
+                Some(existing) if existing == &k.id => {}
                 // Two live identities for one path (written outside the
                 // service's checks): the oldest stays the file's resource.
                 Some(existing) if created.get(existing).is_some_and(|c| (*c, existing) <= (k.created_at_ms, &k.id)) => {
@@ -886,6 +1060,9 @@ impl<'a> Planner<'a> {
         }
         for (path, id) in &active {
             self.resources.insert(path.clone(), id.clone());
+        }
+        if scoped.is_none() {
+            self.resources.set_complete();
         }
         // Never leave two live identities claiming one file: the newer ones
         // are tombstoned with the reason (their curated relations stay, and
@@ -1063,8 +1240,20 @@ impl<'a> Planner<'a> {
         self.apply_matches(matches)?;
         let t_matches = Instant::now();
         if !self.new_targets.is_empty() {
-            for (p, wanted) in self.store.index_wanted()? {
-                if self.resources.contains_key(&p) && wanted.iter().any(|w| self.new_targets.contains(w)) {
+            // Files waiting for a target this pass introduced: from the
+            // session index (by target), else from every stored list.
+            let waiting: BTreeSet<WorkspacePath> = if self.index.loaded {
+                self.index.waiting_for(&self.new_targets)
+            } else {
+                self.store
+                    .index_wanted()?
+                    .into_iter()
+                    .filter(|(_, wanted)| wanted.iter().any(|w| w == ANY_TARGET || self.new_targets.contains(w)))
+                    .map(|(p, _)| p)
+                    .collect()
+            };
+            for p in waiting {
+                if self.resources.get(&p)?.is_some() {
                     self.resolve.insert(p);
                 }
             }
@@ -1093,11 +1282,8 @@ impl<'a> Planner<'a> {
     /// Plan the unsaved text of one file (a live-buffer overlay): the same
     /// matching and resolution as a pass, never written.
     pub(crate) fn plan_overlay(&mut self, path: &WorkspacePath, resource: &Entity, f: &Fresh) -> StoreResult<()> {
-        for k in self.store.resource_keys(None)? {
-            if !k.tombstoned {
-                self.resources.entry(k.path).or_insert(k.id);
-            }
-        }
+        // Resources are looked up as the buffer's links name them.
+        self.resources.insert(path.clone(), resource.id.clone());
         let mut matches = Vec::new();
         self.index_file(path, resource, f, None, &mut matches)?;
         self.apply_matches(matches)?;
@@ -1375,7 +1561,9 @@ impl<'a> Planner<'a> {
             let path = matches[fi].path.clone();
             let resource = self.must(&matches[fi].resource)?;
             let extractor = matches[fi].extraction.extractor.clone();
-            if self.lake_roots_cache.is_none() {
+            // Lake package roots matter to Lean files only.
+            let is_lean = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lean"));
+            if is_lean && self.lake_roots_cache.is_none() {
                 self.lake_roots_cache = Some(self.lake_roots()?);
             }
             let lean_module = lean_module(&path, self.lake_roots_cache.as_deref().unwrap_or(&[]));
@@ -1716,12 +1904,8 @@ impl<'a> Planner<'a> {
 
     /// Folders that hold a Lake package (`lakefile.lean`/`lakefile.toml`).
     pub(crate) fn lake_roots(&self) -> StoreResult<Vec<Option<WorkspacePath>>> {
-        let mut roots: Vec<Option<WorkspacePath>> = self
-            .resources
-            .keys()
-            .filter(|p| matches!(p.file_name(), "lakefile.lean" | "lakefile.toml"))
-            .map(|p| p.parent())
-            .collect();
+        let mut roots: Vec<Option<WorkspacePath>> =
+            self.resources.named(&["lakefile.lean", "lakefile.toml"])?.iter().map(|p| p.parent()).collect();
         roots.sort();
         roots.dedup();
         if roots.is_empty() {

@@ -21,4 +21,8 @@ resource: Entity | null,
 /**
  * Entities bound at the offset, innermost first.
  */
-entities: Array<InspectedEntity>, coverage: ResourceCoverage | null, freshness: GraphFreshness, graphRevision: number, };
+entities: Array<InspectedEntity>, 
+/**
+ * More entities are bound there than `entities` lists.
+ */
+entitiesTruncated: boolean, coverage: ResourceCoverage | null, freshness: GraphFreshness, graphRevision: number, };

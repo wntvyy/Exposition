@@ -624,6 +624,12 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
 
         <Section title="Relationships" count={relations.length}>
           {relations.length === 0 && <p className="ui-muted">No relationships.</p>}
+          {detail.relationsTruncated && (
+            <p className="ui-meta" data-testid="graph-relations-truncated">
+              Showing the first {relations.length} relationships; this item has more.
+            </p>
+          )}
+          {detail.neighborsTruncated && <p className="ui-meta">Some related items are shown by identifier only.</p>}
           {families.map((family) => (
             <div key={family} className="xp-graph-group" data-family={family}>
               <h4 className="ui-group-label">{FAMILY_LABELS[family]}</h4>
@@ -648,6 +654,7 @@ export function EntityInspector({ entityId, vocabulary, actions, children }: Ent
         {children?.(detail)}
 
         <Section title="Evidence" count={detail.evidence.length}>
+          {detail.evidenceTruncated && <p className="ui-meta">Showing the most recent evidence; older records exist.</p>}
           {detail.evidence.length ? (
             <ul className="xp-graph-rows" data-divided>
               {detail.evidence.map((ev) => (
