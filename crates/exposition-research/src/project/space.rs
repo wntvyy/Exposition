@@ -29,6 +29,8 @@ const LIST_DEPTH: usize = 6;
 const IMPORT_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 /// Resources admitted while listing (the rest on the next listing).
 const ADMIT_PER_LISTING: usize = 200;
+/// Resources examined for retained results in one listing.
+const RESULT_SCAN_LIMIT: usize = 5000;
 
 pub(crate) fn attr(entity: &Entity, key: &str) -> Option<String> {
     entity.attributes.get(key).cloned()
@@ -230,6 +232,12 @@ impl ResearchProject {
     /// they are on disk (works while the graph is unavailable, without
     /// identities); admits research files the graph does not know yet.
     pub fn listing(&self) -> Result<ResearchListing, ResearchError> {
+        self.listing_scanning(RESULT_SCAN_LIMIT)
+    }
+
+    /// [`Self::listing`], examining at most `result_scan_limit` resources
+    /// for retained results.
+    pub(crate) fn listing_scanning(&self, result_scan_limit: usize) -> Result<ResearchListing, ResearchError> {
         let root = self.root()?;
         let usable = self.graph_root();
         let mut listing = ResearchListing {
@@ -297,7 +305,7 @@ impl ResearchProject {
                 }
             }
             listing.graph_revision = Some(self.graph.with_store(|s| Ok(s.revision()?))?);
-            self.list_graph_groups(&space, &mut listing)?;
+            self.list_graph_groups(&space, &mut listing, result_scan_limit)?;
         }
         for file in files {
             match file.group {
@@ -310,7 +318,12 @@ impl ResearchProject {
         Ok(listing)
     }
 
-    fn list_graph_groups(&self, space: &ResearchSpaceInfo, listing: &mut ResearchListing) -> Result<(), ResearchError> {
+    fn list_graph_groups(
+        &self,
+        space: &ResearchSpaceInfo,
+        listing: &mut ResearchListing,
+        result_scan_limit: usize,
+    ) -> Result<(), ResearchError> {
         // External references and experiments that are members of the space.
         let members: Vec<Entity> = self.graph.with_store(|s| {
             let ids: Vec<EntityId> = s
@@ -340,8 +353,17 @@ impl ResearchProject {
             }
         }
         listing.experiments.sort_by_key(|e| e.label.to_lowercase());
-        // Retained results: every resource with the artifact role.
-        for e in self.entities_of(&[EntityKind::Resource], 5000)? {
+        // Retained results: every resource with the artifact role, found
+        // among at most `result_scan_limit` resources. A project with more
+        // resources may have results beyond them: the listing then says it
+        // is incomplete instead of presenting what it found as everything.
+        let (resources, total) = self
+            .graph
+            .with_store(|s| Ok(s.find_entities(Some(&[EntityKind::Resource]), None, true, result_scan_limit)?))?;
+        if total > resources.len() {
+            listing.truncated = true;
+        }
+        for e in resources {
             if e.lifecycle == Lifecycle::Tombstoned || !e.roles.contains(&ResourceRole::Artifact) {
                 continue;
             }

@@ -1051,3 +1051,30 @@ fn a_result_retained_under_a_label_is_listed_by_it() {
     let cut = f.project.retain_labelled(&request, Some(&long)).unwrap().result.label;
     assert!(cut.len() <= super::retain::MAX_RESULT_LABEL && cut.chars().all(|c| c == 'é'), "{}", cut.len());
 }
+
+/// The explorer looks for retained results among a bounded number of the
+/// project's resources. When the project has more, the listing says it is
+/// incomplete: results it did not reach are never presented as absent.
+#[test]
+fn a_listing_that_could_not_examine_every_resource_says_it_is_incomplete() {
+    let f = fixture();
+    f.project.enable().unwrap();
+    for run in ["run-c1", "run-c2", "run-c3"] {
+        record_run(&f.root, run, vec![script_input()], vec![]);
+        f.project
+            .retain(&RetainRequest {
+                run_id: run.into(),
+                artifact_id: format!("{run}/output-2.csv"),
+                state: RetainState::Active,
+                experiment: None,
+            })
+            .unwrap();
+    }
+    let complete = f.project.listing().unwrap();
+    assert_eq!(complete.results.len(), 3);
+    assert!(!complete.truncated, "everything was examined");
+    // Fewer resources examined than the project has: marked, not silently short.
+    let partial = f.project.listing_scanning(2).unwrap();
+    assert!(partial.results.len() < 3);
+    assert!(partial.truncated, "an incomplete result list is marked");
+}
