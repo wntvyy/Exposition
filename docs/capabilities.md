@@ -847,7 +847,11 @@ action, with no extra dialog. A finished run's output is kept with its
 record in the project and read from there once the run is no longer among
 the most recent; when that stored output is missing or damaged the run shows
 an error, and when it ends early it is marked as incomplete, never shown as
-a run that printed nothing.
+a run that printed nothing. The run history reaches every run stored in the
+project: it shows the 200 most recent, **Show more runs** adds earlier ones
+200 at a time, and while runs are not shown the header says how many are
+listed of how many exist. A run record that cannot be read is counted and
+named as such, not listed as a run.
 
 **Guided environment setup** (Python). When the selected environment is not
 usable, the Research view says why and offers the next step. **Set up

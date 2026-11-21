@@ -153,6 +153,7 @@ else rebuilds.
 |---|---|---|
 | Job output event | a notification without text; no job-list read | 50 MB of output: 10.5 MB of event text → about 90 bytes per event |
 | Run history listing | decodes only records that changed since the last listing | 100 records of 870 KB: 440 → 0.06 ms, 0 records decoded |
+| Research run history page | one folder listing and the manifests of the runs returned (at most 500), whatever the folder holds; a damaged record is read once | 2,000 runs of 209 KB: 500 listed and 1,500 unreachable → every run reachable in 4 pages (2,000 manifests, 300 ms); first page 500 manifests, 83 → 75 ms (debug build) |
 | Finished research runs in memory | output kept for the 16 most recent of the open project; older runs read from their verified records | 300 runs × 1 MB: 300 → 16 MB; 0 after a project switch |
 | Restricted preflight | one engine query answers presence and identity; nothing cached | 2 → 1 process per preflight, 7 → 6 per job |
 | Interpreter discovery | one scan at a time; concurrent requests share it | two concurrent requests: 10 → 5 probes |
@@ -252,7 +253,11 @@ or product behaviour:
   5 MiB); a document-id command is needed.
 - **Lean freshness while checking** (three document states per edit) needs a
   "for an earlier revision" state in the interface.
-- **Research run retention.** With 2,000 runs on disk, 500 are listed.
+- **Storage & History with thousands of research runs** reads every run
+  record to list it with its size and outputs: 150 ms for 500 records of
+  209 KB, 650 ms for 2,000 (debug build). It listed 500 of the 2,000 before.
+- **An experiment's attempts** are looked for among the runs of the first
+  history page; with more runs than that the list says it may be incomplete.
 - **Rebuilds for unrelated edits** still happen for a LaTeX entry until its
   automatic full build has run, after a failed build, and always with Biber
   or LuaLaTeX.
