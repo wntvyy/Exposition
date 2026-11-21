@@ -80,7 +80,11 @@ export async function selectedPaths(page) {
 export async function selectFiles(page, paths) {
   for (const path of paths) await expandTo(page, path);
   for (const path of await selectedPaths(page)) {
-    if (!paths.includes(path)) await fileRow(page, path).locator(".ui-tree-item__title").click({ modifiers: ["Control"] });
+    if (paths.includes(path)) continue;
+    // A row of a file that was just deleted can leave the tree between the
+    // read above and this click; the final check below still requires the
+    // exact selection.
+    await fileRow(page, path).locator(".ui-tree-item__title").click({ modifiers: ["Control"], timeout: 3_000 }).catch(() => {});
   }
   for (const path of paths) {
     const now = await selectedPaths(page);
