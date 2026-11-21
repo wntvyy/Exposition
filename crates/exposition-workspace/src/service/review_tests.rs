@@ -9,6 +9,7 @@
 //! installs after them, the other journals under the lock at the same point.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicBool;
 
 use exposition_core::document::TextEncoding;
 
