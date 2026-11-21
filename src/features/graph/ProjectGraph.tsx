@@ -335,6 +335,11 @@ export function ProjectGraph({ store }: { store: ViewStore }) {
           Search, filter by kind, or show an item's neighborhood to see the others.
         </Banner>
       )}
+      {data.relationsTruncated && (
+        <Banner tone="info" title={`Showing ${data.relations.length} relationships among these items; more exist`}>
+          Filter by kind or show an item's neighborhood to see the others.
+        </Banner>
+      )}
       {status?.state.kind === "temporaryReadOnly" && (
         <Banner tone="warning" title="Temporary read-only graph">
           {status.state.reason} Changes and saved layouts cannot be kept for this folder.

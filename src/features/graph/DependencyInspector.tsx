@@ -88,6 +88,11 @@ function InspectedEntityView({ item, vocabulary, primary }: { item: InspectedEnt
           </div>
         ))
       )}
+      {item.relationsTruncated && (
+        <p className="ui-meta" data-testid="deps-relations-truncated">
+          Showing the first {item.relations.length} relationships; this item has more.
+        </p>
+      )}
       {primary && <EvidenceSummary entityId={entity.id} />}
       <div className="xp-graph-inline">
         <Button size="sm" icon={Network} onPress={() => openInGraph(entity.id, "project")}>
@@ -229,6 +234,11 @@ export function DependencyInspector() {
               </p>
             ) : (
               data.entities.map((item, i) => <InspectedEntityView key={item.entity.id} item={item} vocabulary={vocabulary} primary={i === 0} />)
+            )}
+            {data.entitiesTruncated && (
+              <p className="ui-meta xp-deps__note" data-testid="deps-entities-truncated">
+                Showing the first {data.entities.length} items bound here; more exist.
+              </p>
             )}
           </Section>
           {data.resource ? (
