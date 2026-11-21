@@ -378,7 +378,12 @@ impl GraphService {
 
     fn compute_status(&self, inner: &Inner) -> GraphStatus {
         let Some(open) = &inner.open else { return inner.status.clone() };
-        let ((entities, relations), coverage) = open.store.status_summary().unwrap_or_default();
+        // A read that fails leaves its own part empty, never the other's:
+        // unreadable coverage must not hide the counts, nor the reverse.
+        let ((entities, relations), coverage) = match open.store.status_summary() {
+            Ok(summary) => summary,
+            Err(_) => (open.store.count_rows().unwrap_or((0, 0)), open.store.summarize_coverage().unwrap_or_default()),
+        };
         GraphStatus {
             state: match &open.temporary {
                 Some(reason) => GraphState::TemporaryReadOnly { reason: reason.clone() },
@@ -1064,7 +1069,10 @@ impl GraphService {
                     Some((i.entity.id.clone(), i.entity.label.clone(), None, Some(path.clone())))
                 }));
             'subjects: for (subject, label, why, only_input) in subjects {
-                let mut records = store.evidence_for_subject(&subject)?;
+                // The newest records of the subject; older ones beyond the
+                // bound are not listed, and the report says so.
+                let (mut records, more) = store.evidence_for_subject_bounded(&subject, MAX_IMPACT_EVIDENCE)?;
+                truncated |= more;
                 for r in store.relations_to(&subject)?.into_iter().chain(store.relations_from(&subject)?) {
                     for id in &r.evidence {
                         if let Some(e) = store.evidence(id)?

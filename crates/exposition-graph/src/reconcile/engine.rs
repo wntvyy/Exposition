@@ -1042,6 +1042,8 @@ impl<'a> Planner<'a> {
             }
             created.insert(k.id.clone(), k.created_at_ms);
             match active.get(&k.path) {
+                // The same identity read again is not a second identity.
+                Some(existing) if existing == &k.id => {}
                 // Two live identities for one path (written outside the
                 // service's checks): the oldest stays the file's resource.
                 Some(existing) if created.get(existing).is_some_and(|c| (*c, existing) <= (k.created_at_ms, &k.id)) => {

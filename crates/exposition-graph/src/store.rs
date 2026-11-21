@@ -829,7 +829,7 @@ impl GraphStore {
         Ok(self.status_summary()?.0)
     }
 
-    fn count_rows(&self) -> StoreResult<(u32, u32)> {
+    pub(crate) fn count_rows(&self) -> StoreResult<(u32, u32)> {
         let entities: i64 =
             self.conn.query_row("SELECT count(*) FROM entities WHERE lifecycle != 'tombstoned'", [], |r| r.get(0))?;
         let relations: i64 = self.conn.query_row("SELECT count(*) FROM relations", [], |r| r.get(0))?;
@@ -1302,10 +1302,16 @@ impl GraphStore {
     /// resources at or under them.
     pub fn resource_keys(&self, prefixes: Option<&[WorkspacePath]>) -> StoreResult<Vec<ResourceKey>> {
         let mut out = Vec::new();
+        // Prefixes may overlap (a folder and a file beneath it, nested
+        // folders, one path named twice): each resource is returned once.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut read = |rows: rusqlite::MappedRows<'_, _>| -> StoreResult<()> {
             for row in rows {
                 let (id, key, roles, lifecycle, created): (String, Option<String>, String, String, i64) = row?;
                 let Some(path) = key.as_deref().and_then(|k| WorkspacePath::parse(k).ok()) else { continue };
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
                 out.push(ResourceKey {
                     path,
                     id: EntityId::parse(&id).map_err(|_| untrusted("entity id"))?,
@@ -1422,7 +1428,7 @@ impl GraphStore {
         Ok(self.status_summary()?.1)
     }
 
-    fn summarize_coverage(&self) -> StoreResult<CoverageSummary> {
+    pub(crate) fn summarize_coverage(&self) -> StoreResult<CoverageSummary> {
         let mut summary = CoverageSummary::default();
         let mut stmt = self.conn.prepare_cached(
             "SELECT CASE WHEN pending > 0 THEN 'pending' ELSE state END AS s, count(*), sum(unresolved)

@@ -290,3 +290,24 @@ fn a_scoped_pass_resolves_links_to_files_outside_its_scope_and_wakes_files_waiti
     assert!(svc.resource(&path("ch/one.tex")).unwrap().is_none());
     assert_eq!(unresolved("other/waits.tex"), 1, "the label is gone again");
 }
+
+/// A status part that cannot be read is empty on its own: the other part is
+/// still reported (unreadable coverage never reads as an empty graph).
+#[test]
+fn a_failed_coverage_read_does_not_zero_the_counts() {
+    let (_data, _project, _root, svc) = attached();
+    create_claim(&svc, "One");
+    let before = svc.status();
+    assert!(before.entities >= 2, "{before:?}");
+    svc.with_store(|s| {
+        s.connection().execute("DROP TABLE coverage", []).map_err(exposition_graph::store::StoreError::from)?;
+        Ok(())
+    })
+    .unwrap();
+    // A write makes the next status read the tables again.
+    create_claim(&svc, "Two");
+    let after = svc.status();
+    assert_eq!((after.entities, after.relations), (before.entities + 1, before.relations));
+    assert_eq!(after.revision, before.revision + 1);
+    assert_eq!(after.coverage.resources, 0);
+}

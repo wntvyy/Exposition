@@ -468,15 +468,17 @@ fn canonical(svc: &GraphService, evidence_order: &BTreeMap<String, usize>, overl
     let canon = |line: &str| -> String {
         let renamed = rename_ids(line, &names);
         match renamed.split_once(' ') {
-            Some((tag, body)) if matches!(tag, "E" | "B" | "R" | "C" | "J" | "O") => match serde_json::from_str::<Value>(body) {
-                Ok(mut v) => {
-                    strip(&mut v, TIMES);
-                    strip(&mut v, NEW_FLAGS);
-                    sort_arrays(&mut v);
-                    format!("{tag} {v}")
+            Some((tag, body)) if matches!(tag, "E" | "B" | "R" | "C" | "J" | "O") => {
+                match serde_json::from_str::<Value>(body) {
+                    Ok(mut v) => {
+                        strip(&mut v, TIMES);
+                        strip(&mut v, NEW_FLAGS);
+                        sort_arrays(&mut v);
+                        format!("{tag} {v}")
+                    }
+                    Err(_) => renamed,
                 }
-                Err(_) => renamed,
-            },
+            }
             _ => renamed,
         }
     };
@@ -895,15 +897,18 @@ impl Run {
             }
             if self.case_events && self.rng.chance(25) {
                 // The same folders, named with another case.
-                let flipped: Vec<String> = batch
-                    .iter()
-                    .filter_map(|p| p.split_once('/'))
-                    .map(|(dir, _)| {
-                        dir.chars()
-                            .map(|c| if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() })
-                            .collect::<String>()
-                    })
-                    .collect();
+                let flipped: Vec<String> =
+                    batch
+                        .iter()
+                        .filter_map(|p| p.split_once('/'))
+                        .map(|(dir, _)| {
+                            dir.chars()
+                                .map(|c| {
+                                    if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() }
+                                })
+                                .collect::<String>()
+                        })
+                        .collect();
                 batch.extend(flipped);
                 batch.sort();
                 batch.dedup();
@@ -972,7 +977,8 @@ impl Run {
             }
         }
         let incremental = records(&svc, false);
-        let pending: Vec<&String> = incremental.iter().filter(|l| l.starts_with("C ") && l.contains("\"state\":\"pending\"")).collect();
+        let pending: Vec<&String> =
+            incremental.iter().filter(|l| l.starts_with("C ") && l.contains("\"state\":\"pending\"")).collect();
         if !pending.is_empty() {
             let text = format!("coverage still pending after every event was reconciled: {pending:?}");
             self.finding(step, text);

@@ -29,14 +29,20 @@ fn full(svc: &GraphService) {
 
 fn pending(svc: &GraphService) -> Vec<String> {
     svc.with_store(|s| {
-        Ok(s.all_coverage()?.into_iter().filter(|c| c.state == CoverageState::Pending).map(|c| c.path.to_string()).collect())
+        Ok(s.all_coverage()?
+            .into_iter()
+            .filter(|c| c.state == CoverageState::Pending)
+            .map(|c| c.path.to_string())
+            .collect())
     })
     .unwrap()
 }
 
 fn live_resources(svc: &GraphService) -> Vec<String> {
     let mut out: Vec<String> = svc
-        .with_store(|s| Ok(s.resource_keys(None)?.into_iter().filter(|k| !k.tombstoned).map(|k| k.path.to_string()).collect()))
+        .with_store(|s| {
+            Ok(s.resource_keys(None)?.into_iter().filter(|k| !k.tombstoned).map(|k| k.path.to_string()).collect())
+        })
         .unwrap();
     out.sort();
     out
@@ -76,10 +82,8 @@ fn folder_ranges_match_exactly_the_folder_and_what_is_beneath_it() {
     }
     full(&svc);
     let beneath = |dir: &str| -> Vec<String> {
-        let mut want: Vec<String> = live_resources(&svc)
-            .into_iter()
-            .filter(|p| p == dir || p.starts_with(&format!("{dir}/")))
-            .collect();
+        let mut want: Vec<String> =
+            live_resources(&svc).into_iter().filter(|p| p == dir || p.starts_with(&format!("{dir}/"))).collect();
         want.sort();
         want
     };
@@ -131,7 +135,9 @@ fn a_folder_named_in_another_case() {
     let marked = svc.mark_pending(&[path("notes")]).unwrap();
     println!("CASE mark_pending(notes) marked {marked} rows; pending {:?}", pending(&svc));
     let (keys, checkpoints) = svc
-        .with_store(|s| Ok((s.resource_keys(Some(&[path("notes")]))?.len(), s.checkpoints_under(&[path("notes")])?.len())))
+        .with_store(|s| {
+            Ok((s.resource_keys(Some(&[path("notes")]))?.len(), s.checkpoints_under(&[path("notes")])?.len()))
+        })
         .unwrap();
     println!("CASE resource_keys(notes) {keys}; checkpoints_under(notes) {checkpoints}");
     let report = svc.reconcile(&ReconcileOptions { scope: Scope::Paths(vec![path("notes")]), force: false }).unwrap();
@@ -185,14 +191,12 @@ fn a_case_only_folder_rename_reported_by_the_watcher() {
     assert!(pending(&svc).is_empty());
 }
 
-
 /// FINDING (regression against 92bf299): a pass over a few paths that
 /// overlap (a folder and a file beneath it, as a watcher reports a new or
 /// moved folder together with its files) reads the file's resource once per
 /// path, takes the second read for a second identity of the file, and
 /// tombstones the file's only resource.
 #[test]
-#[ignore = "review finding: fails on 4b84770/3d91458, passes on 92bf299"]
 fn a_pass_over_a_folder_and_a_file_beneath_it_keeps_the_file() {
     let (_data, _project, root, svc) = attached();
     write(&root, "notes/a.md", "# A\n");

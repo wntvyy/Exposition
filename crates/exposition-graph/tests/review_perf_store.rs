@@ -344,9 +344,8 @@ fn the_row_budget_refuses_exactly_what_counting_every_table_refuses() {
                         let mut expect_meta = meta;
                         let mut expect_views = views;
                         if delete {
-                            let gone = w
-                                .tx
-                                .execute(
+                            let gone =
+                                w.tx.execute(
                                     "DELETE FROM meta WHERE key IN (SELECT key FROM meta WHERE key LIKE 'k%' LIMIT ?1)",
                                     [m],
                                 )
@@ -391,8 +390,16 @@ fn the_row_budget_refuses_exactly_what_counting_every_table_refuses() {
                             if which == 3 {
                                 refused_untouched += 1;
                             }
-                            assert_eq!(rows(store.connection(), "meta"), meta, "nothing is written (seed {seed} step {step})");
-                            assert_eq!(rows(store.connection(), "views"), views, "nothing is written (seed {seed} step {step})");
+                            assert_eq!(
+                                rows(store.connection(), "meta"),
+                                meta,
+                                "nothing is written (seed {seed} step {step})"
+                            );
+                            assert_eq!(
+                                rows(store.connection(), "views"),
+                                views,
+                                "nothing is written (seed {seed} step {step})"
+                            );
                         }
                         (other, fits) => panic!(
                             "seed {seed} step {step}: commit {other:?} but counting every table {} it (meta {expect_meta}/{meta_limit}, views {expect_views}/{views_limit})",
@@ -439,7 +446,10 @@ fn the_row_budget_refuses_exactly_what_counting_every_table_refuses() {
                 7 => {
                     store
                         .connection()
-                        .execute("DELETE FROM meta WHERE key IN (SELECT key FROM meta WHERE key LIKE 'k%' LIMIT ?1)", [m])
+                        .execute(
+                            "DELETE FROM meta WHERE key IN (SELECT key FROM meta WHERE key LIKE 'k%' LIMIT ?1)",
+                            [m],
+                        )
                         .unwrap();
                     store
                         .connection()
@@ -460,7 +470,10 @@ fn the_row_budget_refuses_exactly_what_counting_every_table_refuses() {
                 }
                 9 => {
                     second
-                        .execute("DELETE FROM meta WHERE key IN (SELECT key FROM meta WHERE key LIKE 'k%' LIMIT ?1)", [m])
+                        .execute(
+                            "DELETE FROM meta WHERE key IN (SELECT key FROM meta WHERE key LIKE 'k%' LIMIT ?1)",
+                            [m],
+                        )
                         .unwrap();
                     let room = views_limit - views;
                     if rng.below(3) == 0 {
@@ -482,8 +495,13 @@ fn the_row_budget_refuses_exactly_what_counting_every_table_refuses() {
                 }
             }
         }
-        println!("BUDGET seed {seed}: {accepted} accepted, {refused} refused, {refused_untouched} refused without adding a row");
-        assert!(accepted > 30 && refused > 30 && refused_untouched > 0, "seed {seed}: {accepted} accepted, {refused} refused, {refused_untouched} refused without adding a row");
+        println!(
+            "BUDGET seed {seed}: {accepted} accepted, {refused} refused, {refused_untouched} refused without adding a row"
+        );
+        assert!(
+            accepted > 30 && refused > 30 && refused_untouched > 0,
+            "seed {seed}: {accepted} accepted, {refused} refused, {refused_untouched} refused without adding a row"
+        );
     }
 }
 
@@ -499,11 +517,13 @@ fn a_refused_pass_leaves_the_status_and_the_next_pass_right() {
     assert_eq!(unresolved("waits.tex"), 2);
     // The meta table is filled past its limit outside the helpers: every
     // commit is refused.
-    let room = row_limit("meta") - i64::from(svc.with_store(|s| Ok(count(s.connection(), "SELECT count(*) FROM meta"))).unwrap());
+    let room = row_limit("meta")
+        - i64::from(svc.with_store(|s| Ok(count(s.connection(), "SELECT count(*) FROM meta"))).unwrap());
     svc.with_store(|s| {
         let tx = s.transaction()?;
         for i in 0..=room {
-            tx.execute("INSERT INTO meta (key, value) VALUES (?1, 'v')", [format!("fill{i}")]).map_err(StoreError::from)?;
+            tx.execute("INSERT INTO meta (key, value) VALUES (?1, 'v')", [format!("fill{i}")])
+                .map_err(StoreError::from)?;
         }
         tx.commit().map_err(StoreError::from)?;
         Ok(())
@@ -528,7 +548,8 @@ fn a_refused_pass_leaves_the_status_and_the_next_pass_right() {
     svc.with_store(|s| {
         let tx = s.transaction()?;
         for i in 0..=room {
-            tx.execute("INSERT INTO meta (key, value) VALUES (?1, 'v')", [format!("fill{i}")]).map_err(StoreError::from)?;
+            tx.execute("INSERT INTO meta (key, value) VALUES (?1, 'v')", [format!("fill{i}")])
+                .map_err(StoreError::from)?;
         }
         tx.commit().map_err(StoreError::from)?;
         Ok(())
@@ -554,7 +575,9 @@ fn evidence(subject: &EntityId, n: u64, input: Option<&WorkspacePath>) -> Eviden
         subject: Some(subject.clone()),
         operation: OperationRef { kind: "review".into(), id: format!("r{n}") },
         inputs: input
-            .map(|p| vec![VersionedInput { path: p.clone(), content_hash: Some("h".into()), revision: None, unsaved: false }])
+            .map(|p| {
+                vec![VersionedInput { path: p.clone(), content_hash: Some("h".into()), revision: None, unsaved: false }]
+            })
             .unwrap_or_default(),
         outcome: EvidenceOutcome::Succeeded,
         environment: vec![],
@@ -600,7 +623,6 @@ fn evidence_beyond_what_a_detail_or_an_impact_report_lists_is_flagged() {
 /// of one subject are read through `evidence_for_subject` (the newest 200,
 /// silently), so the 201st record of a subject is neither listed nor flagged.
 #[test]
-#[ignore = "review finding: a subject's evidence beyond 200 records is still dropped silently by impact"]
 fn impact_says_when_a_subject_has_more_evidence_than_it_lists() {
     let (_data, _project, _root, svc) = attached();
     let many = svc
@@ -619,7 +641,11 @@ fn impact_says_when_a_subject_has_more_evidence_than_it_lists() {
         .unwrap();
     let report = svc.impact(&ImpactRequest { entities: vec![many], max_depth: None, max_items: None }).unwrap();
     assert!(report.evidence.len() <= 200);
-    assert!(report.truncated, "201 records exist, {} are listed, and the report does not say so", report.evidence.len());
+    assert!(
+        report.truncated,
+        "201 records exist, {} are listed, and the report does not say so",
+        report.evidence.len()
+    );
 }
 
 /// More than 20,000 declarations bound in one file, each used from another
@@ -655,14 +681,13 @@ fn a_file_with_more_bound_items_than_the_former_cap_is_planned_completely() {
                 last = Some(lemma.id);
             }
             // The entity that sorts last by id among those bound in the file.
-            let mut bound: Vec<EntityId> = w
-                .tx
-                .prepare("SELECT entity_id FROM bindings WHERE path = 'big.md' ORDER BY entity_id DESC LIMIT 1")
-                .map_err(StoreError::from)?
-                .query_map([], |r| r.get::<_, String>(0))
-                .map_err(StoreError::from)?
-                .map(|r| EntityId::parse(&r.unwrap()).unwrap())
-                .collect();
+            let mut bound: Vec<EntityId> =
+                w.tx.prepare("SELECT entity_id FROM bindings WHERE path = 'big.md' ORDER BY entity_id DESC LIMIT 1")
+                    .map_err(StoreError::from)?
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .map_err(StoreError::from)?
+                    .map(|r| EntityId::parse(&r.unwrap()).unwrap())
+                    .collect();
             let last_by_id = bound.pop().or(last).unwrap();
             let dependent = entity(EntityKind::Theorem, "Depends on the last bound lemma");
             w.put_entity(&dependent)?;
@@ -680,7 +705,8 @@ fn a_file_with_more_bound_items_than_the_former_cap_is_planned_completely() {
     .unwrap();
     // Impact of the file reaches the dependent of the entity bound last.
     let resource = svc.resource(&big).unwrap().unwrap();
-    let report = svc.impact(&ImpactRequest { entities: vec![resource.id], max_depth: None, max_items: Some(1000) }).unwrap();
+    let report =
+        svc.impact(&ImpactRequest { entities: vec![resource.id], max_depth: None, max_items: Some(1000) }).unwrap();
     let reaches = report.items.iter().any(|i| i.entity.id == dependent || i.entity.id == last);
     println!(
         "BOUND impact of the file: {} items, truncated {}, work limit {}, reaches the last bound entity or its dependent: {reaches}",
