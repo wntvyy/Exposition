@@ -2412,4 +2412,6 @@ mod tests {
         assert!(check_language(RuntimeLanguage::Julia, Some("jl")).is_ok());
         assert!(check_language(RuntimeLanguage::Julia, None).is_err());
     }
+
+    mod review;
 }

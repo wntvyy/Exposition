@@ -1683,4 +1683,5 @@ fn the_plan_hash_covers_payloads() {
 mod cost;
 mod flow;
 mod qc;
+mod review_listing;
 mod sched;
