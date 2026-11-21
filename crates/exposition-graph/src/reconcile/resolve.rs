@@ -35,10 +35,93 @@ enum Target {
     Missing,
 }
 
+/// The live entities of one name, as a pass leaves them.
+enum Named {
+    None,
+    One(EntityId),
+    Many(usize),
+}
+
 impl Planner<'_> {
-    /// Live entities (other than files/folders) whose natural key is `key`,
-    /// as of this pass.
-    /// Stored live entities whose natural key is `key` (before this pass).
+    /// The live entities of the admitted `kinds` whose natural key is `key`,
+    /// as this pass leaves them: the one, or how many.
+    ///
+    /// One read of a key returns a bounded number of rows. When the stored
+    /// entities of the key fill it, the rows read are not the whole answer:
+    /// the number is then counted (the stored count, less what this pass
+    /// tombstoned or renamed, plus what it added), and a single survivor is
+    /// looked up page by page, so an incremental pass and a full one report
+    /// the same count and neither takes a part for the whole.
+    fn named(&self, key: &str, kinds: impl Fn(EntityKind) -> bool) -> StoreResult<Named> {
+        let seen = self.keyed_entities(key, &kinds)?;
+        let from = |seen: &[Entity]| match seen {
+            [] => Named::None,
+            [one] => Named::One(one.id.clone()),
+            many => Named::Many(many.len()),
+        };
+        if self.stored_with_key(key)?.len() < crate::store::KEY_READ_LIMIT {
+            return Ok(from(&seen));
+        }
+        let was_stored = |id: &EntityId| -> StoreResult<bool> {
+            Ok(self.store.entity(id)?.is_some_and(|e| {
+                e.lifecycle != Lifecycle::Tombstoned && e.key.as_deref() == Some(key) && kinds(e.kind)
+            }))
+        };
+        let stored: usize =
+            self.store.count_live_entities_with_key(key)?.into_iter().filter(|(k, _)| kinds(*k)).map(|(_, n)| n).sum();
+        // Stored ones this pass tombstoned, or gave another key.
+        let mut left = 0usize;
+        for id in &self.tombstoned_now {
+            if self.entities.get(id).is_some_and(|e| e.key.as_deref() == Some(key)) && was_stored(id)? {
+                left += 1;
+            }
+        }
+        for id in self.unkeyed.get(key).into_iter().flatten() {
+            let renamed = self.entities.get(id).is_some_and(|e| e.key.as_deref() != Some(key));
+            if renamed && !self.tombstoned_now.contains(id) && was_stored(id)? {
+                left += 1;
+            }
+        }
+        // Planned ones that were not among the stored.
+        let mut arrived: Vec<&Entity> = Vec::new();
+        for e in &seen {
+            if self.keyed.get(key).is_some_and(|ids| ids.contains(&e.id))
+                && (self.created_now.contains(&e.id) || !was_stored(&e.id)?)
+            {
+                arrived.push(e);
+            }
+        }
+        match (stored.saturating_sub(left), arrived.as_slice()) {
+            (0, arrived) => Ok(match arrived {
+                [] => Named::None,
+                [one] => Named::One(one.id.clone()),
+                many => Named::Many(many.len()),
+            }),
+            (1, []) => {
+                // The one stored entity this pass left: not necessarily
+                // among the rows read first.
+                let mut after: Option<EntityId> = None;
+                loop {
+                    let page = self.store.live_entities_with_key_after(key, after.as_ref())?;
+                    let Some(last) = page.last().map(|e| e.id.clone()) else { return Ok(Named::None) };
+                    for stored in &page {
+                        if self.tombstoned_now.contains(&stored.id) || !kinds(stored.kind) {
+                            continue;
+                        }
+                        let now = self.entity(&stored.id)?;
+                        if now.is_some_and(|e| e.lifecycle != Lifecycle::Tombstoned && e.key.as_deref() == Some(key)) {
+                            return Ok(Named::One(stored.id.clone()));
+                        }
+                    }
+                    after = Some(last);
+                }
+            }
+            (kept, arrived) => Ok(Named::Many(kept + arrived.len())),
+        }
+    }
+
+    /// Stored live entities whose natural key is `key` (before this pass):
+    /// the rows of one bounded read.
     pub(crate) fn stored_with_key(&self, key: &str) -> StoreResult<Vec<EntityId>> {
         if let Some(ids) = self.key_cache.borrow().get(key) {
             return Ok(ids.clone());
@@ -48,6 +131,8 @@ impl Planner<'_> {
         Ok(ids)
     }
 
+    /// The live entities of `key` among the rows read and those planned
+    /// (see [`Self::named`] for the whole answer).
     fn keyed_entities(&self, key: &str, kinds: impl Fn(EntityKind) -> bool) -> StoreResult<Vec<Entity>> {
         let mut ids: BTreeSet<EntityId> = BTreeSet::new();
         ids.extend(self.stored_with_key(key)?);
@@ -99,23 +184,22 @@ impl Planner<'_> {
             [] => {}
             many => return Ok(Target::Ambiguous(many.len())),
         }
-        let elsewhere = self.keyed_entities(name, |k| {
+        let elsewhere = self.named(name, |k| {
             !matches!(k, EntityKind::Resource | EntityKind::Folder | EntityKind::Reference | EntityKind::Project)
         })?;
-        match elsewhere.len() {
-            1 => Ok(Target::Entity(elsewhere[0].id.clone())),
-            0 if self.label_exists(name, body)? => Ok(Target::NotAnEntity),
-            0 => Ok(Target::Missing),
-            n => Ok(Target::Ambiguous(n)),
+        match elsewhere {
+            Named::One(id) => Ok(Target::Entity(id)),
+            Named::None if self.label_exists(name, body)? => Ok(Target::NotAnEntity),
+            Named::None => Ok(Target::Missing),
+            Named::Many(n) => Ok(Target::Ambiguous(n)),
         }
     }
 
     fn resolve_citation(&self, key: &str) -> StoreResult<Target> {
-        let refs = self.keyed_entities(key, |k| k == EntityKind::Reference)?;
-        Ok(match refs.len() {
-            1 => Target::Entity(refs[0].id.clone()),
-            0 => Target::Missing,
-            n => Target::Ambiguous(n),
+        Ok(match self.named(key, |k| k == EntityKind::Reference)? {
+            Named::One(id) => Target::Entity(id),
+            Named::None => Target::Missing,
+            Named::Many(n) => Target::Ambiguous(n),
         })
     }
 

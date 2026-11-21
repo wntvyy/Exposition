@@ -337,10 +337,14 @@ fn a_second_declaration_of_a_label_costs_the_references_to_it() {
         };
         declare_again(3);
         assert!(detail(4).contains("\u{201c}lem:3\u{201d} matches 2 declarations"), "{}", detail(4));
+        // A warm-up of the measured shape (one label unique again, another
+        // declared twice): the counters of a cached statement start at its
+        // first use.
+        declare_again(6);
         svc.status();
-        // Measured: `lem:3` is unique again, `lem:9` is declared twice.
+        // Measured: `lem:6` is unique again, `lem:9` is declared twice.
         let (_, work) = sql_of(|| declare_again(9));
-        assert!(!detail(4).contains("lem:3"), "{}", detail(4));
+        assert!(!detail(4).contains("lem:3") && !detail(7).contains("lem:6"), "{} / {}", detail(4), detail(7));
         assert!(detail(10).contains("\u{201c}lem:9\u{201d} matches 2 declarations"), "{}", detail(10));
         work
     };

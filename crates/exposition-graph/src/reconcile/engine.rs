@@ -740,6 +740,8 @@ pub(crate) struct Planner<'a> {
     pub(crate) resources: Resources<'a>,
     /// Entities whose natural key was set in this pass (for resolution).
     pub(crate) keyed: HashMap<String, BTreeSet<EntityId>>,
+    /// Entities whose natural key was this one before the pass changed it.
+    pub(crate) unkeyed: HashMap<String, BTreeSet<EntityId>>,
     pub(crate) tombstoned_now: BTreeSet<EntityId>,
     /// Resources moved/renamed in this pass.
     moved_now: BTreeSet<EntityId>,
@@ -798,6 +800,7 @@ impl<'a> Planner<'a> {
             key_cache: std::cell::RefCell::new(HashMap::new()),
             resources: Resources::new(store),
             keyed: HashMap::new(),
+            unkeyed: HashMap::new(),
             tombstoned_now: BTreeSet::new(),
             moved_now: BTreeSet::new(),
             resolve: BTreeSet::new(),
@@ -896,6 +899,11 @@ impl<'a> Planner<'a> {
         {
             self.keyed.entry(k.clone()).or_default().insert(after.id.clone());
             self.targets_added = true;
+        }
+        if before.key != after.key
+            && let Some(k) = &before.key
+        {
+            self.unkeyed.entry(k.clone()).or_default().insert(after.id.clone());
         }
         if after.lifecycle == Lifecycle::Tombstoned && before.lifecycle != Lifecycle::Tombstoned {
             self.tombstoned_now.insert(after.id.clone());

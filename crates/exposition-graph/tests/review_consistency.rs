@@ -8,7 +8,7 @@
 //! copy is reindexed, not the graph under test, so a difference is never
 //! repaired on the way to the next step.
 //!
-//! A test that exposes a defect is `#[ignore = "review: defect — ..."]`.
+//! Every test is enabled: the defects three of them exposed are fixed.
 
 #![allow(unsafe_code)]
 
@@ -458,7 +458,6 @@ fn three_declarations_of_a_label_and_back_to_one() {
 /// the count a reference reports depends on whether the declarations were
 /// created in the pass (all are counted) or stored (64 are read).
 #[test]
-#[ignore = "review: defect — a label with more than 64 declarations: the first index reports 'matches 70 declarations', a forced reindex 'matches 64' (the read of a key stops at 64 rows without a flag)"]
 fn a_label_declared_in_more_files_than_one_read_of_a_key_returns() {
     let p = open(None);
     for i in 0..70 {
@@ -1471,7 +1470,6 @@ fn spellings_the_file_system_folds_but_unicode_lowercase_does_not() {
 
 /// The short (8.3) name of a file reaches the file but is not its name.
 #[test]
-#[ignore = "review: defect — a pass over the 8.3 short name of an indexed file admits a second resource for it (refused before this change)"]
 fn a_short_name_is_not_a_second_resource() {
     let p = open(None);
     p.write("docs/a long file name.md", "# Long\n");
@@ -1532,7 +1530,6 @@ fn a_path_through_a_junction_is_neither_scanned_nor_respelled() {
 /// another case is respelled to the target's name: a key no path of the
 /// project has.
 #[test]
-#[ignore = "review: defect — on_disk_spelling respells a path through a junction to the target folder's spelling (data/a.md -> DATA/a.md), so ensure_resource keys it by a path the project does not contain"]
 fn a_path_through_a_junction_keeps_its_own_spelling() {
     let p = open(None);
     if !cfg!(windows) {

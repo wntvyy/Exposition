@@ -271,11 +271,15 @@ or product behaviour:
   edited by it.
 - **`build:app` with nothing changed** takes about 23 s.
 
-Known differences between an incremental graph pass and a full reindex that
-predate this work (a reference that stays resolved after a second declaration
-of its label; a Lean module that goes stale when a lakefile moves; duplicate
-resources for a folder path given in another letter case) are recorded by the
-strict mode of `review_perf_differential` and are not yet fixed.
+- **Graph files at the awaited-target cap.** A file that waits for more than
+  200 link targets is recorded as waiting for any target and is resolved again
+  (about 100 statements, from its stored index) by every pass that introduces
+  or withdraws a target anywhere. The cost is bounded per such file, not by the
+  change; lifting it needs a larger or separately stored awaited list.
+- **A label with more declarations than one read of a key returns (64).** The
+  number a reference reports is counted, and the same from an incremental pass
+  and a reindex; only when all but one are removed in one pass are the stored
+  declarations of that label paged through to find the one left.
 
 ## For the agent runtime rework
 
