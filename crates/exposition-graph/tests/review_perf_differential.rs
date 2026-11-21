@@ -25,6 +25,9 @@
 //!   the full reindex (by default: files, folders, their bindings and
 //!   containment, which agreed at the base revision).
 //! - `EXPOSITION_DIFF_NO_FULL`: skip the full reindex (hashes only).
+//! - `EXPOSITION_DIFF_NO_OVERLAP`: never name a folder and a path beneath
+//!   it in one pass (the reviewed code tombstones such files: see the
+//!   ignored test in `review_perf_paths.rs`).
 //! - `EXPOSITION_DIFF_CASE`: also deliver events whose folder case differs
 //!   from the stored paths.
 
@@ -465,7 +468,7 @@ fn canonical(svc: &GraphService, evidence_order: &BTreeMap<String, usize>, overl
     let canon = |line: &str| -> String {
         let renamed = rename_ids(line, &names);
         match renamed.split_once(' ') {
-            Some((tag, body)) if matches!(tag, "E" | "B" | "R" | "C" | "J") => match serde_json::from_str::<Value>(body) {
+            Some((tag, body)) if matches!(tag, "E" | "B" | "R" | "C" | "J" | "O") => match serde_json::from_str::<Value>(body) {
                 Ok(mut v) => {
                     strip(&mut v, TIMES);
                     strip(&mut v, NEW_FLAGS);
@@ -510,7 +513,7 @@ fn canonical(svc: &GraphService, evidence_order: &BTreeMap<String, usize>, overl
                     strip(&mut v, &["cycles"]);
                     if let Some(items) = v.get_mut("items").and_then(Value::as_array_mut) {
                         for item in items {
-                            strip(item, &["path"]);
+                            strip(item, &["path", "reason", "action", "locatedIn"]);
                         }
                     }
                     json("impact", v)
@@ -536,38 +539,29 @@ fn canonical(svc: &GraphService, evidence_order: &BTreeMap<String, usize>, overl
 /// An overlay as text (ids as stored; provisional ids are derived from the
 /// content, not minted).
 fn overlay_text(entry: &overlay::OverlayEntry) -> String {
-    let mut entities: Vec<String> = entry
-        .entities
-        .values()
-        .map(|e| {
-            let mut v = serde_json::to_value(e).unwrap();
-            strip(&mut v, TIMES);
-            v.to_string()
-        })
-        .collect();
-    entities.sort();
-    let mut bindings: Vec<String> =
-        entry.bindings.iter().map(|(id, b)| format!("{id} {}", serde_json::to_value(b).unwrap())).collect();
-    bindings.sort();
-    let mut added: Vec<String> = entry
-        .added
+    let mut entities: Vec<Value> = entry.entities.values().map(|e| serde_json::to_value(e).unwrap()).collect();
+    entities.sort_by_key(|v| v.to_string());
+    let mut bindings: Vec<Value> = entry
+        .bindings
         .iter()
-        .map(|r| {
-            let mut v = serde_json::to_value(r).unwrap();
-            strip(&mut v, TIMES);
-            v.to_string()
-        })
+        .map(|(id, b)| serde_json::json!({ "entity": id, "bindings": serde_json::to_value(b).unwrap() }))
         .collect();
-    added.sort();
-    format!(
-        "OVERLAY {} rev {} hash {} entities {entities:?} bindings {bindings:?} added {added:?} removed {:?} coverage {} provisional {:?}",
-        entry.path,
-        entry.revision,
-        entry.content_hash,
-        entry.removed,
-        serde_json::to_value(&entry.coverage).unwrap(),
-        entry.provisional
-    )
+    bindings.sort_by_key(|v| v.to_string());
+    let mut added: Vec<Value> = entry.added.iter().map(|r| serde_json::to_value(r).unwrap()).collect();
+    added.sort_by_key(|v| v.to_string());
+    let mut v = serde_json::json!({
+        "overlay": entry.path,
+        "revision": entry.revision,
+        "contentHash": entry.content_hash,
+        "entities": entities,
+        "bindings": bindings,
+        "added": added,
+        "removed": entry.removed,
+        "coverage": serde_json::to_value(&entry.coverage).unwrap(),
+        "provisional": entry.provisional,
+    });
+    strip(&mut v, TIMES);
+    format!("O {v}")
 }
 
 // ----- the run -----
@@ -915,6 +909,11 @@ impl Run {
                 batch.dedup();
                 self.count("case-events");
             }
+            if std::env::var_os("EXPOSITION_DIFF_NO_OVERLAP").is_some() {
+                // A folder covers what is beneath it: name each file once.
+                let all = batch.clone();
+                batch.retain(|p| !all.iter().any(|d| d != p && p.starts_with(&format!("{d}/"))));
+            }
             let wps: Vec<WorkspacePath> = batch.iter().map(|p| wp(p)).collect();
             let svc = self.a.svc.clone();
             svc.mark_pending(&wps).unwrap();
@@ -967,7 +966,7 @@ impl Run {
                     svc.set_overlay(svc.generation(), entry);
                 }
                 None => {
-                    overlays_a.push(format!("OVERLAY {path} none"));
+                    overlays_a.push(format!("O {{\"overlay\":\"{path}\",\"none\":true}}"));
                     svc.clear_overlay(&wp(path));
                 }
             }
@@ -989,7 +988,7 @@ impl Run {
         for (path, (revision, text)) in &self.overlays {
             overlays_b.push(match overlay::compute(&b.svc, &wp(path), *revision, text).unwrap() {
                 Some(entry) => overlay_text(&entry),
-                None => format!("OVERLAY {path} none"),
+                None => format!("O {{\"overlay\":\"{path}\",\"none\":true}}"),
             });
         }
         b.svc.detach();
