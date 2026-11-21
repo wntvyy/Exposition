@@ -8,7 +8,7 @@
 //! [`TRUST_CHANGED`] so views that show trust re-check it; Lean and research
 //! follow it in their services, and watched LaTeX entries are rebuilt here.
 
-use exposition_core::job::JobId;
+use exposition_core::job::{JobEvent, JobId};
 use exposition_execution::{JobSummary, OutputPage, ToolchainInfo, TrustChanged, TrustError, TrustStatus};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::broadcast::error::RecvError;
@@ -193,6 +193,17 @@ pub async fn dev_start_workspace_job(
     Ok(state.execution.launch(spec))
 }
 
+/// A job event as the webview gets it. An output event only announces that
+/// a job has new output: the webview reads output by sequence number through
+/// `job_output` (the complete, bounded log), so the text is not sent a second
+/// time with the event. Services in Rust still receive it.
+fn for_webview(event: JobEvent) -> JobEvent {
+    match event {
+        JobEvent::Output { id, stream, .. } => JobEvent::Output { id, stream, text: String::new() },
+        other => other,
+    }
+}
+
 /// Forward job events to the webview in order.
 pub fn forward_events(app: AppHandle) {
     let mut rx = app.state::<AppState>().execution.subscribe();
@@ -200,7 +211,7 @@ pub fn forward_events(app: AppHandle) {
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    let _ = app.emit(JOB_EVENT, &event);
+                    let _ = app.emit(JOB_EVENT, &for_webview(event));
                 }
                 Err(RecvError::Lagged(_)) => {
                     let _ = app.emit(JOB_RESYNC, ());
@@ -254,4 +265,23 @@ pub fn add_dev_capability(app: &AppHandle) -> tauri::Result<()> {
             .permission("allow-dev-start-probe-job")
             .permission("allow-dev-start-workspace-job"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exposition_core::job::{JobOutcome, JobResult, OutputStream};
+
+    #[test]
+    fn output_events_reach_the_webview_without_their_text_and_others_unchanged() {
+        let id = JobId("job-1".into());
+        let output = JobEvent::Output { id: id.clone(), stream: OutputStream::Stderr, text: "x".repeat(16 * 1024) };
+        let sent = for_webview(output);
+        assert_eq!(sent, JobEvent::Output { id: id.clone(), stream: OutputStream::Stderr, text: String::new() });
+        assert!(serde_json::to_string(&sent).unwrap().len() < 128, "an output event is a small notification");
+        let finished = JobEvent::Finished {
+            result: JobResult { id, outcome: JobOutcome::Exited { code: 0 }, duration_ms: 5, output_truncated: true },
+        };
+        assert_eq!(for_webview(finished.clone()), finished);
+    }
 }

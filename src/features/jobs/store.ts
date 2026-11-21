@@ -140,7 +140,10 @@ export function startJobsTracking(): void {
   if (started) return;
   started = true;
   void events.jobs((event) => {
-    scheduleRefresh();
+    // The list changes only on lifecycle events. An output event changes no
+    // listed field: it only tells the open viewer to pull, by sequence
+    // number, from the service's log (the event's text is not used).
+    if (event.kind !== "output") scheduleRefresh();
     if (event.kind === "output" || event.kind === "finished") {
       const id = event.kind === "output" ? event.id : event.result.id;
       if (useJobs.getState().selected === id) void pullOutput(id);
