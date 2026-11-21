@@ -258,6 +258,49 @@ fn tex_page_images_and_page_map() {
         );
         perf("tex.first_page_map", &scale, &map_first, &[]);
         perf("tex.page_map_again", &scale, &map_again, &[]);
+
+        // Where the first page-map query spends its time: glyph extraction
+        // from the PDF, mapping glyphs to source, and building the shared map.
+        let latest = env.build(TexBuildMode::Draft);
+        let stored = env.service.build(&latest.result.id).expect("retained build");
+        let session = exposition_tex::TexPageSession::open(&stored.build).expect("page session");
+        let (mut total, mut extract, mut map, mut assemble) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..5 {
+            let all = Instant::now();
+            let (mut extract_ms, mut map_ms) = (0.0, 0.0);
+            let mut mapped = Vec::new();
+            for page in 0..session.page_count() {
+                let started = Instant::now();
+                let glyphs = session.pdf.extract_glyphs_and_rules(page).unwrap();
+                extract_ms += ms(started);
+                let started = Instant::now();
+                let mapping = exposition_tex::mapping::map_page(page as u32, glyphs, &session.synctex, &session.sources);
+                map_ms += ms(started);
+                mapped.push((mapping, session.pdf.page_size(page).unwrap()));
+            }
+            let started = Instant::now();
+            let built = exposition_tex::page_map::build_page_map(&mapped);
+            assemble.push(ms(started));
+            assert_eq!(built.pages.len(), pages);
+            extract.push(extract_ms);
+            map.push(map_ms);
+            total.push(ms(all));
+        }
+        let median = |values: &[f64]| {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            sorted[sorted.len() / 2]
+        };
+        perf(
+            "tex.page_map_breakdown",
+            &scale,
+            &total,
+            &[
+                ("extract_glyphs_ms_median", median(&extract)),
+                ("map_to_source_ms_median", median(&map)),
+                ("build_map_ms_median", median(&assemble)),
+            ],
+        );
     }
 }
 
