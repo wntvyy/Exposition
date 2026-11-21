@@ -154,8 +154,15 @@ struct Shared {
     workspace: Mutex<Option<Workspace>>,
     /// Discovery report and the project it was made for.
     environments: Mutex<Option<(Option<DiscoveredFor>, EnvironmentReport)>>,
+    /// Held by the one discovery that runs at a time: requests that arrive
+    /// meanwhile wait for it and use its report instead of probing every
+    /// interpreter again.
+    discovering: tokio::sync::Mutex<()>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     runs: Mutex<HashMap<String, RunState>>,
+    /// Finished runs that still hold their output and code in memory although
+    /// their record is on disk, oldest first ([`Shared::run_stored`]).
+    stored_runs: Mutex<VecDeque<String>>,
     /// Workflow batch runs executing now (their manifests read "running"
     /// legitimately and are not settled as orphans).
     batches: Mutex<HashSet<String>>,
@@ -169,9 +176,52 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Finished runs whose output and code stay in memory after their record
+/// was written (the most recent ones; older ones are read from the project).
+const RECENT_RUNS_IN_MEMORY: usize = 16;
+
 impl Shared {
     fn emit(&self, event: ResearchEvent) {
         let _ = self.events.send(event);
+    }
+
+    /// A finished run's manifest and transcript are on disk. Its in-memory
+    /// output and code are now a derived copy: the most recent
+    /// [`RECENT_RUNS_IN_MEMORY`] are kept, older ones released
+    /// ([`RunState::release`]). Runs whose record could not be written never
+    /// come here and keep everything.
+    fn run_stored(&self, run_id: &str) {
+        let overflow: Vec<String> = {
+            let mut recent = lock(&self.stored_runs);
+            recent.push_back(run_id.to_owned());
+            let extra = recent.len().saturating_sub(RECENT_RUNS_IN_MEMORY);
+            recent.drain(..extra).collect()
+        };
+        if !overflow.is_empty() {
+            let mut runs = lock(&self.runs);
+            for id in overflow {
+                if let Some(run) = runs.get_mut(&id) {
+                    run.release();
+                }
+            }
+        }
+    }
+
+    /// Release the stored runs of every project but `keep` (the open project
+    /// changed: their output is not reachable until that project is opened
+    /// again, and then it is read from its records).
+    fn release_runs_outside(&self, keep: Option<&Path>) {
+        let mut released = Vec::new();
+        {
+            let mut runs = lock(&self.runs);
+            for run in runs.values_mut().filter(|run| keep != Some(run.root.as_path())) {
+                run.release();
+                if run.released.is_some() {
+                    released.push(run.id().to_owned());
+                }
+            }
+        }
+        lock(&self.stored_runs).retain(|id| !released.contains(id));
     }
 
     fn research_dir(&self, name: &str) -> Result<PathBuf, ResearchError> {
@@ -194,8 +244,10 @@ impl ResearchService {
                 events,
                 workspace: Mutex::new(None),
                 environments: Mutex::new(None),
+                discovering: tokio::sync::Mutex::new(()),
                 sessions: Mutex::new(HashMap::new()),
                 runs: Mutex::new(HashMap::new()),
+                stored_runs: Mutex::new(VecDeque::new()),
                 batches: Mutex::new(HashSet::new()),
             }),
         }
@@ -242,6 +294,7 @@ impl ResearchService {
                 Some(&canonical),
                 "The project folder changed; this session's kernel was stopped.",
             );
+            self.shared.release_runs_outside(Some(&canonical));
             *lock(&self.shared.environments) = None;
         }
         let trusted = self.shared.config.launcher.workspace_trusted(&canonical).unwrap_or(trusted);
@@ -255,6 +308,7 @@ impl ResearchService {
         if previous.is_some() {
             self.shared.setup.cancel_outside(None, self.shared.config.launcher.as_ref());
             self.detach_sessions_outside(None, "The project folder was closed; this session's kernel was stopped.");
+            self.shared.release_runs_outside(None);
             *lock(&self.shared.environments) = None;
         }
     }
@@ -299,10 +353,17 @@ impl ResearchService {
             root: w.root,
         });
         let key = project.as_ref().map(|p| (p.root.clone(), p.trusted));
-        if !refresh
-            && let Some((cached, report)) = lock(&self.shared.environments).clone()
-            && cached == key
-        {
+        let cached = || match lock(&self.shared.environments).clone() {
+            Some((cached, report)) if cached == key => Some(report),
+            _ => None,
+        };
+        if !refresh && let Some(report) = cached() {
+            return Ok(report);
+        }
+        let _discovering = self.shared.discovering.lock().await;
+        // A discovery for this project and trust finished while this request
+        // waited: its report answers this one too. A refresh always probes.
+        if !refresh && let Some(report) = cached() {
             return Ok(report);
         }
         let probe_dir = match self.shared.config.launcher.probe_dir() {
@@ -322,15 +383,32 @@ impl ResearchService {
     /// [`Self::environments`] for blocking callers (workflow batches run on
     /// worker threads): the same cache, discovery, and trust rules.
     pub(crate) fn environments_blocking(&self) -> Result<EnvironmentReport, ResearchError> {
+        self.discover_blocking(false)
+    }
+
+    fn discover_blocking(&self, refresh: bool) -> Result<EnvironmentReport, ResearchError> {
         let workspace = lock(&self.shared.workspace).clone();
         let project = workspace.map(|w| ProjectScope {
             trusted: self.shared.config.launcher.workspace_trusted(&w.root).unwrap_or(w.trusted),
             root: w.root,
         });
         let key = project.as_ref().map(|p| (p.root.clone(), p.trusted));
-        if let Some((cached, report)) = lock(&self.shared.environments).clone()
-            && cached == key
-        {
+        let cached = || match lock(&self.shared.environments).clone() {
+            Some((cached, report)) if cached == key => Some(report),
+            _ => None,
+        };
+        if !refresh && let Some(report) = cached() {
+            return Ok(report);
+        }
+        // One discovery at a time (see `Shared::discovering`); a blocking
+        // caller waits for its turn without an async context.
+        let _discovering = loop {
+            match self.shared.discovering.try_lock() {
+                Ok(guard) => break guard,
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        if !refresh && let Some(report) = cached() {
             return Ok(report);
         }
         let probe_dir = match self.shared.config.launcher.probe_dir() {
@@ -395,7 +473,9 @@ impl ResearchService {
     /// Discover again, ignoring the cache (blocking callers: environment setup).
     pub(crate) fn rediscover_blocking(&self) -> Result<EnvironmentReport, ResearchError> {
         *lock(&self.shared.environments) = None;
-        self.environments_blocking()
+        // Always probes: a discovery that began before the caller's change
+        // (an environment setup) must not answer for the state after it.
+        self.discover_blocking(true)
     }
 
     pub(crate) fn launcher(&self) -> Arc<dyn KernelProcessLauncher> {
@@ -774,7 +854,10 @@ impl ResearchService {
             if Some(&run.root) != self.workspace_root().as_ref() {
                 return Err(ResearchError::UnknownRun(run_id.to_owned()));
             }
-            return Ok(run.manifest.clone());
+            // A released run is read from its record, like any stored run.
+            if run.released.is_none() {
+                return Ok(run.manifest.clone());
+            }
         }
         let workspace = self.current_workspace()?;
         read_manifest(&workspace.root, run_id).map(|m| self.settle(m))
@@ -802,7 +885,9 @@ impl ResearchService {
             if Some(&run.root) != self.workspace_root().as_ref() {
                 return Err(ResearchError::UnknownRun(run_id.to_owned()));
             }
-            return Ok(run.page(after, limit));
+            if run.released.is_none() {
+                return Ok(run.page(after, limit));
+            }
         }
         let workspace = self.current_workspace()?;
         let manifest = read_manifest(&workspace.root, run_id)?;
@@ -1404,9 +1489,30 @@ impl Session {
                 let artifacts = {
                     // Text artifacts are kernel output too: redacted like streams.
                     let redact = |text: &str| shared.config.launcher.redact(text);
+                    let Some(dir) = lock(&shared.runs).get(&run_id).map(|run| run.output_dir.clone()) else { return };
+                    // Reading, redacting, and hashing the files (up to 64 MiB
+                    // each) happens without the run table's lock, so other
+                    // sessions' output and history reads do not wait for it.
+                    // This session's events are handled one at a time on its
+                    // reader thread, so the records are added, in order,
+                    // before the display entry that names them.
+                    let records: Vec<ArtifactRecord> = match &dir {
+                        Some(dir) => files
+                            .iter()
+                            .filter_map(|f| crate::runs::display_file_record(dir, &run_id, f, &redact))
+                            .collect(),
+                        None => Vec::new(),
+                    };
                     let mut runs = lock(&shared.runs);
                     let Some(run) = runs.get_mut(&run_id) else { return };
-                    files.iter().filter_map(|f| run.register_file(f, &redact)).map(|a| a.id).collect()
+                    records
+                        .into_iter()
+                        .map(|record| {
+                            let id = record.id.clone();
+                            run.add_output(record);
+                            id
+                        })
+                        .collect()
                 };
                 if files.iter().any(|f| f.truncated) {
                     self.push_output(
@@ -1633,7 +1739,10 @@ impl Session {
             retained_chars: 0,
             interrupt_requested: false,
             cancel_requested: false,
+            finishing: false,
             finished: false,
+            stored: false,
+            released: None,
         };
         let summary = run.summary();
         lock(&shared.runs).insert(run_id.clone(), run);
@@ -1713,17 +1822,17 @@ impl Session {
         dispatch_next: bool,
     ) {
         let Some(shared) = self.shared() else { return };
-        let summary = {
+        let (root, manifest, entries) = {
             let mut runs = lock(&shared.runs);
             let Some(run) = runs.get_mut(run_id) else { return };
-            if run.finished {
+            if run.finished || run.finishing {
                 return;
             }
             if let Some(message) = notice {
                 let entry = run.push(OutputItem::Notice { message: message.to_owned() });
                 shared.emit(ResearchEvent::Output { run_id: RunId(run_id.to_owned()), entry });
             }
-            run.finished = true;
+            run.finishing = true;
             run.queued = false;
             run.manifest.record.status = status;
             run.manifest.record.finished_at_ms = Some(now_ms());
@@ -1731,10 +1840,25 @@ impl Session {
                 run.manifest.execution_count = execution_count;
             }
             let entries: Vec<_> = run.entries.iter().cloned().collect();
-            let _ = write_manifest(&run.root, &run.manifest);
-            let _ = write_transcript(&run.root, run_id, &entries);
+            (run.root.clone(), run.manifest.clone(), entries)
+        };
+        // The record is written without the run table's lock (other
+        // sessions' output and history reads do not wait for the disk). The
+        // run reads as finished only once its record is on disk (or could
+        // not be written): until then it still counts as executing, so
+        // nothing treats its stored manifest as final or as an orphan.
+        let stored = write_manifest(&root, &manifest).is_ok() & write_transcript(&root, run_id, &entries).is_ok();
+        drop((manifest, entries));
+        let summary = {
+            let mut runs = lock(&shared.runs);
+            let Some(run) = runs.get_mut(run_id) else { return };
+            run.finished = true;
+            run.stored = stored;
             run.summary()
         };
+        if stored {
+            shared.run_stored(run_id);
+        }
         shared.emit(ResearchEvent::RunFinished { run: summary });
         if dispatch_next {
             self.dispatch_next();
@@ -2164,6 +2288,120 @@ mod tests {
             SessionState::Detached { reason } => assert!(reason.contains("trust was revoked"), "{reason}"),
             other => panic!("expected Detached for trust, got {other:?}"),
         }
+    }
+
+    // ---- released run state --------------------------------------------
+
+    /// Queue a run in the fixture's session (held busy, so nothing is
+    /// dispatched), give it three stream entries, and finish it.
+    fn queued_run(f: &Fixture, n: usize, chars: usize) -> String {
+        lock(&f.session.state).active.get_or_insert_with(|| "held".to_owned());
+        let run = f
+            ._service
+            .execute(ExecuteRequest {
+                session_id: f.session.id.clone(),
+                source: RunSource::Input { code: format!("print({n})  # {}", "x".repeat(chars)) },
+                requester: SessionOwner::User,
+            })
+            .unwrap();
+        for part in 0..3 {
+            let text = format!("run {n} part {part} {}\n", "y".repeat(chars));
+            f.session.push_output(&f._service.shared, &run.id.0, OutputItem::Stream { name: StreamName::Stdout, text });
+        }
+        run.id.0
+    }
+
+    fn finished_run(f: &Fixture, n: usize, chars: usize) -> String {
+        let id = queued_run(f, n, chars);
+        f.session.finish_run(&id, RunStatus::Succeeded, Some(n as u32), None, false);
+        id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn old_finished_runs_release_their_output_and_read_the_same_from_their_records() {
+        let f = Fixture::new();
+        let service = &f._service;
+        let total = RECENT_RUNS_IN_MEMORY + 9;
+        let chars = 4000;
+        let mut seen = Vec::new();
+        for n in 0..total {
+            let id = finished_run(&f, n, chars);
+            // As read while the run is still held in memory.
+            let manifest = service.run_manifest(&id).unwrap();
+            let page = service.run_output(&id, None, 500).unwrap();
+            let tail = service.run_output(&id, Some(2), 1).unwrap();
+            assert_eq!(page.entries.len(), 3);
+            seen.push((id, manifest, page, tail));
+        }
+        // Only the most recent runs still hold output and code.
+        let held = lock(&service.shared.runs).values().filter(|r| r.released.is_none()).count();
+        assert_eq!(held, RECENT_RUNS_IN_MEMORY);
+        let retained = service.retained_runs();
+        assert_eq!(retained.runs, total, "every run of the session is still listed from memory");
+        assert!(retained.output_chars <= RECENT_RUNS_IN_MEMORY * 3 * (chars + 64), "{retained:?}");
+        assert!(retained.code_bytes <= RECENT_RUNS_IN_MEMORY * (chars + 64), "{retained:?}");
+        // The history, each manifest, and each page of output are unchanged.
+        let listed = service.runs().unwrap();
+        assert_eq!(listed.len(), total);
+        for (id, manifest, page, tail) in &seen {
+            assert_eq!(&service.run_manifest(id).unwrap(), manifest, "{id}");
+            assert_eq!(&service.run_output(id, None, 500).unwrap(), page, "{id}");
+            assert_eq!(&service.run_output(id, Some(2), 1).unwrap(), tail, "{id}");
+            let summary = listed.iter().find(|s| s.id.0 == *id).unwrap();
+            assert_eq!(*summary, crate::runs::summary_of(manifest, SessionOwner::User, false), "{id}");
+        }
+        // Leaving the project releases the rest; coming back reads them from their records.
+        let root = service.workspace_root().unwrap();
+        service.clear_workspace();
+        assert_eq!(service.retained_runs().output_chars, 0);
+        service.set_workspace(&root, true).unwrap();
+        assert_eq!(service.runs().unwrap().len(), total);
+        for (id, manifest, page, _) in &seen {
+            assert_eq!(&service.run_manifest(id).unwrap(), manifest, "{id}");
+            assert_eq!(&service.run_output(id, None, 500).unwrap(), page, "{id}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_run_whose_record_could_not_be_written_keeps_its_output_in_memory() {
+        let f = Fixture::new();
+        let service = &f._service;
+        // Its project folder is not a folder any more: the record cannot be written.
+        let unwritable = queued_run(&f, 0, 1000);
+        let blocked = f._dir.path().join("not-a-folder");
+        std::fs::write(&blocked, "x").unwrap();
+        lock(&service.shared.runs).get_mut(&unwritable).unwrap().root = blocked;
+        f.session.finish_run(&unwritable, RunStatus::Succeeded, None, None, false);
+        for n in 1..RECENT_RUNS_IN_MEMORY + 4 {
+            finished_run(&f, n, 1000);
+        }
+        service.clear_workspace();
+        let runs = lock(&service.shared.runs);
+        let kept = &runs[&unwritable];
+        assert!(kept.finished && !kept.stored && kept.released.is_none());
+        assert_eq!(kept.entries.len(), 3, "the only copy of its output is kept");
+        assert!(!kept.code.is_empty());
+        assert!(runs.values().filter(|r| r.id() != unwritable).all(|r| r.released.is_some()));
+    }
+
+    /// The active records found directly are the ones the full record
+    /// listing marks active (queued, executing, and finished runs present).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn active_run_records_are_the_active_entries_of_the_record_listing() {
+        let f = Fixture::new();
+        let service = &f._service;
+        for n in 0..3 {
+            finished_run(&f, n, 100);
+        }
+        let queued: Vec<String> = (3..6).map(|n| queued_run(&f, n, 100)).collect();
+        let active = service.active_run_records().unwrap();
+        let listed: Vec<_> = service.run_records().unwrap().into_iter().filter(|r| r.active).collect();
+        assert_eq!(active, listed);
+        let mut ids: Vec<&str> = active.iter().map(|r| r.id.as_str()).collect();
+        ids.sort();
+        let mut expected: Vec<&str> = queued.iter().map(String::as_str).collect();
+        expected.sort();
+        assert_eq!(ids, expected);
     }
 
     #[test]
