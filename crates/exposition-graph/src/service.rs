@@ -1500,6 +1500,11 @@ impl GraphService {
         explicit: bool,
         service: &str,
     ) -> GraphResult<Entity> {
+        // One key per file: the path as the file system spells it, however
+        // the caller wrote it (see `scan::on_disk_spelling`).
+        let root = self.attached_root();
+        let spelled = root.as_deref().map(|r| crate::reconcile::scan::on_disk_spelling(r, path));
+        let path = spelled.as_ref().unwrap_or(path);
         let roles = match crate::admission::classify(path) {
             crate::admission::Admission::Admit(roles) => roles,
             crate::admission::Admission::OnRequest(roles) if explicit => roles,
@@ -1545,7 +1550,6 @@ impl GraphService {
             summary: format!("Admit {path}"),
             ..Default::default()
         };
-        let root = self.attached_root();
         // Look up and admit under one lock, so concurrent admissions (the
         // reconciler, another service) never create two identities for one file.
         let admit = |store: &mut GraphStore| -> GraphResult<(Entity, Option<crate::model::GraphDelta>)> {

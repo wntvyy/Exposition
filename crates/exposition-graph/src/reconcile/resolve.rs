@@ -35,21 +35,107 @@ enum Target {
     Missing,
 }
 
+/// The live entities of one name, as a pass leaves them.
+enum Named {
+    None,
+    One(EntityId),
+    Many(usize),
+}
+
 impl Planner<'_> {
-    /// Live entities (other than files/folders) whose natural key is `key`,
-    /// as of this pass.
+    /// The live entities of the admitted `kinds` whose natural key is `key`,
+    /// as this pass leaves them: the one, or how many.
+    ///
+    /// One read of a key returns a bounded number of rows. When the stored
+    /// entities of the key fill it, the rows read are not the whole answer:
+    /// the number is then counted (the stored count, less what this pass
+    /// tombstoned or renamed, plus what it added), and a single survivor is
+    /// looked up page by page, so an incremental pass and a full one report
+    /// the same count and neither takes a part for the whole.
+    fn named(&self, key: &str, kinds: impl Fn(EntityKind) -> bool) -> StoreResult<Named> {
+        let seen = self.keyed_entities(key, &kinds)?;
+        let from = |seen: &[Entity]| match seen {
+            [] => Named::None,
+            [one] => Named::One(one.id.clone()),
+            many => Named::Many(many.len()),
+        };
+        if self.stored_with_key(key)?.len() < crate::store::KEY_READ_LIMIT {
+            return Ok(from(&seen));
+        }
+        let was_stored = |id: &EntityId| -> StoreResult<bool> {
+            Ok(self.store.entity(id)?.is_some_and(|e| {
+                e.lifecycle != Lifecycle::Tombstoned && e.key.as_deref() == Some(key) && kinds(e.kind)
+            }))
+        };
+        let stored: usize =
+            self.store.count_live_entities_with_key(key)?.into_iter().filter(|(k, _)| kinds(*k)).map(|(_, n)| n).sum();
+        // Stored ones this pass tombstoned, or gave another key.
+        let mut left = 0usize;
+        for id in &self.tombstoned_now {
+            if self.entities.get(id).is_some_and(|e| e.key.as_deref() == Some(key)) && was_stored(id)? {
+                left += 1;
+            }
+        }
+        for id in self.unkeyed.get(key).into_iter().flatten() {
+            let renamed = self.entities.get(id).is_some_and(|e| e.key.as_deref() != Some(key));
+            if renamed && !self.tombstoned_now.contains(id) && was_stored(id)? {
+                left += 1;
+            }
+        }
+        // Planned ones that were not among the stored.
+        let mut arrived: Vec<&Entity> = Vec::new();
+        for e in &seen {
+            if self.keyed.get(key).is_some_and(|ids| ids.contains(&e.id))
+                && (self.created_now.contains(&e.id) || !was_stored(&e.id)?)
+            {
+                arrived.push(e);
+            }
+        }
+        match (stored.saturating_sub(left), arrived.as_slice()) {
+            (0, arrived) => Ok(match arrived {
+                [] => Named::None,
+                [one] => Named::One(one.id.clone()),
+                many => Named::Many(many.len()),
+            }),
+            (1, []) => {
+                // The one stored entity this pass left: not necessarily
+                // among the rows read first.
+                let mut after: Option<EntityId> = None;
+                loop {
+                    let page = self.store.live_entities_with_key_after(key, after.as_ref())?;
+                    let Some(last) = page.last().map(|e| e.id.clone()) else { return Ok(Named::None) };
+                    for stored in &page {
+                        if self.tombstoned_now.contains(&stored.id) || !kinds(stored.kind) {
+                            continue;
+                        }
+                        let now = self.entity(&stored.id)?;
+                        if now.is_some_and(|e| e.lifecycle != Lifecycle::Tombstoned && e.key.as_deref() == Some(key)) {
+                            return Ok(Named::One(stored.id.clone()));
+                        }
+                    }
+                    after = Some(last);
+                }
+            }
+            (kept, arrived) => Ok(Named::Many(kept + arrived.len())),
+        }
+    }
+
+    /// Stored live entities whose natural key is `key` (before this pass):
+    /// the rows of one bounded read.
+    pub(crate) fn stored_with_key(&self, key: &str) -> StoreResult<Vec<EntityId>> {
+        if let Some(ids) = self.key_cache.borrow().get(key) {
+            return Ok(ids.clone());
+        }
+        let ids: Vec<EntityId> = self.store.live_entities_with_key(key)?.into_iter().map(|e| e.id).collect();
+        self.key_cache.borrow_mut().insert(key.to_owned(), ids.clone());
+        Ok(ids)
+    }
+
+    /// The live entities of `key` among the rows read and those planned
+    /// (see [`Self::named`] for the whole answer).
     fn keyed_entities(&self, key: &str, kinds: impl Fn(EntityKind) -> bool) -> StoreResult<Vec<Entity>> {
         let mut ids: BTreeSet<EntityId> = BTreeSet::new();
-        let cached = self.key_cache.borrow().get(key).cloned();
-        let stored = match cached {
-            Some(ids) => ids,
-            None => {
-                let ids: Vec<EntityId> = self.store.live_entities_with_key(key)?.into_iter().map(|e| e.id).collect();
-                self.key_cache.borrow_mut().insert(key.to_owned(), ids.clone());
-                ids
-            }
-        };
-        ids.extend(stored);
+        ids.extend(self.stored_with_key(key)?);
         if let Some(planned) = self.keyed.get(key) {
             ids.extend(planned.iter().cloned());
         }
@@ -98,53 +184,51 @@ impl Planner<'_> {
             [] => {}
             many => return Ok(Target::Ambiguous(many.len())),
         }
-        let elsewhere = self.keyed_entities(name, |k| {
+        let elsewhere = self.named(name, |k| {
             !matches!(k, EntityKind::Resource | EntityKind::Folder | EntityKind::Reference | EntityKind::Project)
         })?;
-        match elsewhere.len() {
-            1 => Ok(Target::Entity(elsewhere[0].id.clone())),
-            0 if self.label_exists(name, body)? => Ok(Target::NotAnEntity),
-            0 => Ok(Target::Missing),
-            n => Ok(Target::Ambiguous(n)),
+        match elsewhere {
+            Named::One(id) => Ok(Target::Entity(id)),
+            Named::None if self.label_exists(name, body)? => Ok(Target::NotAnEntity),
+            Named::None => Ok(Target::Missing),
+            Named::Many(n) => Ok(Target::Ambiguous(n)),
         }
     }
 
     fn resolve_citation(&self, key: &str) -> StoreResult<Target> {
-        let refs = self.keyed_entities(key, |k| k == EntityKind::Reference)?;
-        Ok(match refs.len() {
-            1 => Target::Entity(refs[0].id.clone()),
-            0 => Target::Missing,
-            n => Target::Ambiguous(n),
+        Ok(match self.named(key, |k| k == EntityKind::Reference)? {
+            Named::One(id) => Target::Entity(id),
+            Named::None => Target::Missing,
+            Named::Many(n) => Target::Ambiguous(n),
         })
     }
 
-    /// Candidate project paths for a written path.
-    fn path_candidates(
-        &self,
-        from: &WorkspacePath,
-        written: &str,
-        base: PathBase,
-        extensions: &[String],
-    ) -> Vec<WorkspacePath> {
-        let mains = self.index.latex_mains.iter().chain(self.planned_mains.iter());
-        path_candidates(from, written, base, extensions, mains)
+    /// Where a written path is looked up, in order.
+    fn path_lookups(&self, from: &WorkspacePath, written: &str, base: PathBase, extensions: &[String]) -> Vec<Lookup> {
+        let mains = self.latex_mains();
+        path_lookups(from, written, base, extensions, mains.iter())
     }
 
-    /// The resource for a written path; admits a retained/attached generated
-    /// artifact explicitly when `admit_generated`.
-    fn resolve_path(&mut self, candidates: &[WorkspacePath], admit_generated: bool) -> StoreResult<Option<EntityId>> {
-        for c in candidates {
+    /// The resource for a written path (the first candidate that is one,
+    /// with the candidate); admits a retained/attached generated artifact
+    /// explicitly when `admit_generated`.
+    fn resolve_path(
+        &mut self,
+        lookups: &[Lookup],
+        admit_generated: bool,
+    ) -> StoreResult<Option<(EntityId, WorkspacePath)>> {
+        for c in lookups.iter().flat_map(|l| &l.candidates) {
             if let Some(id) = self.resources.get(c)? {
-                return Ok(Some(id));
+                return Ok(Some((id, c.clone())));
             }
         }
         if !admit_generated {
             return Ok(None);
         }
-        for c in candidates {
+        for c in lookups.iter().flat_map(|l| &l.candidates) {
             let Admission::OnRequest(roles) = classify(c) else { continue };
             let Some(meta) = scan::stat_file(self.root, c) else { continue };
-            return Ok(Some(self.admit_generated(c, roles, &meta)?));
+            return Ok(Some((self.admit_generated(c, roles, &meta)?, c.clone())));
         }
         Ok(None)
     }
@@ -224,7 +308,8 @@ impl Planner<'_> {
         Ok(entity.id)
     }
 
-    fn lean_candidates(&self, module: &str) -> StoreResult<Vec<WorkspacePath>> {
+    /// Where a Lean module is looked up: its file below each Lake package root.
+    fn lean_lookups(&self, module: &str) -> StoreResult<Vec<Lookup>> {
         if module.is_empty() || module.contains(['/', '\\']) {
             return Ok(Vec::new());
         }
@@ -233,7 +318,11 @@ impl Planner<'_> {
             Some(r) => r.clone(),
             None => self.lake_roots()?,
         };
-        Ok(roots.into_iter().filter_map(|root| extract::join_relative(root.as_ref(), &rel)).collect())
+        Ok(roots
+            .into_iter()
+            .filter_map(|root| extract::join_relative(root.as_ref(), &rel))
+            .map(|c| Lookup { awaited: c.clone(), candidates: vec![c], latex_main: false })
+            .collect())
     }
 
     /// Resolve every observed link of `path` and replace its observed
@@ -281,7 +370,12 @@ impl Planner<'_> {
                 LinkTarget::Label(x) => self.resolve_label(x, &body)?,
                 LinkTarget::Citation(k) => self.resolve_citation(k)?,
                 LinkTarget::LabelOrCitation(x) => match self.resolve_label(x, &body)? {
-                    Target::Missing => self.resolve_citation(x)?,
+                    Target::Missing => {
+                        // A label of this name, once declared, takes the
+                        // place of the bibliography entry.
+                        wanted.insert(format!("name:{x}"));
+                        self.resolve_citation(x)?
+                    }
                     other => other,
                 },
                 LinkTarget::Declaration(i) => match body.ids.get(*i).cloned().flatten() {
@@ -289,47 +383,60 @@ impl Planner<'_> {
                     None => Target::Missing,
                 },
                 LinkTarget::Path { written, base, extensions } => {
-                    let candidates = self.path_candidates(path, written, *base, extensions);
+                    let lookups = self.path_lookups(path, written, *base, extensions);
                     let generated = link.kind == RelationKind::UsesAsset;
-                    match self.resolve_path(&candidates, generated)? {
-                        Some(id) => Target::Entity(id),
-                        None if code => {
-                            wanted.extend(candidates.iter().take(4).map(|c| format!("path:{c}")));
-                            Target::NotAnEntity
-                        }
+                    let found = self.resolve_path(&lookups, generated)?;
+                    await_lookups(
+                        &mut wanted,
+                        &lookups,
+                        found.as_ref().map(|(_, at)| at),
+                        *base == PathBase::LatexMain,
+                    );
+                    match found {
+                        Some((id, _)) => Target::Entity(id),
+                        None if code => Target::NotAnEntity,
                         None => {
                             // An existing file that is not a project resource type is not unresolved.
-                            let exists = candidates.iter().any(|c| scan::stat_file(self.root, c).is_some());
-                            if !exists {
-                                wanted.extend(candidates.iter().take(8).map(|c| format!("path:{c}")));
-                            }
+                            let exists = lookups
+                                .iter()
+                                .flat_map(|l| &l.candidates)
+                                .any(|c| scan::stat_file(self.root, c).is_some());
                             if exists { Target::NotAnEntity } else { Target::Missing }
                         }
                     }
                 }
                 LinkTarget::LeanModule(m) => {
-                    let candidates = self.lean_candidates(m)?;
-                    match self.resolve_path(&candidates, false)? {
-                        Some(id) => Target::Entity(id),
-                        None => {
-                            wanted.extend(candidates.iter().take(4).map(|c| format!("path:{c}")));
-                            Target::NotAnEntity
-                        }
+                    let lookups = self.lean_lookups(m)?;
+                    let found = self.resolve_path(&lookups, false)?;
+                    await_lookups(&mut wanted, &lookups, found.as_ref().map(|(_, at)| at), false);
+                    match found {
+                        Some((id, _)) => Target::Entity(id),
+                        None => Target::NotAnEntity,
                     }
                 }
             };
             let described = describe(&link.target);
-            if matches!(target, Target::Missing | Target::Ambiguous(_))
+            // A reference that did not become a relation to the one
+            // declaration of its name waits for that name: a declaration or
+            // label of it that appears or disappears anywhere changes the
+            // outcome. One that did is found again from the relation.
+            if !matches!(target, Target::Entity(_))
                 && let LinkTarget::Label(x) | LinkTarget::Citation(x) | LinkTarget::LabelOrCitation(x) = &link.target
             {
                 wanted.insert(format!("name:{x}"));
             }
             match target {
                 Target::Entity(to) => {
+                    let (Some(fe), Some(te)) = (self.entity(&from)?, self.entity(&to)?) else { continue };
+                    if from == to || !link.kind.allows(fe.kind, te.kind) {
+                        // No relation will lead back from the target.
+                        if let Some(key) = &te.key {
+                            wanted.insert(super::engine::target_key(te.kind, key));
+                        }
+                    }
                     if from == to {
                         continue;
                     }
-                    let (Some(fe), Some(te)) = (self.entity(&from)?, self.entity(&to)?) else { continue };
                     if !link.kind.allows(fe.kind, te.kind) {
                         unresolved.push(format!(
                             "{described}: a {} cannot {} a {}",
@@ -349,14 +456,17 @@ impl Planner<'_> {
         for att in &body.extraction.attachments {
             let Some(image) = &att.image else { continue };
             let exts: Vec<String> = IMAGE_EXTENSIONS.iter().map(|e| (*e).to_owned()).collect();
-            let candidates = self.path_candidates(path, image, att.base, &exts);
-            match self.resolve_path(&candidates, true)? {
-                Some(to) if to != resource_id => {
+            let lookups = self.path_lookups(path, image, att.base, &exts);
+            let found = self.resolve_path(&lookups, true)?;
+            await_lookups(&mut wanted, &lookups, found.as_ref().map(|(_, at)| at), att.base == PathBase::LatexMain);
+            match found {
+                Some((to, _)) if to != resource_id => {
                     desired.insert((RelationKind::UsesAsset, resource_id.clone(), to));
                 }
-                Some(_) => {}
+                Some((_, at)) => {
+                    wanted.insert(format!("path:{at}"));
+                }
                 None => {
-                    wanted.extend(candidates.iter().take(8).map(|c| format!("path:{c}")));
                     unresolved.push(format!("attachment {} uses “{image}”, which was not found", att.key));
                 }
             }
@@ -416,6 +526,18 @@ impl Planner<'_> {
         let (binding_count, mut binding_reasons) = self.binding_unresolved(path, resource)?;
         if let Some(extra) = self.binding_problems.get(path) {
             binding_reasons.extend(extra.iter().cloned());
+        }
+        // Names the file declares more than once (none of them is admitted).
+        let mut declared: BTreeMap<&str, usize> = BTreeMap::new();
+        for d in &body.extraction.declarations {
+            if let Some(name) = &d.name {
+                *declared.entry(name.as_str()).or_default() += 1;
+            }
+        }
+        for (name, count) in declared {
+            if count > 1 {
+                binding_reasons.push(format!("“{name}” is declared {count} times"));
+            }
         }
         let duplicates = body.ids.iter().filter(|i| i.is_none()).count() as u32;
         coverage.unresolved = unresolved.len() as u32 + binding_count + duplicates;
@@ -498,11 +620,110 @@ fn list(items: &[String], max: usize) -> String {
     shown.join("; ")
 }
 
-/// Candidate project paths for a path written in `from`, in the order they are
-/// tried: the base folders of `base` (for LaTeX also the folders of the
-/// project's main files `latex_mains`), each with the written name and then
-/// with each of `extensions` appended. Paths that leave the project are not
-/// candidates. Shared by the reconciler and transient readers (image previews).
+/// One folder a written path is looked up in.
+pub(crate) struct Lookup {
+    /// The written path below that folder, without the extensions tried: a
+    /// file waiting for it is resolved again when a resource appears at
+    /// this path, at it with any extension, or as its package file (see
+    /// `target_keys`).
+    awaited: WorkspacePath,
+    /// The paths tried there, in order (none already tried in an earlier folder).
+    candidates: Vec<WorkspacePath>,
+    /// The folder of a LaTeX main file (tried after the file's own folder
+    /// and the project root).
+    latex_main: bool,
+}
+
+/// What a file waits for after its written path was looked up: every folder
+/// tried before the one it was found in, that folder too unless its first
+/// candidate was the one found (an earlier candidate that appears takes its
+/// place), and every folder when it was not found. A path that was not
+/// settled before the folders of the LaTeX main files also waits for that
+/// set of folders (`latex`: the path is looked up as LaTeX does).
+fn await_lookups(wanted: &mut BTreeSet<String>, lookups: &[Lookup], found: Option<&WorkspacePath>, latex: bool) {
+    for lookup in lookups {
+        let here = found.is_some_and(|at| lookup.candidates.contains(at));
+        if here {
+            if lookup.candidates.first() != found {
+                wanted.insert(format!("path:{}", lookup.awaited));
+            }
+            if lookup.latex_main {
+                wanted.insert(super::engine::LATEX_MAINS_TARGET.to_owned());
+            }
+            return;
+        }
+        wanted.insert(format!("path:{}", lookup.awaited));
+    }
+    // Not found: the folder of another main file may come to hold it.
+    if latex {
+        wanted.insert(super::engine::LATEX_MAINS_TARGET.to_owned());
+    }
+}
+
+/// Where a path written in `from` is looked up, in order: the base folders
+/// of `base` (for LaTeX also the folders of the project's main files
+/// `latex_mains`), each with the written name and then with each of
+/// `extensions` appended. Paths that leave the project are not candidates.
+pub(crate) fn path_lookups<'a>(
+    from: &WorkspacePath,
+    written: &str,
+    base: PathBase,
+    extensions: &[String],
+    latex_mains: impl IntoIterator<Item = &'a WorkspacePath>,
+) -> Vec<Lookup> {
+    let dir = from.parent();
+    // (folder, the folder of a LaTeX main file)
+    let mut bases: Vec<(Option<WorkspacePath>, bool)> = Vec::new();
+    match base {
+        PathBase::File => bases.push((dir.clone(), false)),
+        PathBase::Root => {
+            // A Python script's own folder comes first on its import path.
+            if extensions.iter().any(|e| e == "py") {
+                bases.push((dir.clone(), false));
+            }
+            bases.push((None, false));
+        }
+        PathBase::LatexMain => {
+            bases.push((dir.clone(), false));
+            bases.push((None, false));
+            let mut mains: BTreeSet<Option<WorkspacePath>> = BTreeSet::new();
+            for m in latex_mains {
+                mains.insert(m.parent());
+            }
+            bases.extend(mains.into_iter().map(|m| (m, true)));
+        }
+    }
+    let mut out: Vec<Lookup> = Vec::new();
+    let mut seen = BTreeSet::new();
+    let has_ext = written.rsplit('/').next().is_some_and(|n| n.contains('.'));
+    for (b, latex_main) in bases {
+        let Some(p) = extract::join_relative(b.as_ref(), written) else { continue };
+        let mut candidates: Vec<WorkspacePath> = Vec::new();
+        if has_ext || extensions.is_empty() {
+            candidates.push(p.clone());
+        }
+        for ext in extensions {
+            if let Ok(with) = WorkspacePath::parse(&format!("{}.{ext}", p.as_str())) {
+                candidates.push(with);
+            }
+        }
+        if base == PathBase::Root
+            && extensions.iter().any(|e| e == "py")
+            && let Ok(init) = p.join("__init__.py")
+        {
+            candidates.push(init);
+        }
+        candidates.retain(|c| seen.insert(c.clone()));
+        if !candidates.is_empty() {
+            out.push(Lookup { awaited: p, candidates, latex_main });
+        }
+    }
+    out
+}
+
+/// Candidate project paths for a path written in `from`, in the order they
+/// are tried (see [`path_lookups`]). Shared by the reconciler and transient
+/// readers (image previews).
 pub(crate) fn path_candidates<'a>(
     from: &WorkspacePath,
     written: &str,
@@ -510,47 +731,5 @@ pub(crate) fn path_candidates<'a>(
     extensions: &[String],
     latex_mains: impl IntoIterator<Item = &'a WorkspacePath>,
 ) -> Vec<WorkspacePath> {
-    let dir = from.parent();
-    let mut bases: Vec<Option<WorkspacePath>> = Vec::new();
-    match base {
-        PathBase::File => bases.push(dir.clone()),
-        PathBase::Root => {
-            // A Python script's own folder comes first on its import path.
-            if extensions.iter().any(|e| e == "py") {
-                bases.push(dir.clone());
-            }
-            bases.push(None);
-        }
-        PathBase::LatexMain => {
-            bases.push(dir.clone());
-            bases.push(None);
-            let mut mains: BTreeSet<Option<WorkspacePath>> = BTreeSet::new();
-            for m in latex_mains {
-                mains.insert(m.parent());
-            }
-            bases.extend(mains);
-        }
-    }
-    let mut out: Vec<WorkspacePath> = Vec::new();
-    let has_ext = written.rsplit('/').next().is_some_and(|n| n.contains('.'));
-    for b in bases {
-        let Some(p) = extract::join_relative(b.as_ref(), written) else { continue };
-        if has_ext || extensions.is_empty() {
-            out.push(p.clone());
-        }
-        for ext in extensions {
-            if let Ok(with) = WorkspacePath::parse(&format!("{}.{ext}", p.as_str())) {
-                out.push(with);
-            }
-        }
-        if base == PathBase::Root
-            && extensions.iter().any(|e| e == "py")
-            && let Ok(init) = p.join("__init__.py")
-        {
-            out.push(init);
-        }
-    }
-    let mut seen = BTreeSet::new();
-    out.retain(|p| seen.insert(p.clone()));
-    out
+    path_lookups(from, written, base, extensions, latex_mains).into_iter().flat_map(|l| l.candidates).collect()
 }

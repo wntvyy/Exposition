@@ -339,6 +339,8 @@ const MAX_FIELD: usize = 256 * 1024;
 const MAX_SHORT_FIELD: usize = 256;
 /// Largest stored source index body (the validated open refuses larger).
 pub const MAX_INDEX_BODY: usize = 16 * MAX_FIELD;
+/// Rows one read of the entities with a natural key returns.
+pub const KEY_READ_LIMIT: usize = 64;
 /// Bindings read per entity (more would be silently dropped on read).
 pub const MAX_BINDINGS_PER_ENTITY: usize = 64;
 
@@ -902,12 +904,42 @@ impl GraphStore {
         rows.map(|r| r?).collect()
     }
 
-    /// Non-tombstoned entities of any kind with this natural key (bounded).
+    /// Non-tombstoned entities of any kind with this natural key: at most
+    /// [`KEY_READ_LIMIT`]. A result of that length may be incomplete; a
+    /// caller that counts or decides uses [`Self::count_live_entities_with_key`]
+    /// and [`Self::live_entities_with_key_after`].
     pub fn live_entities_with_key(&self, key: &str) -> StoreResult<Vec<Entity>> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {ENTITY_COLUMNS} FROM entities WHERE key = ?1 AND lifecycle != 'tombstoned' LIMIT 64"
+            "SELECT {ENTITY_COLUMNS} FROM entities WHERE key = ?1 AND lifecycle != 'tombstoned' LIMIT {KEY_READ_LIMIT}"
         ))?;
         let rows = stmt.query_map([key], read_entity)?;
+        rows.map(|r| r?).collect()
+    }
+
+    /// How many non-tombstoned entities of each kind have this natural key
+    /// (complete: counted, not read).
+    pub fn count_live_entities_with_key(&self, key: &str) -> StoreResult<Vec<(EntityKind, usize)>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT kind, count(*) FROM entities WHERE key = ?1 AND lifecycle != 'tombstoned' GROUP BY kind",
+        )?;
+        let rows = stmt.query_map([key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (kind, n) = row?;
+            let kind = EntityKind::parse(&kind).ok_or_else(|| untrusted("entity kind"))?;
+            out.push((kind, n.max(0) as usize));
+        }
+        Ok(out)
+    }
+
+    /// One page (at most [`KEY_READ_LIMIT`]) of the non-tombstoned entities
+    /// with this natural key, in id order, after `after`.
+    pub fn live_entities_with_key_after(&self, key: &str, after: Option<&EntityId>) -> StoreResult<Vec<Entity>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {ENTITY_COLUMNS} FROM entities WHERE key = ?1 AND lifecycle != 'tombstoned' AND id > ?2
+             ORDER BY id LIMIT {KEY_READ_LIMIT}"
+        ))?;
+        let rows = stmt.query_map(params![key, after.map(|a| a.as_str()).unwrap_or("")], read_entity)?;
         rows.map(|r| r?).collect()
     }
 

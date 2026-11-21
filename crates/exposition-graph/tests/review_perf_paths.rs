@@ -149,6 +149,9 @@ fn a_folder_named_in_another_case() {
         pending(&svc),
         live_resources(&svc)
     );
+    // One resource per file, whatever the case the folder was named in.
+    assert_eq!(live_resources(&svc), ["Notes/a.md", "Notes/sub/b.md", "other.md"]);
+    assert_eq!((report.resources_added, report.resources_removed), (0, 0), "{report:?}");
     // A file named in another case (exact comparison before and after the change).
     let marked = svc.mark_pending(&[path("notes/A.md")]).unwrap();
     println!("CASE mark_pending(notes/A.md) marked {marked} rows");
@@ -157,6 +160,7 @@ fn a_folder_named_in_another_case() {
     println!("CASE path_impacts(notes) {impacts:?}");
     svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: false }).unwrap();
     println!("CASE after a full pass: live resources {:?}; pending {:?}", live_resources(&svc), pending(&svc));
+    assert_eq!(live_resources(&svc), ["Notes/a.md", "Notes/sub/b.md", "other.md"]);
     // What the reviewed code does (the base marked the two rows under
     // `Notes`, read both tables' rows under it, and cleared the marks in the
     // pass over `notes`).
@@ -186,8 +190,13 @@ fn a_case_only_folder_rename_reported_by_the_watcher() {
         pending(&svc),
         after.as_ref() == Some(&before)
     );
+    // A rename: the identities are kept, nothing is left under the old name.
+    assert_eq!(after.as_ref(), Some(&before));
+    assert_eq!(live_resources(&svc), ["notes/a.md", "notes/b.md"]);
+    assert_eq!((report.resources_renamed, report.resources_added, report.resources_removed), (2, 0, 0), "{report:?}");
     svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: false }).unwrap();
     println!("CASE-RENAME after a full pass: live {:?}; pending {:?}", live_resources(&svc), pending(&svc));
+    assert_eq!(live_resources(&svc), ["notes/a.md", "notes/b.md"]);
     assert!(pending(&svc).is_empty());
 }
 

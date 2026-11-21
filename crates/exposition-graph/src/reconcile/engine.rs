@@ -130,6 +130,19 @@ pub(crate) const MAX_WANTED: usize = 200;
 /// A pass over at most this many paths reads only the records at and under
 /// them; a larger one reads the project's records once.
 const SCOPED_PATHS: usize = 16;
+/// Waited for by a file whose written paths were looked up below the folders
+/// of the project's LaTeX main files: it is resolved again when that set of
+/// folders changes.
+pub(crate) const LATEX_MAINS_TARGET: &str = "set:latex-mains";
+/// Files that make their folder a Lake package root.
+pub(crate) const LAKEFILES: [&str; 2] = ["lakefile.lean", "lakefile.toml"];
+/// Metadata key and value recording the rules by which stored links, awaited
+/// targets and Lean module names were derived. A full pass over a graph that
+/// records another value derives them again for every indexed file (no file
+/// is read), so a project indexed by an earlier build converges without a
+/// forced reindex.
+const LINK_RULES_KEY: &str = "link_rules";
+const LINK_RULES: &str = "2";
 
 impl ProjectIndex {
     pub fn set(&mut self, path: &WorkspacePath, labels: &[String], latex_main: bool) {
@@ -256,6 +269,28 @@ pub(crate) fn run_locked(
         state.root = Some(root.clone());
         state.index = ProjectIndex::default();
     }
+    // 0. One key per file: every path of the scope is scanned under the
+    // spelling it has on disk. The pass stays responsible for the records
+    // stored under the spelling it was given too (a folder renamed only in
+    // case is reported as its old and its new name), so a file leaves the old
+    // key and arrives at the new one in the same pass.
+    let scope_paths: Option<(Vec<WorkspacePath>, Vec<WorkspacePath>)> = match &options.scope {
+        Scope::Full => None,
+        Scope::Paths(paths) => {
+            let mut scanned: Vec<WorkspacePath> = Vec::new();
+            let mut responsible: Vec<WorkspacePath> = paths.clone();
+            for p in paths {
+                let spelled = scan::on_disk_spelling(&root, p);
+                if !responsible.contains(&spelled) {
+                    responsible.push(spelled.clone());
+                }
+                if !scanned.contains(&spelled) {
+                    scanned.push(spelled);
+                }
+            }
+            Some((scanned, responsible))
+        }
+    };
     // 1. Checkpoints and known resources (short lock).
     let (checkpoints, known) = graph.with_store_for(&root, |s| {
         if !state.index.loaded {
@@ -263,8 +298,8 @@ pub(crate) fn run_locked(
         }
         // A few paths are looked up directly; many (a burst of changes) are
         // cheaper to filter from one read.
-        let prefixes = match &options.scope {
-            Scope::Paths(p) if p.len() <= SCOPED_PATHS => Some(p.as_slice()),
+        let prefixes = match &scope_paths {
+            Some((_, p)) if p.len() <= SCOPED_PATHS => Some(p.as_slice()),
             _ => None,
         };
         let checkpoints = match prefixes {
@@ -281,14 +316,13 @@ pub(crate) fn run_locked(
     let t_loaded = started.elapsed();
     // 2. Scan (no lock).
     let mut scan_out = ScanOutcome::default();
-    let covered = match &options.scope {
-        Scope::Full => {
+    let covered = match &scope_paths {
+        None => {
             scan::scan_tree(&root, None, &mut scan_out);
             Covered::All
         }
-        Scope::Paths(paths) => {
-            let mut prefixes = Vec::new();
-            for p in paths {
+        Some((scanned, responsible)) => {
+            for p in scanned {
                 if scan::is_real_dir(&root, p) {
                     scan::scan_tree(&root, Some(p), &mut scan_out);
                 } else if let Some(meta) = scan::stat_file(&root, p)
@@ -296,9 +330,8 @@ pub(crate) fn run_locked(
                 {
                     scan_out.files.insert(p.clone(), meta);
                 }
-                prefixes.push(p.clone());
             }
-            Covered::Prefixes(prefixes)
+            Covered::Prefixes(responsible.clone())
         }
     };
     // Known resources in scope that the walk does not visit (retained
@@ -350,15 +383,14 @@ pub(crate) fn run_locked(
     let outcome = graph.with_store_for(&root, |store| {
         let planning = Instant::now();
         let mut planner = Planner::new(store, &root, index, now, force);
+        // A full pass brings a graph derived under other rules up to date.
+        let full = scope_paths.is_none();
+        planner.rederive = full && store.meta(LINK_RULES_KEY)?.as_deref() != Some(LINK_RULES);
         planner.plan(&scan_out, &covered, &checkpoints, &fresh)?;
+        let rederived = planner.rederive;
         let mut plan = planner.finish();
-        plan.clear_pending = Some((
-            match &options.scope {
-                Scope::Full => None,
-                Scope::Paths(p) => Some(p.clone()),
-            },
-            token,
-        ));
+        plan.record_rules = rederived;
+        plan.clear_pending = Some((scope_paths.as_ref().map(|(_, responsible)| responsible.clone()), token));
         let planned = planning.elapsed();
         let revision = plan.write(store)?;
         Ok((plan, revision, planned))
@@ -451,6 +483,8 @@ pub(crate) struct Plan {
     pub semantic: bool,
     /// Clear pending marks (scope, up to token) when written.
     pub clear_pending: Option<(Option<Vec<WorkspacePath>>, u64)>,
+    /// Record that links were derived under the current rules.
+    pub record_rules: bool,
 }
 
 impl Plan {
@@ -467,6 +501,7 @@ impl Plan {
             && self.remove_index.is_empty()
             && self.wanted.is_empty()
             && self.delta.is_empty()
+            && !self.record_rules
     }
 
     /// Write the plan in one transaction. Returns the graph revision after it.
@@ -515,6 +550,9 @@ impl Plan {
         }
         let now = now_ms().to_string();
         w.set_meta("reconciled_at", &now)?;
+        if self.record_rules {
+            w.set_meta(LINK_RULES_KEY, LINK_RULES)?;
+        }
         let revision = if self.semantic || !self.delta.is_empty() {
             let mut delta = self.delta.clone();
             let summary = format!(
@@ -702,6 +740,8 @@ pub(crate) struct Planner<'a> {
     pub(crate) resources: Resources<'a>,
     /// Entities whose natural key was set in this pass (for resolution).
     pub(crate) keyed: HashMap<String, BTreeSet<EntityId>>,
+    /// Entities whose natural key was this one before the pass changed it.
+    pub(crate) unkeyed: HashMap<String, BTreeSet<EntityId>>,
     pub(crate) tombstoned_now: BTreeSet<EntityId>,
     /// Resources moved/renamed in this pass.
     moved_now: BTreeSet<EntityId>,
@@ -716,6 +756,12 @@ pub(crate) struct Planner<'a> {
     pub(crate) binding_problems: BTreeMap<WorkspacePath, Vec<String>>,
     /// Base coverage of files indexed this pass (before link resolution).
     pub(crate) base_coverage: BTreeMap<WorkspacePath, (ResourceCoverage, Stamp)>,
+    /// The LaTeX main files as this pass leaves them (computed once, after
+    /// every file of the pass is indexed).
+    pub(crate) mains_cache: std::cell::RefCell<Option<std::sync::Arc<BTreeSet<WorkspacePath>>>>,
+    /// Derive links, awaited targets and Lean module names of every indexed
+    /// file again (a full pass over a graph derived under other rules).
+    rederive: bool,
 }
 
 impl<'a> Planner<'a> {
@@ -754,6 +800,7 @@ impl<'a> Planner<'a> {
             key_cache: std::cell::RefCell::new(HashMap::new()),
             resources: Resources::new(store),
             keyed: HashMap::new(),
+            unkeyed: HashMap::new(),
             tombstoned_now: BTreeSet::new(),
             moved_now: BTreeSet::new(),
             resolve: BTreeSet::new(),
@@ -762,6 +809,8 @@ impl<'a> Planner<'a> {
             renames: Vec::new(),
             binding_problems: BTreeMap::new(),
             base_coverage: BTreeMap::new(),
+            mains_cache: std::cell::RefCell::new(None),
+            rederive: false,
         }
     }
 
@@ -811,7 +860,7 @@ impl<'a> Planner<'a> {
         if let Some(k) = &e.key {
             self.keyed.entry(k.clone()).or_default().insert(e.id.clone());
             self.targets_added = true;
-            self.new_targets.insert(target_key(e.kind, k));
+            self.new_targets.extend(target_keys(e.kind, k));
         }
         self.write_entities.insert(e.id.clone());
         self.created_now.insert(e.id.clone());
@@ -833,18 +882,28 @@ impl<'a> Planner<'a> {
         // other files' references resolve (missing → found, ambiguous → unique).
         if before.key != after.key || before.lifecycle != after.lifecycle {
             for k in [&before.key, &after.key].into_iter().flatten() {
-                self.new_targets.insert(target_key(after.kind, k));
+                self.new_targets.extend(target_keys(after.kind, k));
             }
         }
         if before.lifecycle == Lifecycle::Tombstoned && after.lifecycle != Lifecycle::Tombstoned {
             self.tombstoned_now.remove(&after.id);
             self.targets_added = true;
+            // Not among the stored live entities of its name: resolution
+            // finds a revived declaration through the planned ones.
+            if let Some(k) = &after.key {
+                self.keyed.entry(k.clone()).or_default().insert(after.id.clone());
+            }
         }
         if before.key != after.key
             && let Some(k) = &after.key
         {
             self.keyed.entry(k.clone()).or_default().insert(after.id.clone());
             self.targets_added = true;
+        }
+        if before.key != after.key
+            && let Some(k) = &before.key
+        {
+            self.unkeyed.entry(k.clone()).or_default().insert(after.id.clone());
         }
         if after.lifecycle == Lifecycle::Tombstoned && before.lifecycle != Lifecycle::Tombstoned {
             self.tombstoned_now.insert(after.id.clone());
@@ -882,6 +941,12 @@ impl<'a> Planner<'a> {
 
     /// Record a file's index for this pass (keeps the label/main caches).
     pub(crate) fn put_index_record(&mut self, path: &WorkspacePath, body: IndexBody) {
+        // The labels the file had: as planned earlier in this pass, else as
+        // stored (the session index).
+        let before: BTreeSet<String> = match self.index_records.get(path) {
+            Some(old) => old.extraction.labels.iter().cloned().collect(),
+            None => self.index.by_path.get(path).map(|l| l.iter().cloned().collect()).unwrap_or_default(),
+        };
         if let Some(old) = self.index_records.get(path) {
             for l in &old.extraction.labels {
                 if let Some(set) = self.planned_labels.get_mut(l) {
@@ -891,6 +956,11 @@ impl<'a> Planner<'a> {
         }
         for l in &body.extraction.labels {
             self.planned_labels.entry(l.clone()).or_default().insert(path.clone());
+        }
+        // A label that appears or disappears changes how references to it
+        // resolve anywhere; one the file keeps changes nothing.
+        let after: BTreeSet<String> = body.extraction.labels.iter().cloned().collect();
+        for l in before.symmetric_difference(&after) {
             self.new_targets.insert(format!("name:{l}"));
         }
         if body.latex_main {
@@ -1099,14 +1169,65 @@ impl<'a> Planner<'a> {
         }
 
         let observed = &scan_out.files;
-        let gone: Vec<WorkspacePath> =
+        let mut gone: Vec<WorkspacePath> =
             active.keys().filter(|p| covered.contains(p) && !observed.contains_key(*p)).cloned().collect();
         let new_paths: Vec<WorkspacePath> = observed.keys().filter(|p| !active.contains_key(*p)).cloned().collect();
+        // A new path that differs only in case from a stored one whose file
+        // is no longer there under that spelling is that file, renamed in
+        // case while only the new name was reported: the stored path left
+        // with it. (Where both spellings exist they are two files and both
+        // stay.) A pass that adds a file reads every resource for the
+        // folder structure anyway; nothing is read for other passes.
+        let mut respelled: BTreeMap<WorkspacePath, Checkpoint> = BTreeMap::new();
+        if scoped.is_some() && !new_paths.is_empty() {
+            self.resources.load_all()?;
+            let arrived: HashMap<String, &WorkspacePath> =
+                new_paths.iter().map(|p| (p.as_str().to_lowercase(), p)).collect();
+            let stored: Vec<(WorkspacePath, EntityId)> = self
+                .resources
+                .live()
+                .filter(|(p, _)| {
+                    !active.contains_key(*p) && arrived.get(&p.as_str().to_lowercase()).is_some_and(|n| n != p)
+                })
+                .map(|(p, id)| (p.clone(), id.clone()))
+                .collect();
+            for (old, id) in stored {
+                if scan::stat_file(self.root, &old).is_some() {
+                    continue;
+                }
+                respelled.extend(self.store.checkpoints_under(std::slice::from_ref(&old))?);
+                active.insert(old.clone(), id);
+                gone.push(old);
+            }
+        }
+        let merged: BTreeMap<WorkspacePath, Checkpoint>;
+        let checkpoints = if respelled.is_empty() {
+            checkpoints
+        } else {
+            merged = checkpoints.iter().map(|(p, c)| (p.clone(), c.clone())).chain(respelled).collect();
+            &merged
+        };
 
         // Confirmed renames: same physical file, else unique same content.
         let renames = confirm_renames(&gone, &new_paths, checkpoints, fresh);
         let renamed_old: BTreeSet<&WorkspacePath> = renames.iter().map(|(o, _)| o).collect();
         let renamed_new: BTreeSet<&WorkspacePath> = renames.iter().map(|(_, n)| n).collect();
+
+        // The Lake package roots before this pass, when a package file
+        // appears, moves or disappears in it.
+        let lake_touched = gone.iter().chain(&new_paths).any(|p| LAKEFILES.contains(&p.file_name()));
+        let lake_before = if lake_touched || self.rederive {
+            let mut roots: Vec<Option<WorkspacePath>> =
+                self.store.live_resource_paths_named(&LAKEFILES)?.iter().map(|p| p.parent()).collect();
+            roots.sort();
+            roots.dedup();
+            if roots.is_empty() {
+                roots.push(None);
+            }
+            Some(roots)
+        } else {
+            None
+        };
 
         let mut matches: Vec<FileMatch> = Vec::new();
 
@@ -1239,25 +1360,7 @@ impl<'a> Planner<'a> {
         let t_files = Instant::now();
         self.apply_matches(matches)?;
         let t_matches = Instant::now();
-        if !self.new_targets.is_empty() {
-            // Files waiting for a target this pass introduced: from the
-            // session index (by target), else from every stored list.
-            let waiting: BTreeSet<WorkspacePath> = if self.index.loaded {
-                self.index.waiting_for(&self.new_targets)
-            } else {
-                self.store
-                    .index_wanted()?
-                    .into_iter()
-                    .filter(|(_, wanted)| wanted.iter().any(|w| w == ANY_TARGET || self.new_targets.contains(w)))
-                    .map(|(p, _)| p)
-                    .collect()
-            };
-            for p in waiting {
-                if self.resources.get(&p)?.is_some() {
-                    self.resolve.insert(p);
-                }
-            }
-        }
+        self.plan_dependents(lake_before)?;
         if self.structure_dirty {
             self.plan_structure()?;
         }
@@ -1313,11 +1416,146 @@ impl<'a> Planner<'a> {
     /// are resolved again.
     fn trigger_referrers(&mut self, id: &EntityId) -> StoreResult<()> {
         for r in self.store.relations_to(id)? {
-            if !matches!(r.origin, Origin::Extracted { .. }) || r.kind == RelationKind::Contains {
+            // A link the source states is carried by the relation of its
+            // kind between the two ends, whoever recorded it (an accepted
+            // relation stands in place of the observed one).
+            let observed = matches!(r.origin, Origin::Extracted { .. }) && r.kind != RelationKind::Contains;
+            if !observed && !super::resolve::is_link_kind(r.kind) {
                 continue;
             }
             if let Some(path) = self.source_path_of(&r.from)? {
                 self.resolve.insert(path);
+            }
+        }
+        Ok(())
+    }
+
+    /// Everything the files indexed in this pass changed for files that
+    /// were not: a name or label that appeared or disappeared, a path that
+    /// became or stopped being a resource, the folders of the LaTeX main
+    /// files, the Lake package roots. The files concerned are found from
+    /// what the change names (the relations to the entities of a name, the
+    /// files waiting for a target), never by reading every file's record.
+    fn plan_dependents(&mut self, lake_before: Option<Vec<Option<WorkspacePath>>>) -> StoreResult<()> {
+        // Labels of files whose index goes away with them.
+        let index = self.index;
+        let dropped: Vec<String> = self
+            .remove_index
+            .iter()
+            .filter(|p| !self.index_records.contains_key(*p))
+            .filter_map(|p| index.by_path.get(p))
+            .flatten()
+            .map(|l| format!("name:{l}"))
+            .collect();
+        self.new_targets.extend(dropped);
+        // The folders written paths are looked up in.
+        let folders = |mains: &BTreeSet<WorkspacePath>| -> BTreeSet<Option<WorkspacePath>> {
+            mains.iter().map(|m| m.parent()).collect()
+        };
+        if folders(&self.index.latex_mains) != folders(&self.latex_mains()) {
+            self.new_targets.insert(LATEX_MAINS_TARGET.to_owned());
+        }
+        // Lake package roots: the module names of the Lean files beneath a
+        // root that appeared or went, and how every import resolves.
+        if let Some(before) = lake_before {
+            let after = self.lake_roots()?;
+            if self.rederive || before != after {
+                self.lake_roots_cache = Some(after.clone());
+                self.resources.load_all()?;
+                let lean: Vec<WorkspacePath> = self
+                    .resources
+                    .live()
+                    .map(|(path, _)| path)
+                    .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("lean")))
+                    .cloned()
+                    .collect();
+                for path in lean {
+                    // Indexed in this pass: already derived from these roots.
+                    if !self.index_records.contains_key(&path)
+                        && (self.rederive || lean_module(&path, &before) != lean_module(&path, &after))
+                    {
+                        self.rederive_lean_module(&path, &after)?;
+                    }
+                    self.resolve.insert(path);
+                }
+            }
+        }
+        // A name whose declarations changed: the files that refer to a
+        // declaration of that name (it may have become ambiguous, or gone).
+        let names: Vec<String> =
+            self.new_targets.iter().filter_map(|t| t.strip_prefix("name:")).map(str::to_owned).collect();
+        for name in names {
+            for id in self.stored_with_key(&name)? {
+                self.trigger_referrers(&id)?;
+            }
+        }
+        // Files waiting for a target this pass introduced or withdrew: from
+        // the session index (by target), else from every stored list.
+        if !self.new_targets.is_empty() {
+            let waiting: BTreeSet<WorkspacePath> = if self.index.loaded {
+                self.index.waiting_for(&self.new_targets)
+            } else {
+                self.store
+                    .index_wanted()?
+                    .into_iter()
+                    .filter(|(_, wanted)| wanted.iter().any(|w| w == ANY_TARGET || self.new_targets.contains(w)))
+                    .map(|(p, _)| p)
+                    .collect()
+            };
+            for p in waiting {
+                if self.resources.get(&p)?.is_some() {
+                    self.resolve.insert(p);
+                }
+            }
+        }
+        if self.rederive {
+            let indexed: Vec<WorkspacePath> = self.index.by_path.keys().cloned().collect();
+            for p in indexed {
+                if self.resources.get(&p)?.is_some() {
+                    self.resolve.insert(p);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The LaTeX main files as this pass leaves them.
+    pub(crate) fn latex_mains(&self) -> std::sync::Arc<BTreeSet<WorkspacePath>> {
+        if let Some(mains) = self.mains_cache.borrow().as_ref() {
+            return std::sync::Arc::clone(mains);
+        }
+        let mut mains: BTreeSet<WorkspacePath> = self
+            .index
+            .latex_mains
+            .iter()
+            .filter(|p| !self.index_records.contains_key(*p) && !self.remove_index.contains(*p))
+            .cloned()
+            .collect();
+        mains.extend(self.planned_mains.iter().filter(|p| self.index_records.contains_key(*p)).cloned());
+        let mains = std::sync::Arc::new(mains);
+        *self.mains_cache.borrow_mut() = Some(std::sync::Arc::clone(&mains));
+        mains
+    }
+
+    /// Set `lean.module` of the formal declarations of a Lean file that is
+    /// not read in this pass, from the Lake package roots as they are now.
+    fn rederive_lean_module(&mut self, path: &WorkspacePath, roots: &[Option<WorkspacePath>]) -> StoreResult<()> {
+        let Some(record) = self.store.source_index(path)? else { return Ok(()) };
+        let Ok(body) = serde_json::from_str::<IndexBody>(&record.body) else { return Ok(()) };
+        let module = lean_module(path, roots);
+        for id in body.ids.iter().flatten() {
+            let Some(before) = self.entity(id)? else { continue };
+            if before.kind != EntityKind::FormalDeclaration || before.lifecycle == Lifecycle::Tombstoned {
+                continue;
+            }
+            let mut after = before.clone();
+            match &module {
+                Some(m) => after.attributes.insert("lean.module".into(), crate::store::truncate(m, 500)),
+                None => after.attributes.remove("lean.module"),
+            };
+            if after.attributes != before.attributes {
+                self.semantic = true;
+                self.update(&before, after);
             }
         }
         Ok(())
@@ -1568,7 +1806,6 @@ impl<'a> Planner<'a> {
             }
             let lean_module = lean_module(&path, self.lake_roots_cache.as_deref().unwrap_or(&[]));
             let hash = matches[fi].hash.clone();
-            let mut problems: Vec<String> = Vec::new();
             let decls = matches[fi].extraction.declarations.clone();
             let unnamed_ordinals = ordinals(&decls);
             // Pairs: same entity, new anchor.
@@ -1635,9 +1872,6 @@ impl<'a> Planner<'a> {
                     b.detail = Some(format!("“{name}” is declared {count} times in {path}; none was chosen."));
                 }
                 self.set_bindings(&id, bindings);
-            }
-            for (name, count) in &matches[fi].matching.ambiguous_names {
-                problems.push(format!("“{name}” is declared {count} times"));
             }
             // Removed declarations.
             let removed = matches[fi].matching.unmatched_known.clone();
@@ -1714,9 +1948,6 @@ impl<'a> Planner<'a> {
                         self.unrelate(&r);
                     }
                 }
-            }
-            if !problems.is_empty() {
-                self.binding_problems.entry(path.clone()).or_default().extend(problems);
             }
             let fm = &matches[fi];
             let body = IndexBody { extraction: fm.extraction.clone(), ids: fm.ids.clone(), latex_main: fm.latex_main };
@@ -1905,7 +2136,7 @@ impl<'a> Planner<'a> {
     /// Folders that hold a Lake package (`lakefile.lean`/`lakefile.toml`).
     pub(crate) fn lake_roots(&self) -> StoreResult<Vec<Option<WorkspacePath>>> {
         let mut roots: Vec<Option<WorkspacePath>> =
-            self.resources.named(&["lakefile.lean", "lakefile.toml"])?.iter().map(|p| p.parent()).collect();
+            self.resources.named(&LAKEFILES)?.iter().map(|p| p.parent()).collect();
         roots.sort();
         roots.dedup();
         if roots.is_empty() {
@@ -1953,6 +2184,7 @@ impl<'a> Planner<'a> {
             report: self.report,
             semantic,
             clear_pending: None,
+            record_rules: false,
         }
     }
 }
@@ -1986,6 +2218,33 @@ pub(crate) fn target_key(kind: EntityKind, key: &str) -> String {
         EntityKind::Resource | EntityKind::Folder => format!("path:{key}"),
         _ => format!("name:{key}"),
     }
+}
+
+/// The keys files wait under for an entity that appears, moves or
+/// disappears. A file waits for a written path once per folder it is looked
+/// up in, without the extensions that are tried (`path:figures/plot` for
+/// `figures/plot.pdf`, `.png`, ...; `path:pkg` for `pkg/__init__.py`), so a
+/// resource is announced under its path, its path without the extension and,
+/// for a package file, its folder.
+pub(crate) fn target_keys(kind: EntityKind, key: &str) -> Vec<String> {
+    let mut out = vec![target_key(kind, key)];
+    if kind == EntityKind::Resource {
+        let (dir, name) = match key.rsplit_once('/') {
+            Some((dir, name)) => (Some(dir), name),
+            None => (None, key),
+        };
+        if let Some(dot) = name.rfind('.')
+            && dot > 0
+        {
+            out.push(format!("path:{}", &key[..key.len() - (name.len() - dot)]));
+        }
+        if name == "__init__.py"
+            && let Some(dir) = dir
+        {
+            out.push(format!("path:{dir}"));
+        }
+    }
+    out
 }
 
 fn sorted_roles(roles: &[ResourceRole]) -> Vec<ResourceRole> {

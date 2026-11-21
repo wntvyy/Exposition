@@ -123,9 +123,20 @@ host at the `large` scale unless a row says otherwise; release-profile figures f
 | 2,160 pending marks | one statement per batch | 3,800 → 7 ms |
 | Reads that decide (impact, removal planning) | complete, or flagged incomplete | a dependent hidden behind 20,050 rejected suggestions is now found |
 
-A scoped pass and a full reindex must produce the same files, folders, bindings
-and containment: `review_perf_differential` checks this over random operation
-sequences and is part of the normal test suite.
+A scoped pass and a full reindex must produce the same graph, record for
+record (entities, bindings, relations, coverage, awaited targets, the stored
+index) and the same overlays: `review_perf_differential` checks this over
+random operation sequences and is part of the normal test suite.
+
+A change that concerns other files costs those files and no more, each resolved
+from its stored index without being read: a label that gains or loses a
+declaration costs the files that refer to it, a file that appears on a lookup
+path costs the files waiting for that path, a lakefile costs the Lean files, a
+LaTeX main file costs the files whose paths were looked up below the main
+files' folders. `cost_bounds` asserts the first and the third by statement
+counts. The exception is stated in the store: a graph that does not record the
+current link rules has every indexed file resolved again once, by its next
+full pass.
 
 ### Pages
 
@@ -260,11 +271,15 @@ or product behaviour:
   edited by it.
 - **`build:app` with nothing changed** takes about 23 s.
 
-Known differences between an incremental graph pass and a full reindex that
-predate this work (a reference that stays resolved after a second declaration
-of its label; a Lean module that goes stale when a lakefile moves; duplicate
-resources for a folder path given in another letter case) are recorded by the
-strict mode of `review_perf_differential` and are not yet fixed.
+- **Graph files at the awaited-target cap.** A file that waits for more than
+  200 link targets is recorded as waiting for any target and is resolved again
+  (about 100 statements, from its stored index) by every pass that introduces
+  or withdraws a target anywhere. The cost is bounded per such file, not by the
+  change; lifting it needs a larger or separately stored awaited list.
+- **A label with more declarations than one read of a key returns (64).** The
+  number a reference reports is counted, and the same from an incremental pass
+  and a reindex; only when all but one are removed in one pass are the stored
+  declarations of that label paged through to find the one left.
 
 ## For the agent runtime rework
 

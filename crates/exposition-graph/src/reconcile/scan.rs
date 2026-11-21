@@ -69,6 +69,11 @@ pub fn scan_tree(root: &Path, start: Option<&WorkspacePath>, out: &mut ScanOutco
             if !real_dir_chain(root, dir) {
                 return;
             }
+            // Only the folder's own spelling names it: files found under
+            // another spelling would be keyed by paths no file has.
+            if on_disk_spelling(root, dir) != *dir {
+                return;
+            }
             stack.push((absolute(root, dir), Some(dir.clone()), dir.components().count()));
         }
         None => stack.push((root.to_path_buf(), None, 0)),
@@ -143,13 +148,10 @@ pub fn stat_file(root: &Path, path: &WorkspacePath) -> Option<FileMeta> {
     if meta.file_type().is_symlink() || !meta.is_file() {
         return None;
     }
-    // On a case-insensitive file system another spelling of the name reaches
-    // the file too (`a.txt` after a rename to `A.txt`): only the name as
-    // stored on disk is the file, or one file would get two resources.
-    if cfg!(windows)
-        && let Ok(real) = std::fs::canonicalize(&abs)
-        && real.file_name().and_then(|n| n.to_str()).is_some_and(|n| n != path.file_name())
-    {
+    // Another spelling of any component reaches the file too (another case
+    // on a case-insensitive file system, an 8.3 short name): only the path
+    // as stored on disk is the file, or one file would get two resources.
+    if on_disk_spelling(root, path) != *path {
         return None;
     }
     let roles = match classify(path) {
@@ -157,6 +159,62 @@ pub fn stat_file(root: &Path, path: &WorkspacePath) -> Option<FileMeta> {
         Admission::Exclude(_) => Vec::new(),
     };
     Some(FileMeta { size: meta.len(), modified_ms: modified_ms(&meta), roles })
+}
+
+/// `path` as the file system names it: every component that exists is
+/// returned with the name stored on disk, so that one file or folder has one
+/// key however a caller or a watcher wrote it (`notes/a.md` for `Notes/a.md`
+/// on a case-insensitive file system, the long name for an 8.3 short name).
+/// Components that do not exist (a deleted file, the rest of a path below a
+/// missing folder) have no name on disk and are kept as given. On a
+/// case-sensitive file system a path is its own spelling: two names that
+/// differ in case are two files.
+///
+/// The result always has the components of `path`, one for one, below
+/// `root`: a path that passes through a link or junction is returned as
+/// given (the names beyond a link are those of another location; such paths
+/// are refused where files are read), and so is one whose resolved form
+/// does not end in as many names.
+///
+/// The cost is one metadata lookup per component and one name lookup for
+/// the existing part; no folder is listed.
+pub fn on_disk_spelling(root: &Path, path: &WorkspacePath) -> WorkspacePath {
+    let given: Vec<&str> = path.components().collect();
+    // The existing part, which must hold no link at any level.
+    let mut abs = root.to_path_buf();
+    let mut existing = 0;
+    for c in &given {
+        abs.push(c);
+        match std::fs::symlink_metadata(&abs) {
+            Ok(m) if m.file_type().is_symlink() => return path.clone(),
+            Ok(_) => existing += 1,
+            Err(_) => {
+                abs.pop();
+                break;
+            }
+        }
+    }
+    if existing == 0 {
+        return path.clone();
+    }
+    let Ok(real) = std::fs::canonicalize(&abs) else { return path.clone() };
+    // Without a link below the root, the last names of the resolved path
+    // are the components as stored, whatever alias named them.
+    let mut names: Vec<String> = real
+        .components()
+        .rev()
+        .take(existing)
+        .filter_map(|c| match c {
+            std::path::Component::Normal(name) => name.to_str().map(str::to_owned),
+            _ => None,
+        })
+        .collect();
+    names.reverse();
+    if names.len() != existing || names.iter().map(String::as_str).eq(given[..existing].iter().copied()) {
+        return path.clone();
+    }
+    names.extend(given[existing..].iter().map(|c| (*c).to_owned()));
+    WorkspacePath::parse(&names.join("/")).unwrap_or_else(|_| path.clone())
 }
 
 /// Is `path` (a file or folder) present as a real folder?

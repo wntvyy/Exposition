@@ -8,8 +8,10 @@
 //! small generated project. After every step the events are reconciled the
 //! way the driver does it (marks, then a pass over the changed paths), and
 //! the graph is compared, record by record and id by id, with a copy of the
-//! same database after a forced full reindex of the same files. The status
-//! counts are compared with the tables at every step.
+//! same database after a forced full reindex of the same files: every
+//! entity, binding, relation, coverage row, awaited target and stored index
+//! record, and the overlay of every unsaved buffer. The status counts are
+//! compared with the tables at every step.
 //!
 //! Environment (all optional; the defaults are the fast fixed run):
 //! - `EXPOSITION_DIFF_SEEDS`: `a..b` or a comma list of seeds.
@@ -21,13 +23,12 @@
 //!   in full next to the hashes.
 //! - `EXPOSITION_DIFF_SOFT`: collect differences and report them at the end
 //!   of each seed instead of stopping at the first.
-//! - `EXPOSITION_DIFF_STRICT`: compare every record and the overlays with
-//!   the full reindex (by default: files, folders, their bindings and
-//!   containment, which agreed at the base revision).
 //! - `EXPOSITION_DIFF_NO_FULL`: skip the full reindex (hashes only).
+//! - `EXPOSITION_DIFF_TRACE`: print the events of every step.
+//! - `EXPOSITION_DIFF_KEEP`: a folder that receives a copy of the project
+//!   (files and graph) as it is at the `seed:step` of `EXPOSITION_DIFF_FULL`.
 //! - `EXPOSITION_DIFF_NO_OVERLAP`: never name a folder and a path beneath
-//!   it in one pass (the reviewed code tombstones such files: see the
-//!   ignored test in `review_perf_paths.rs`).
+//!   it in one pass.
 //! - `EXPOSITION_DIFF_CASE`: also deliver events whose folder case differs
 //!   from the stored paths.
 
@@ -987,6 +988,11 @@ impl Run {
             self.overlay_lines = overlays_a;
             return;
         }
+        if let Some(keep) = std::env::var_os("EXPOSITION_DIFF_KEEP")
+            && std::env::var("EXPOSITION_DIFF_FULL").ok().as_deref() == Some(&format!("{}:{step}", self.seed))
+        {
+            copy_tree(&self.a.root, &PathBuf::from(keep));
+        }
         let b = open(Some(&self.a.root));
         b.svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: true }).unwrap();
         let full = records(&b.svc, false);
@@ -998,14 +1004,6 @@ impl Run {
             });
         }
         b.svc.detach();
-        // Without `EXPOSITION_DIFF_STRICT` only the records that agreed
-        // before the change under review are compared: files, folders,
-        // their bindings and containment. Link resolution, awaited targets
-        // and Lean module names already differed between an incremental
-        // pass and a full reindex at the base revision (see the review).
-        let strict = std::env::var_os("EXPOSITION_DIFF_STRICT").is_some();
-        let (incremental, full) =
-            if strict { (incremental, full) } else { (structure(&incremental), structure(&full)) };
         if incremental != full {
             let a: BTreeSet<&String> = incremental.iter().collect();
             let f: BTreeSet<&String> = full.iter().collect();
@@ -1018,7 +1016,7 @@ impl Run {
             }
             self.finding(step, text);
         }
-        if strict && overlays_a != overlays_b {
+        if overlays_a != overlays_b {
             let mut text = String::from("an overlay differs after a forced full reindex\n");
             for (x, y) in overlays_a.iter().zip(&overlays_b) {
                 if x != y {
@@ -1029,30 +1027,6 @@ impl Run {
         }
         self.overlay_lines = overlays_a;
     }
-}
-
-/// The records of files and folders: their entities, bindings and containment.
-fn structure(lines: &[String]) -> Vec<String> {
-    let field = |line: &str, name: &str| -> Option<String> {
-        let v: Value = serde_json::from_str(line.split_once(' ')?.1).ok()?;
-        v.get(name)?.as_str().map(str::to_owned)
-    };
-    let ids: BTreeSet<String> = lines
-        .iter()
-        .filter(|l| l.starts_with("E "))
-        .filter(|l| matches!(field(l, "kind").as_deref(), Some("resource" | "folder" | "project")))
-        .filter_map(|l| field(l, "id"))
-        .collect();
-    lines
-        .iter()
-        .filter(|l| match l.split_once(' ').map(|(tag, _)| tag) {
-            Some("E") => field(l, "id").is_some_and(|id| ids.contains(&id)),
-            Some("B") => field(l, "entity").is_some_and(|id| ids.contains(&id)),
-            Some("R") => field(l, "kind").as_deref() == Some("contains"),
-            _ => false,
-        })
-        .cloned()
-        .collect()
 }
 
 fn clip(line: &str) -> String {
@@ -1127,6 +1101,9 @@ impl Run {
                 }
                 97..=99 => run.curate(),
                 _ => {}
+            }
+            if std::env::var_os("EXPOSITION_DIFF_TRACE").is_some() {
+                eprintln!("TRACE seed {seed} step {step}: events {events:?}; touched {touched:?}");
             }
             run.deliver(step, events);
             if run.rng.chance(20) {
