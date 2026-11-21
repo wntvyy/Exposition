@@ -97,6 +97,43 @@ pub fn read_manifest(root: &Path, run_id: &str) -> Result<RunManifest, ResearchE
     Ok(manifest)
 }
 
+/// What reading one record for the history found.
+pub(crate) enum RecordRead {
+    Manifest(Box<RunManifest>),
+    /// No such file (deleted since the folder was listed).
+    Missing,
+    /// The file exists and could not be opened or read (held by another
+    /// program, a failing disk): nothing is known about its content.
+    Unopened,
+    /// The file was read (`bytes` bytes) and is not a manifest of this run.
+    Damaged {
+        bytes: u64,
+    },
+}
+
+/// Read `run_id`'s record for the history. A read that fails is tried again
+/// shortly: a scanner or a sync client holds a file briefly, and a record
+/// that is being replaced can be reported as not there for a moment.
+pub(crate) fn read_record(root: &Path, run_id: &str) -> RecordRead {
+    let path = root.join(EXPOSITION_DIR).join(RUNS_DIR).join(format!("{run_id}.json"));
+    let mut tries = 0;
+    let bytes = loop {
+        match std::fs::read(&path) {
+            Ok(bytes) => break bytes,
+            Err(_) if tries < 2 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RecordRead::Missing,
+            Err(_) => return RecordRead::Unopened,
+        }
+    };
+    match serde_json::from_slice::<RunManifest>(&bytes) {
+        Ok(manifest) if manifest.record.id.0 == run_id => RecordRead::Manifest(Box::new(manifest)),
+        _ => RecordRead::Damaged { bytes: bytes.len() as u64 },
+    }
+}
+
 /// Ids of every run record of `root`, most recently modified first. Reads
 /// the folder listing only (see [`crate::history`] for the paged history).
 pub fn record_ids(root: &Path) -> Vec<String> {

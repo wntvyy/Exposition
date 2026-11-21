@@ -811,7 +811,6 @@ fn a_damaged_record_repaired_with_a_new_time_is_listed_again_at_once() {
 /// time the damaged one had, and stays out of the history, counted as
 /// unreadable, until the project is reopened.
 #[test]
-#[ignore = "review: defect — a record repaired without a change of modification time stays 'unreadable' and unlisted"]
 fn a_damaged_record_repaired_at_the_same_time_is_listed_again() {
     let f = fixture();
     for i in 0..6 {
@@ -834,7 +833,6 @@ fn a_damaged_record_repaired_at_the_same_time_is_listed_again() {
 /// record as damaged; it then stays out of every later listing.
 #[cfg(windows)]
 #[test]
-#[ignore = "review: defect — a record that could not be opened once is hidden as 'unreadable' in later listings although it is intact"]
 fn a_record_locked_during_one_listing_is_listed_by_the_next() {
     use std::os::windows::fs::OpenOptionsExt;
     let f = fixture();
@@ -989,7 +987,6 @@ mod index_order {
     const NOT_LIVE: &dyn Fn(&str) -> bool = &|_| false;
 
     #[test]
-    #[ignore = "review: defect — a request that listed the folder earlier but reaches the index later makes it forget a record; a run is then returned twice"]
     fn an_older_listing_arriving_late_does_not_let_a_run_be_returned_twice() {
         let index = HistoryIndex::default();
         let root = Path::new("/project");
@@ -1016,7 +1013,6 @@ mod index_order {
     }
 
     #[test]
-    #[ignore = "review: defect — a request that listed the folder earlier but reaches the index later makes it forget a record; a run is then never returned"]
     fn an_older_listing_arriving_late_does_not_let_a_run_be_skipped() {
         let index = HistoryIndex::default();
         let root = Path::new("/project");

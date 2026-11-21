@@ -23,8 +23,8 @@ use crate::runs::{
     ARTIFACT_SIZE_LIMIT, MANIFEST_CODE_LIMIT, RunState, artifact_belongs_to_run, page_of, settle_orphan,
 };
 use crate::store::{
-    self, MANIFEST_FORMAT, artifact_dir_path, ensure_dir_within, new_run_id, read_manifest, resolve_existing,
-    write_manifest, write_transcript,
+    self, MANIFEST_FORMAT, RecordRead, artifact_dir_path, ensure_dir_within, new_run_id, read_manifest,
+    resolve_existing, write_manifest, write_transcript,
 };
 use crate::types::{
     Availability, CodeOrigin, CodeProvenance, EnvironmentReport, ExecuteRequest, InterpreterProvenance, KernelChoice,
@@ -906,7 +906,9 @@ impl ResearchService {
     /// stored records after `request.after`. Within a page runs are ordered
     /// by start time, newest first. A page reads only the manifests it
     /// examines (at most `limit` readable ones, plus records found damaged
-    /// on the way, which are remembered and not read again).
+    /// on the way, which are remembered by modification time and size and
+    /// not read again until one of them changes). A record that cannot be
+    /// opened is counted in `unreadable` and read again by the next listing.
     ///
     /// Paging until `next` is absent returns every stored run that existed
     /// the whole time exactly once, whatever was created or deleted between
@@ -927,10 +929,16 @@ impl ResearchService {
             .map(|run| (run.id().to_owned(), run.summary()))
             .collect();
         let history = &self.shared.history;
-        history.count_scan();
-        let listing = crate::history::scan(root);
-        let plan = history.plan(root, &listing, request.after.as_deref(), &|id| live.contains_key(id))?;
+        let plan = history.plan_listing(
+            root,
+            || crate::history::scan_sized(root),
+            |id| crate::history::stat(root, id),
+            request.after.as_deref(),
+            &|id| live.contains_key(id),
+        )?;
+        let listing = &plan.listing;
         let mut stored: Vec<RunSummary> = Vec::new();
+        let mut settled: Vec<&str> = Vec::new();
         let mut examined = 0;
         let mut vanished = 0;
         for file in &plan.candidates {
@@ -939,16 +947,24 @@ impl ResearchService {
             }
             examined += 1;
             history.count_read();
-            match read_manifest(root, &file.id) {
-                Ok(manifest) => {
+            match store::read_record(root, &file.id) {
+                RecordRead::Manifest(manifest) => {
                     let owner = manifest.session.owner.clone();
-                    stored.push(crate::runs::summary_of(&self.settle(manifest), owner, false));
+                    stored.push(crate::runs::summary_of(&self.settle(*manifest), owner, false));
+                    settled.push(&file.id);
                 }
                 // Deleted since the folder was listed: not a run any more.
-                Err(_) if !crate::records::record_listed(root, &file.id) => vanished += 1,
-                Err(_) => history.note_unreadable(root, &plan, file),
+                RecordRead::Missing => {
+                    vanished += 1;
+                    settled.push(&file.id);
+                }
+                // Counted with this listing and read again by the next:
+                // nothing is known about what the record holds.
+                RecordRead::Unopened => history.note_unopened(root, &plan, file),
+                RecordRead::Damaged { bytes } => history.note_damaged(root, &plan, file, bytes),
             }
         }
+        history.note_settled(root, &plan, &settled);
         let has_more = examined < plan.candidates.len();
         let next = match examined.checked_sub(1).and_then(|last| plan.candidates.get(last)) {
             Some(last) if has_more => Some(plan.continuation(last)),

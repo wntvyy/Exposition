@@ -86,11 +86,6 @@ pub(crate) fn record_deleted(root: &Path, id: &str) -> bool {
     valid_run_id(id) && deleted_path(root, id).is_file()
 }
 
-/// Whether `id`'s record is in the run folder now.
-pub(crate) fn record_listed(root: &Path, id: &str) -> bool {
-    valid_run_id(id) && manifest_path(root, id).is_file()
-}
-
 fn artifact_dir(root: &Path, id: &str) -> PathBuf {
     join(root, ARTIFACTS).join(id)
 }

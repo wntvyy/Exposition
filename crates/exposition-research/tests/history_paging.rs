@@ -480,3 +480,101 @@ fn deleted_and_restored_runs_follow_the_listing() {
     assert_eq!(listed, (0..9).rev().map(run_id).collect::<Vec<_>>());
     assert!(!third.has_more);
 }
+
+/// Several listings at once (real threads) while records are created,
+/// deleted and rewritten: a listing that completes holds every record that
+/// was only ever rewritten (never deleted) exactly once and no record twice;
+/// one that a rewrite crossed is refused and read again from its start.
+#[test]
+fn listings_on_several_threads_never_skip_or_repeat_a_run() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    let f = Arc::new(fixture());
+    // Kept for the whole test; some of them are rewritten now and then.
+    let kept: Vec<String> = (0..40).map(run_id).collect();
+    for (i, id) in kept.iter().enumerate() {
+        store_run(&f.root, id, i as u64 % 7);
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    let completed = Arc::new(AtomicU64::new(0));
+    let refused = Arc::new(AtomicU64::new(0));
+    let writer = {
+        let (f, stop, kept) = (f.clone(), stop.clone(), kept.clone());
+        std::thread::spawn(move || {
+            let mut random = Random(0x5EED_1234_5678_9ABC);
+            let mut clock = 100u64;
+            let mut next = 1_000u64;
+            let mut made: Vec<String> = Vec::new();
+            while !stop.load(Ordering::Relaxed) {
+                clock += 1;
+                match random.below(8) {
+                    0..=2 => {
+                        let id = run_id(next);
+                        next += 1;
+                        store_run(&f.root, &id, clock);
+                        made.push(id);
+                    }
+                    3..=5 if !made.is_empty() => {
+                        let id = made.swap_remove(random.below(made.len() as u64) as usize);
+                        std::fs::remove_file(record_file(&f.root, &id)).unwrap();
+                    }
+                    6 if !made.is_empty() => {
+                        set_modified(&f.root, &made[random.below(made.len() as u64) as usize], clock);
+                    }
+                    _ => set_modified(&f.root, &kept[random.below(kept.len() as u64) as usize], clock),
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        })
+    };
+    let readers: Vec<_> = (0..4u32)
+        .map(|n| {
+            let (f, stop, kept) = (f.clone(), stop.clone(), kept.clone());
+            let (completed, refused) = (completed.clone(), refused.clone());
+            std::thread::spawn(move || {
+                let limit = 5 + n * 4;
+                'listing: while !stop.load(Ordering::Relaxed) {
+                    let mut returned: Vec<String> = Vec::new();
+                    let mut after = None;
+                    loop {
+                        match f.service.run_history(&RunHistoryRequest { after, limit: Some(limit) }) {
+                            Ok(page) => {
+                                returned.extend(ids(&page));
+                                after = page.next;
+                                if after.is_none() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                assert_eq!(e.code(), HISTORY_CHANGED, "{e}");
+                                refused.fetch_add(1, Ordering::Relaxed);
+                                continue 'listing;
+                            }
+                        }
+                    }
+                    let unique: BTreeSet<&String> = returned.iter().collect();
+                    assert_eq!(unique.len(), returned.len(), "a run was returned twice: {returned:?}");
+                    for id in &kept {
+                        assert!(unique.contains(id), "{id} existed throughout and is on no page");
+                    }
+                    completed.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        })
+        .collect();
+    let started = std::time::Instant::now();
+    while completed.load(Ordering::Relaxed) < 200 && started.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+    for reader in readers {
+        reader.join().expect("a listing was wrong");
+    }
+    assert!(completed.load(Ordering::Relaxed) > 0, "no listing completed");
+    println!("listings completed: {}, refused: {}", completed.load(Ordering::Relaxed), refused.load(Ordering::Relaxed));
+    // With the writer stopped, one more listing is whole.
+    let listed: Vec<String> = all_pages(&f.service, 9).iter().flat_map(ids).collect();
+    assert_eq!(listed.iter().collect::<BTreeSet<_>>().len(), listed.len());
+    assert!(kept.iter().all(|id| listed.contains(id)));
+}
