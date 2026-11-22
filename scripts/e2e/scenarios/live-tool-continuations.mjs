@@ -338,7 +338,20 @@ export default async function liveToolContinuations({ launchApp, artifactsDir, a
         truncated.some((t) => t.json.nextOffset === Number(c.input.offset) && t.json.listing === c.input.listing && t.input.path === c.input.path && t.input.recursive === c.input.recursive),
       );
       check("2: the model continued with the truncated result's nextOffset and listing", proper.length > 0, continuations.map((c) => c.input));
-      check("2: no continuation was answered with listingChanged", lists.every((c) => !c.json.listingChanged), lists.map((c) => c.json.listingChanged ?? false));
+      // The folder never changes. A call that passes a listing the tool issued
+      // must not be told it changed; a call that passes anything else as the
+      // listing (a model sometimes sends an invented one with its first call)
+      // must be told so, never answered as if it continued.
+      const issued = new Set(lists.map((c) => c.json.listing).filter((id) => /^[0-9a-f]{32}$/.test(id ?? "")));
+      const passed = lists.filter((c) => c.input.listing !== undefined && c.input.listing !== null && c.input.listing !== "");
+      const wrong = passed.filter((c) => Boolean(c.json.listingChanged) !== !issued.has(c.input.listing));
+      const unasked = lists.filter((c) => !passed.includes(c) && c.json.listingChanged);
+      record.inventedListings = passed.filter((c) => !issued.has(c.input.listing)).length;
+      check(
+        "2: listingChanged answers exactly the calls that passed a listing the tool did not issue",
+        wrong.length === 0 && unasked.length === 0,
+        lists.map((c) => ({ listing: c.input.listing ?? null, listingChanged: c.json.listingChanged ?? false })),
+      );
       const holds = (text) => typeof text === "string" && text.includes(MARKED_NAME);
       check("2: the marked name is in a continuation's entries", proper.some((c) => (c.json.entries ?? []).some((e) => holds(e.path))), proper.map((c) => (c.json.entries ?? []).length));
       // The continuation is the only way the name reached the model.
