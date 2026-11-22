@@ -887,10 +887,15 @@ impl<'a> Utf16Cursor<'a> {
         // Whole blocks that end before the target are counted bytewise, not
         // decoded. A block may end inside a character: its units are already
         // counted, so the bytes up to the next boundary add nothing.
+        // A block is only counted when the target is at least a block's
+        // length in units away: a nearer target is reached by decoding, so a
+        // transaction of many close patches does not count a block per patch.
         let bytes = text.as_bytes();
-        while let Some(block) = bytes.get(self.byte..self.byte + SEEK_BLOCK) {
+        while target - self.unit >= SEEK_BLOCK {
+            let Some(block) = bytes.get(self.byte..self.byte + SEEK_BLOCK) else { break };
             let units = utf16_units_started(block);
             if self.unit + units >= target {
+                work::scanned(SEEK_BLOCK);
                 break;
             }
             self.unit += units;
@@ -1862,9 +1867,15 @@ mod tests {
         let (service, id) = service_with(&"abcdefghij\n".repeat(100_000));
         let patches: Vec<TextPatch> = (0..20_000u32).map(|i| TextPatch::insert(i * 55, "x")).collect();
         let started = std::time::Instant::now();
+        work::reset();
         service.apply(tx(&id, 1, patches, UndoBehavior::NewGroup, ConflictPolicy::Reject)).unwrap();
         service.undo(&id, EditOrigin::Source).unwrap();
         let elapsed = started.elapsed();
+        // Bytes of text touched, the same on every machine: a pass, or a
+        // block, per patch would be far more than a few times the text.
+        let (copied, scanned) = work::totals();
+        assert!(copied <= 5_500_000, "copied {copied} bytes of a 1.1 MB text");
+        assert!(scanned <= 5_500_000, "scanned {scanned} bytes of a 1.1 MB text");
         assert_eq!(text(&service, &id), "abcdefghij\n".repeat(100_000));
         assert!(elapsed < std::time::Duration::from_secs(2), "20k-patch apply + undo on 1.1 MB took {elapsed:?}");
     }
