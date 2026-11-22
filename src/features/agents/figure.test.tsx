@@ -26,7 +26,10 @@ vi.mock("../research/Promotion", () => ({
 }));
 vi.mock("../research/store", async () => {
   const { create } = await import("zustand");
-  return { useResearch: create<{ runs: RunSummary[] }>(() => ({ runs: [] })) };
+  const useResearch = create<{ runs: RunSummary[] }>(() => ({ runs: [] }));
+  // The run as Research knows it (here: every run is listed).
+  const useRun = (runId: string) => useResearch((s) => s.runs.find((r) => r.id === runId)) ?? null;
+  return { useResearch, useRun };
 });
 
 const { FigureCard, FIGURE_MAX_BYTES, FIGURE_NOTE, shortRunId, unavailableText } = await import("./FigureCard");

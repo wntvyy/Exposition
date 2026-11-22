@@ -4,6 +4,7 @@ import { formatDuration as formatElapsed } from "../../lib/format";
 import type { ArtifactRecord } from "../../bindings/ArtifactRecord";
 import type { OutputEntry } from "../../bindings/OutputEntry";
 import type { ResearchEvent } from "../../bindings/ResearchEvent";
+import type { RunManifest } from "../../bindings/RunManifest";
 import type { RunSummary } from "../../bindings/RunSummary";
 import type { SessionInfo } from "../../bindings/SessionInfo";
 import type { Status } from "../../ui/components";
@@ -118,6 +119,51 @@ export function mergeSnapshot<T>(
   return merged;
 }
 
+/** History order: newest start first, then id (descending), as the service lists a page. */
+function byStartDescending(a: RunSummary, b: RunSummary): number {
+  if (a.startedAtMs !== b.startedAtMs) return b.startedAtMs - a.startedAtMs;
+  return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+}
+
+/**
+ * Add a further page of the run history to the runs already listed. A run
+ * listed already keeps the version held here (an event may have changed it
+ * since the page was read); the result is in history order.
+ */
+export function appendRunPage(current: RunSummary[], page: RunSummary[]): RunSummary[] {
+  const listed = new Set(current.map((r) => r.id));
+  const added = page.filter((r) => !listed.has(r.id));
+  if (added.length === 0) return current;
+  return [...current, ...added].sort(byStartDescending);
+}
+
+/**
+ * The history entry of a stored run read on its own (`research_run`), for a
+ * run that is on a page of the history not loaded here. Mirrors the summary
+ * the service lists for a stored run.
+ */
+export function summaryOfManifest(manifest: RunManifest): RunSummary {
+  const text = manifest.code.text;
+  const codePreview =
+    text === null || text === undefined
+      ? `sha256:${manifest.code.sha256.slice(0, 12)}`
+      : Array.from(text.split(/\r?\n/).find((line) => line.trim() !== "") ?? "").slice(0, 120).join("");
+  return {
+    id: manifest.record.id,
+    sessionId: manifest.session.sessionId,
+    owner: manifest.session.owner,
+    status: manifest.record.status,
+    queued: false,
+    origin: manifest.code.origin,
+    codePreview,
+    executionCount: manifest.executionCount,
+    startedAtMs: manifest.record.startedAtMs,
+    finishedAtMs: manifest.record.finishedAtMs,
+    outputs: manifest.record.outputs,
+    error: manifest.error,
+  };
+}
+
 export function applyEvent(model: ResearchModel, event: ResearchEvent): ResearchModel {
   switch (event.kind) {
     case "sessionChanged":
@@ -150,7 +196,8 @@ export const KEPT_FINISHED_OUTPUTS = 8;
 
 /**
  * Release the output of finished runs beyond the newest `keep` (the selected
- * run and runs still executing always keep theirs). The service holds every
+ * run and runs still executing always keep theirs; a run that is not in
+ * `runs` counts as finished). The service holds every
  * run's output (its own recent copy, or the stored transcript) and selecting
  * a run whose output is not held here reads it again, so nothing is lost:
  * only the copies kept in this window are bounded.
@@ -162,10 +209,25 @@ export function pruneOutputs(
   keep = KEPT_FINISHED_OUTPUTS,
 ): Record<string, RunOutput> {
   const started = new Map<string, number>();
-  for (const run of runs) if (run.status.kind !== "running") started.set(run.id, run.startedAtMs);
-  const finished = Object.keys(outputs).filter((id) => id !== selectedRun && started.has(id));
+  const running = new Set<string>();
+  for (const run of runs) {
+    if (run.status.kind === "running") running.add(run.id);
+    else started.set(run.id, run.startedAtMs);
+  }
+  // A run that is not listed (read by id from a page not loaded, or gone
+  // from the history) is a finished run too.
+  const held = Object.keys(outputs);
+  const finished = held.filter((id) => id !== selectedRun && !running.has(id));
   if (finished.length <= keep) return outputs;
-  finished.sort((a, b) => started.get(b)! - started.get(a)!);
+  // Listed runs by start time; then runs not listed, the one held last first.
+  const order = new Map(held.map((id, index) => [id, index]));
+  finished.sort((a, b) => {
+    const [x, y] = [started.get(a), started.get(b)];
+    if (x !== undefined && y !== undefined) return y - x;
+    if (x !== undefined) return -1;
+    if (y !== undefined) return 1;
+    return order.get(b)! - order.get(a)!;
+  });
   const released = new Set(finished.slice(keep));
   const next: Record<string, RunOutput> = {};
   for (const [id, output] of Object.entries(outputs)) if (!released.has(id)) next[id] = output;

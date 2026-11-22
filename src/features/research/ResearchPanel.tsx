@@ -70,6 +70,8 @@ import {
   rerun,
   restartSession,
   runCode,
+  findRun,
+  loadMoreRuns,
   selectRun,
   setPanelSelectionReader,
   startResearchTracking,
@@ -438,7 +440,7 @@ export function CodeInput() {
 
 export function RunOutputView() {
   const runId = useResearch((s) => s.selectedRun);
-  const run = useResearch((s) => s.runs.find((r) => r.id === s.selectedRun));
+  const run = useResearch((s) => findRun(s, s.selectedRun));
   const output = useResearch((s) => (s.selectedRun ? s.outputs[s.selectedRun] : undefined)) ?? EMPTY_RUN_OUTPUT;
   const viewer = useRef<HTMLDivElement>(null);
   const now = useNow(Boolean(run && isActiveRun(run)));
@@ -848,10 +850,39 @@ export function RunRow({
   );
 }
 
+/** Rows the run history shows at first and adds with each "Show more runs". */
+const HISTORY_ROWS = 200;
+const count = (n: number) => n.toLocaleString("en-US");
+
 export function RunHistory() {
   const runs = useResearch((s) => s.runs);
   const selected = useResearch((s) => s.selectedRun);
-  const visible = useMemo(() => runs.slice(0, 200), [runs]);
+  const more = useResearch((s) => s.runsNext !== null);
+  const remaining = useResearch((s) => s.runsRemaining);
+  const unreadable = useResearch((s) => s.runsUnreadable);
+  const loading = useResearch((s) => s.runsLoadingMore);
+  const [rows, setRows] = useState(HISTORY_ROWS);
+  // Another project (the list starts empty): the first rows again.
+  useEffect(() => {
+    if (runs.length === 0) setRows(HISTORY_ROWS);
+  }, [runs.length]);
+  const visible = useMemo(() => runs.slice(0, rows), [runs, rows]);
+  // Not shown: loaded runs beyond the rows shown, and the records on pages
+  // not read yet. Those are counted as records: one of them may turn out
+  // not to be a run when its page is read, and is then counted in
+  // `unreadable` instead, so the total stays what it was.
+  const notShown = runs.length - visible.length + (more ? remaining : 0);
+  const records = visible.length + notShown + unreadable;
+  const showMore = () => {
+    if (loading) return;
+    setRows(rows + HISTORY_ROWS);
+    if (rows + HISTORY_ROWS > runs.length && more) void loadMoreRuns();
+  };
+  const onMoreKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    showMore();
+  };
   const now = useNow(runs.some(isActiveRun));
   // Run records and their outputs are deleted (recoverably) and restored here
   // as in the workflow run lists: menu, Delete key, palette, Undo.
@@ -864,7 +895,10 @@ export function RunHistory() {
   });
   return (
     <div className="exp-research__history">
-      <PanelHeader title="Runs" />
+      <PanelHeader
+        title="Runs"
+        count={visible.length < records ? `${count(visible.length)} of ${count(records)} records` : undefined}
+      />
       {visible.length === 0 ? (
         <EmptyState fill={false} title="No runs yet" />
       ) : (
@@ -880,6 +914,30 @@ export function RunHistory() {
                 ops={list.itemProps(run.id)}
               />
             ))}
+            {(visible.length < runs.length || more) && (
+              <li>
+                <ListRow
+                  role="button"
+                  tabIndex={0}
+                  aria-busy={loading || undefined}
+                  data-testid="research-history-more"
+                  title="Show more runs"
+                  meta={loading ? "Reading…" : notShown > 0 ? `${count(notShown)} ${notShown === 1 ? "record" : "records"} not shown` : undefined}
+                  onClick={showMore}
+                  onKeyDown={onMoreKeyDown}
+                />
+              </li>
+            )}
+            {unreadable > 0 && (
+              <li>
+                <ListRow
+                  static
+                  data-testid="research-history-unreadable"
+                  title={unreadable === 1 ? "1 run record cannot be read" : `${count(unreadable)} run records cannot be read`}
+                  meta="Not listed as runs"
+                />
+              </li>
+            )}
           </ul>
         </div>
       )}

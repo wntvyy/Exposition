@@ -23,7 +23,7 @@ vi.hoisted(() => {
 const ops = vi.hoisted(() => ({ runUserOperation: vi.fn(async () => null), listeners: [] as ((r: unknown) => void)[] }));
 
 vi.mock("../../lib/ipc", () => ({
-  commands: { researchRuns: vi.fn(async () => []), researchRun: vi.fn(async () => null) },
+  commands: { researchRuns: vi.fn(async () => ({ runs: [], next: null, hasMore: false, total: 0, unreadable: 0 })), researchRun: vi.fn(async () => null) },
   events: { research: vi.fn(async () => () => {}), researchResync: vi.fn(async () => () => {}), trustChanged: vi.fn(async () => () => {}) },
   errorMessage: (e: unknown) => String(e),
   isCommandError: () => false,
@@ -152,5 +152,100 @@ describe("run history as an operation surface", () => {
     );
     fireEvent.click(row);
     expect(useResearch.getState().selectedRun).toBe("run-2");
+  });
+});
+
+describe("run history longer than the rows shown", () => {
+  /** The count beside the pane title (the shared PanelHeader's count). */
+  const headerCount = () => document.querySelector(".exp-research__history .ui-panel-header__count")?.textContent ?? null;
+  const many = (n: number) => Array.from({ length: n }, (_, i) => run(`run-${String(n - i).padStart(4, "0")}`, { startedAtMs: n - i }));
+  afterEach(() => {
+    cleanup();
+    useResearch.setState({ runs: [], runsNext: null, runsRemaining: 0, runsUnreadable: 0, runsLoadingMore: false, selectedRun: null });
+  });
+
+  it("shows nothing but the runs when all of them are listed", () => {
+    useResearch.setState({ runs: many(3), runsNext: null, runsRemaining: 0 });
+    render(<RunHistory />);
+    expect(headerCount()).toBeNull();
+    expect(screen.queryByTestId("research-history-more")).toBeNull();
+    expect(screen.queryByTestId("research-history-unreadable")).toBeNull();
+  });
+
+  it("says how many are listed of how many exist and shows more on request", async () => {
+    const page = { runs: many(1_000).slice(500), next: null, hasMore: false, total: 1_000, unreadable: 2 };
+    const { commands } = await import("../../lib/ipc");
+    (commands.researchRuns as ReturnType<typeof vi.fn>).mockResolvedValueOnce(page);
+    useResearch.setState({ runs: many(1_000).slice(0, 500), runsNext: "next", runsRemaining: 500, selectedRun: "run-0990" });
+    render(<RunHistory />);
+    const rows = () => screen.getByTestId("research-history").querySelectorAll("[data-op-item]").length;
+    expect(rows()).toBe(200);
+    expect(headerCount()).toBe("200 of 1,000 records");
+    const more = () => screen.getByTestId("research-history-more");
+    expect(within(more()).getByText("Show more runs")).toBeTruthy();
+    expect(within(more()).getByText("800 records not shown")).toBeTruthy();
+    // 400 rows are loaded already: no request.
+    await act(async () => {
+      fireEvent.click(more());
+    });
+    expect(rows()).toBe(400);
+    expect(commands.researchRuns).not.toHaveBeenCalledWith({ after: "next" });
+    // 600 rows need the next page.
+    await act(async () => {
+      fireEvent.click(more());
+    });
+    expect(commands.researchRuns).toHaveBeenCalledWith({ after: "next" });
+    expect(rows()).toBe(600);
+    expect(headerCount()).toBe("600 of 1,002 records");
+    expect(useResearch.getState().selectedRun).toBe("run-0990");
+    for (let i = 0; i < 2; i += 1) {
+      await act(async () => {
+        fireEvent.click(more());
+      });
+    }
+    expect(rows()).toBe(1_000);
+    // Listed and unreadable add up to the total, also at the end.
+    expect(headerCount()).toBe("1,000 of 1,002 records");
+    expect(screen.queryByTestId("research-history-more")).toBeNull();
+    expect(within(screen.getByTestId("research-history-unreadable")).getByText("2 run records cannot be read")).toBeTruthy();
+    // The last row is a run like the first: selecting it shows it.
+    const last = screen.getByTestId("research-history").querySelector('[data-op-item="run-0001"]')!;
+    expect(within(last as HTMLElement).getByText(/import numpy/)).toBeTruthy();
+  });
+});
+
+describe("run history count with a damaged record on a page not read yet", () => {
+  const headerCount = () => document.querySelector(".exp-research__history .ui-panel-header__count")?.textContent ?? null;
+  const many = (n: number) => Array.from({ length: n }, (_, i) => run(`run-${String(n - i).padStart(4, "0")}`, { startedAtMs: n - i }));
+  afterEach(() => {
+    cleanup();
+    useResearch.setState({ runs: [], runsNext: null, runsRemaining: 0, runsUnreadable: 0, runsLoadingMore: false, selectedRun: null });
+  });
+
+  it("counts records, so the total never shrinks when a record turns out not to be a run", async () => {
+    // 620 runs and one damaged record that the first page did not reach.
+    const { commands } = await import("../../lib/ipc");
+    (commands.researchRuns as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ runs: many(620).slice(500), next: null, hasMore: false, total: 621, unreadable: 1 });
+    useResearch.setState({ runs: many(620).slice(0, 500), runsNext: "next", runsRemaining: 121, runsUnreadable: 0 });
+    render(<RunHistory />);
+    const more = () => screen.getByTestId("research-history-more");
+    expect(headerCount()).toBe("200 of 621 records");
+    expect(within(more()).getByText("421 records not shown")).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(more());
+    });
+    expect(headerCount()).toBe("400 of 621 records");
+    await act(async () => {
+      fireEvent.click(more());
+    });
+    // The page was read: 620 runs, 1 record that is not a run. Same total.
+    expect(headerCount()).toBe("600 of 621 records");
+    expect(within(more()).getByText("20 records not shown")).toBeTruthy();
+    expect(within(screen.getByTestId("research-history-unreadable")).getByText("1 run record cannot be read")).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(more());
+    });
+    expect(screen.queryByTestId("research-history-more")).toBeNull();
+    expect(headerCount()).toBe("620 of 621 records");
   });
 });

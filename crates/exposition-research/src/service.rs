@@ -23,14 +23,14 @@ use crate::runs::{
     ARTIFACT_SIZE_LIMIT, MANIFEST_CODE_LIMIT, RunState, artifact_belongs_to_run, page_of, settle_orphan,
 };
 use crate::store::{
-    self, MANIFEST_FORMAT, artifact_dir_path, ensure_dir_within, new_run_id, read_manifest, resolve_existing,
-    write_manifest, write_transcript,
+    self, MANIFEST_FORMAT, RecordRead, artifact_dir_path, ensure_dir_within, new_run_id, read_manifest,
+    resolve_existing, write_manifest, write_transcript,
 };
 use crate::types::{
     Availability, CodeOrigin, CodeProvenance, EnvironmentReport, ExecuteRequest, InterpreterProvenance, KernelChoice,
     KernelDescriptor, OutputEntry, OutputItem, OutputSummary, ResearchEvent, RunAuthorization, RunErrorInfo,
-    RunManifest, RunOutputPage, RunSource, RunSummary, RuntimeEnvironment, RuntimeLanguage, SessionInfo, SessionOwner,
-    SessionProvenance, SessionState, StreamName, WorkspaceStatus,
+    RunHistoryPage, RunHistoryRequest, RunManifest, RunOutputPage, RunSource, RunSummary, RuntimeEnvironment,
+    RuntimeLanguage, SessionInfo, SessionOwner, SessionProvenance, SessionState, StreamName, WorkspaceStatus,
 };
 
 /// Largest code accepted for one run.
@@ -168,6 +168,8 @@ struct Shared {
     /// Workflow batch runs executing now (their manifests read "running"
     /// legitimately and are not settled as orphans).
     batches: Mutex<HashSet<String>>,
+    /// Positions of the open project's run records ([`crate::history`]).
+    history: crate::history::HistoryIndex,
     /// Guided environment setup (one run at a time) and its records.
     setup: crate::setup::SetupSlot,
     /// The environment chosen for each project (app-local).
@@ -177,6 +179,10 @@ struct Shared {
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+/// Stored runs in one page of the run history (and the most a request may
+/// ask for).
+pub const HISTORY_PAGE: u32 = 500;
 
 /// Finished runs whose output and code stay in memory after their record
 /// was written (the most recent ones; older ones are read from the project).
@@ -308,6 +314,7 @@ impl ResearchService {
                 stored_runs: Mutex::new(VecDeque::new()),
                 late_writes: Mutex::new(()),
                 batches: Mutex::new(HashSet::new()),
+                history: crate::history::HistoryIndex::default(),
             }),
         }
     }
@@ -885,27 +892,118 @@ impl ResearchService {
         ids
     }
 
-    /// Run history for the current workspace, newest first.
+    /// The first page of the run history ([`Self::run_history`]): this
+    /// session's runs and the most recently modified stored records. Not the
+    /// whole history when the project holds more records than one page.
     pub fn runs(&self) -> Result<Vec<RunSummary>, ResearchError> {
+        Ok(self.run_history(&RunHistoryRequest::default())?.runs)
+    }
+
+    /// One page of the run history of the current workspace.
+    ///
+    /// The first page holds every run of this session and the `limit` most
+    /// recently modified stored records; a later page holds the next `limit`
+    /// stored records after `request.after`. Within a page runs are ordered
+    /// by start time, newest first. A page reads only the manifests it
+    /// examines (at most `limit` readable ones, plus records found damaged
+    /// on the way, which are remembered by modification time and size and
+    /// not read again until one of them changes). A record that cannot be
+    /// opened is counted in `unreadable` and read again by the next listing.
+    ///
+    /// Paging until `next` is absent returns every stored run that existed
+    /// the whole time exactly once, whatever was created or deleted between
+    /// the pages. A record rewritten between pages so that it would be
+    /// returned twice or not at all makes the continuation invalid: the
+    /// request fails with [`crate::HISTORY_CHANGED`].
+    pub fn run_history(&self, request: &RunHistoryRequest) -> Result<RunHistoryPage, ResearchError> {
         let workspace = self.current_workspace()?;
+        let root = &workspace.root;
+        let limit = request.limit.unwrap_or(HISTORY_PAGE).clamp(1, HISTORY_PAGE) as usize;
         // A finished run of this session stays in memory after its record is
         // deleted (recoverably): the history leaves it out like a record read
         // from disk, until it is restored.
         let live: HashMap<String, RunSummary> = lock(&self.shared.runs)
             .values()
-            .filter(|run| run.root == workspace.root)
-            .filter(|run| !(run.finished && crate::records::record_deleted(&workspace.root, run.id())))
+            .filter(|run| &run.root == root)
+            .filter(|run| !(run.finished && crate::records::record_deleted(root, run.id())))
             .map(|run| (run.id().to_owned(), run.summary()))
             .collect();
-        let mut out: Vec<RunSummary> = live.values().cloned().collect();
-        for manifest in store::list_manifests(&workspace.root) {
-            if !live.contains_key(&manifest.record.id.0) {
-                let owner = manifest.session.owner.clone();
-                out.push(crate::runs::summary_of(&self.settle(manifest), owner, false));
+        let history = &self.shared.history;
+        let plan = history.plan_listing(
+            root,
+            || crate::history::scan_sized(root),
+            |id| crate::history::stat(root, id),
+            request.after.as_deref(),
+            &|id| live.contains_key(id),
+        )?;
+        let listing = &plan.listing;
+        let mut stored: Vec<RunSummary> = Vec::new();
+        let mut settled: Vec<&str> = Vec::new();
+        let mut examined = 0;
+        let mut vanished = 0;
+        for file in &plan.candidates {
+            if stored.len() == limit {
+                break;
+            }
+            examined += 1;
+            history.count_read();
+            match store::read_record(root, &file.id) {
+                RecordRead::Manifest(manifest) => {
+                    let owner = manifest.session.owner.clone();
+                    stored.push(crate::runs::summary_of(&self.settle(*manifest), owner, false));
+                    settled.push(&file.id);
+                }
+                // Deleted since the folder was listed: not a run any more.
+                RecordRead::Missing => {
+                    vanished += 1;
+                    settled.push(&file.id);
+                }
+                // Counted with this listing and read again by the next:
+                // nothing is known about what the record holds.
+                RecordRead::Unopened => history.note_unopened(root, &plan, file),
+                RecordRead::Damaged { bytes } => history.note_damaged(root, &plan, file, bytes),
             }
         }
-        out.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms).then_with(|| b.id.0.cmp(&a.id.0)));
-        Ok(out)
+        history.note_settled(root, &plan, &settled);
+        let has_more = examined < plan.candidates.len();
+        let next = match examined.checked_sub(1).and_then(|last| plan.candidates.get(last)) {
+            Some(last) if has_more => Some(plan.continuation(last)),
+            _ => None,
+        };
+        let on_disk: HashSet<&str> = listing.iter().map(|file| file.id.as_str()).collect();
+        let only_live = live.keys().filter(|id| !on_disk.contains(id.as_str())).count();
+        let total = (listing.len() + only_live).saturating_sub(vanished);
+        let mut runs = stored;
+        if request.after.is_none() {
+            runs.extend(live.into_values());
+        }
+        runs.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms).then_with(|| b.id.0.cmp(&a.id.0)));
+        Ok(RunHistoryPage {
+            runs,
+            next,
+            has_more,
+            total: u32::try_from(total).unwrap_or(u32::MAX),
+            unreadable: u32::try_from(history.unreadable(root)).unwrap_or(u32::MAX),
+        })
+    }
+
+    /// Work the history listing did so far (tests and benchmarks).
+    pub fn history_counters(&self) -> crate::HistoryCounters {
+        self.shared.history.counters()
+    }
+
+    /// The history entry of one run of the open project, wherever it stands
+    /// in the listing.
+    pub fn run_summary(&self, run_id: &str) -> Result<RunSummary, ResearchError> {
+        if let Some(run) = lock(&self.shared.runs).get(run_id)
+            && Some(&run.root) == self.workspace_root().as_ref()
+        {
+            return Ok(run.summary());
+        }
+        let workspace = self.current_workspace()?;
+        let manifest = read_manifest(&workspace.root, run_id)?;
+        let owner = manifest.session.owner.clone();
+        Ok(crate::runs::summary_of(&self.settle(manifest), owner, false))
     }
 
     pub fn run_manifest(&self, run_id: &str) -> Result<RunManifest, ResearchError> {

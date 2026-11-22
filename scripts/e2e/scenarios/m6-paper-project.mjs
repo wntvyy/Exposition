@@ -1583,7 +1583,7 @@ export default async function m6PaperProject({ launchApp, artifactsDir, assert, 
       const jobs = await invoke(page, "job_list");
       check("job_list", jobs);
       for (const j of jobs) check(`job_output ${j.info.label}`, await invoke(page, "job_output", { job: j.info.id, after: null, maxBytes: 4 * 1024 * 1024 }));
-      const runs = await invoke(page, "research_runs");
+      const { runs } = await invoke(page, "research_runs");
       for (const r of runs) check(`research run ${r.id}`, await invoke(page, "research_run_output", { runId: r.id, after: null, limit: 500 }));
       if (isDebug) {
         for (const t of await invoke(page, "agents_task_list")) check(`agent task ${t.id}`, await invoke(page, "agents_task_detail", { task: t.id }));

@@ -258,12 +258,15 @@ impl ResearchService {
         self.workspace_root().ok_or(ResearchError::NoWorkspace)
     }
 
-    /// Run records of the open project (not deleted), newest first.
+    /// Every run record of the open project (not deleted), newest first.
+    /// Reads each record's manifest in turn (one held at a time); a record
+    /// that cannot be read is left out.
     pub fn run_records(&self) -> Result<Vec<RunRecordInfo>, ResearchError> {
         let root = self.records_root()?;
-        let mut out: Vec<RunRecordInfo> = store::list_manifests(&root)
+        let mut out: Vec<RunRecordInfo> = store::record_ids(&root)
             .iter()
-            .map(|m| info(&root, m, self.run_active(&m.record.id.0), None))
+            .filter_map(|id| read_manifest(&root, id).ok())
+            .map(|m| info(&root, &m, self.run_active(&m.record.id.0), None))
             .collect();
         // Active runs whose manifest is not written yet are listed too.
         for id in self.active_run_ids() {

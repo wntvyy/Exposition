@@ -61,7 +61,7 @@ export default async function p1ResearchRuns({ launchApp, artifactsDir, assert }
     await page.screenshot({ path });
     shots.push(path);
   };
-  const listed = async () => (await invoke(page, "research_runs")).map((r) => r.id);
+  const listed = async () => (await invoke(page, "research_runs")).runs.map((r) => r.id);
   const exists = (path) => existsSync(join(root, ...path.split("/")));
 
   try {

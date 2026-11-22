@@ -18,8 +18,8 @@ use exposition_research::project::types::{
     RetainOutcome, RetainRequest, SetResultStateRequest, SpaceFile,
 };
 use exposition_research::types::{
-    EnvironmentReport, ExecuteRequest, RunManifest, RunOutputPage, RunSource, RunSummary, SessionInfo, SessionOwner,
-    WorkspaceStatus,
+    EnvironmentReport, ExecuteRequest, RunHistoryPage, RunHistoryRequest, RunManifest, RunOutputPage, RunSource,
+    RunSummary, SessionInfo, SessionOwner, WorkspaceStatus,
 };
 use exposition_research::{ResearchError, ResearchProject, ResearchService, StartSessionRequest};
 use exposition_workspace::types::WorkspaceEvent;
@@ -162,8 +162,11 @@ pub async fn research_run_cancel(state: State<'_, AppState>, run_id: String) -> 
 }
 
 #[tauri::command]
-pub async fn research_runs(state: State<'_, AppState>) -> Result<Vec<RunSummary>, CommandError> {
-    service(&state, |research| research.runs()).await
+pub async fn research_runs(
+    state: State<'_, AppState>,
+    request: Option<RunHistoryRequest>,
+) -> Result<RunHistoryPage, CommandError> {
+    service(&state, move |research| research.run_history(&request.unwrap_or_default())).await
 }
 
 #[tauri::command]

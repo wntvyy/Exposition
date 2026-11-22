@@ -25,8 +25,6 @@ const EXPOSITION_DIR: &str = ".exposition";
 const RUNS_DIR: &str = "runs";
 const ARTIFACTS_DIR: &str = "artifacts";
 const TRANSCRIPT: &str = "transcript.json";
-/// Manifests read when listing history.
-const HISTORY_LIMIT: usize = 500;
 
 pub fn valid_run_id(id: &str) -> bool {
     !id.is_empty()
@@ -99,25 +97,47 @@ pub fn read_manifest(root: &Path, run_id: &str) -> Result<RunManifest, ResearchE
     Ok(manifest)
 }
 
-/// Most recent manifests (by file modification time), newest first.
-pub fn list_manifests(root: &Path) -> Vec<RunManifest> {
-    let dir = root.join(EXPOSITION_DIR).join(RUNS_DIR);
-    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
-    let mut files: Vec<(std::time::SystemTime, String)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let id = name.strip_suffix(".json")?.to_owned();
-            if !valid_run_id(&id) {
-                return None;
+/// What reading one record for the history found.
+pub(crate) enum RecordRead {
+    Manifest(Box<RunManifest>),
+    /// No such file (deleted since the folder was listed).
+    Missing,
+    /// The file exists and could not be opened or read (held by another
+    /// program, a failing disk): nothing is known about its content.
+    Unopened,
+    /// The file was read (`bytes` bytes) and is not a manifest of this run.
+    Damaged {
+        bytes: u64,
+    },
+}
+
+/// Read `run_id`'s record for the history. A read that fails is tried again
+/// shortly: a scanner or a sync client holds a file briefly, and a record
+/// that is being replaced can be reported as not there for a moment.
+pub(crate) fn read_record(root: &Path, run_id: &str) -> RecordRead {
+    let path = root.join(EXPOSITION_DIR).join(RUNS_DIR).join(format!("{run_id}.json"));
+    let mut tries = 0;
+    let bytes = loop {
+        match std::fs::read(&path) {
+            Ok(bytes) => break bytes,
+            Err(_) if tries < 2 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(2));
             }
-            let modified = entry.metadata().and_then(|m| m.modified()).ok()?;
-            Some((modified, id))
-        })
-        .collect();
-    files.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-    files.truncate(HISTORY_LIMIT);
-    files.into_iter().filter_map(|(_, id)| read_manifest(root, &id).ok()).collect()
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RecordRead::Missing,
+            Err(_) => return RecordRead::Unopened,
+        }
+    };
+    match serde_json::from_slice::<RunManifest>(&bytes) {
+        Ok(manifest) if manifest.record.id.0 == run_id => RecordRead::Manifest(Box::new(manifest)),
+        _ => RecordRead::Damaged { bytes: bytes.len() as u64 },
+    }
+}
+
+/// Ids of every run record of `root`, most recently modified first. Reads
+/// the folder listing only (see [`crate::history`] for the paged history).
+pub fn record_ids(root: &Path) -> Vec<String> {
+    crate::history::scan(root).into_iter().map(|file| file.id).collect()
 }
 
 pub fn write_transcript(root: &Path, run_id: &str, entries: &[OutputEntry]) -> Result<(), ResearchError> {
