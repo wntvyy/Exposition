@@ -386,9 +386,15 @@ export default async function projectSwitch({ launchApp, artifactsDir, assert, f
     await waitFor(isAt(delta), { timeout: 30_000, message: "delta open" });
     await waitFor(async () => (await label()).trim() === "delta", { timeout: 10_000, message: "page bar shows delta" });
     const alphaDisk = await readFile(join(alpha, "main.typ"), "utf8");
+    // The dialog closes after the project is open; the page bar can show the
+    // new name a moment earlier, so wait for the dialog instead of sampling it.
+    const dialogClosed = await page
+      .getByTestId("new-project")
+      .waitFor({ state: "detached", timeout: 10_000 })
+      .then(() => true, () => false);
     note(
       "create-after-save-opens-the-new-project",
-      alphaDisk.startsWith("UNSAVED-ALPHA ") && (await page.getByTestId("new-project").count()) === 0,
+      alphaDisk.startsWith("UNSAVED-ALPHA ") && dialogClosed,
       { alphaDisk: alphaDisk.slice(0, 40) },
     );
     const deltaStatus = await destinationIsOwn(delta, "delta");
