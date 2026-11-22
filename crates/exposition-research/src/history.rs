@@ -53,6 +53,11 @@ pub(crate) struct Position {
     pub id: String,
 }
 
+/// Waits between the further tries for a record that is not there while it
+/// is being replaced (the folder listing of
+/// [`HistoryIndex::plan_listing`], and the read of one record).
+pub(crate) const REPLACED_WAITS_MS: [u64; 5] = [5, 10, 20, 40, 80];
+
 /// A record file as the folder lists it.
 #[derive(Clone, Debug)]
 pub(crate) struct Listed {
@@ -356,12 +361,17 @@ impl HistoryIndex {
     /// listed while the index is held, so listings are applied in the order
     /// they are made (other pages wait for the listing; nothing else does).
     /// A record the previous listing had and this one does not is asked for
-    /// by name (`find`) before it is taken as gone.
+    /// by name (`find`) before it is taken as gone. One that is not found by
+    /// name either while it is being replaced (`replacing`) is asked for
+    /// again after each of a few short waits ([`REPLACED_WAITS_MS`], per
+    /// listing, not per record); one that is not being replaced is asked for
+    /// once more (the replacement may just have finished).
     pub fn plan_listing(
         &self,
         root: &Path,
         scan: impl FnOnce() -> Vec<Listed>,
         find: impl Fn(&str) -> Option<Listed>,
+        replacing: impl Fn(&str) -> bool,
         after: Option<&str>,
         live: &dyn Fn(&str) -> bool,
     ) -> Result<Plan, ResearchError> {
@@ -371,12 +381,34 @@ impl HistoryIndex {
         let mut files = scan();
         if let Some(state) = guard.as_ref().filter(|state| state.root == root) {
             let listed: HashSet<&str> = files.iter().map(|file| file.at.id.as_str()).collect();
-            let found: Vec<Listed> = state
+            let mut found: Vec<Listed> = Vec::new();
+            let mut missing: Vec<&str> = state
                 .known
                 .iter()
                 .filter(|(id, seen)| seen.present && !listed.contains(id.as_str()))
-                .filter_map(|(id, _)| find(id))
+                .map(|(id, _)| id.as_str())
                 .collect();
+            let mut ask = |missing: &mut Vec<&str>| {
+                missing.retain(|id| match find(id) {
+                    Some(file) => {
+                        found.push(file);
+                        false
+                    }
+                    None if replacing(id) => true,
+                    None => {
+                        found.extend(find(id));
+                        false
+                    }
+                });
+            };
+            ask(&mut missing);
+            for wait in REPLACED_WAITS_MS {
+                if missing.is_empty() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(wait));
+                ask(&mut missing);
+            }
             if !found.is_empty() {
                 files.extend(found);
                 files.sort_by(|a, b| b.at.cmp(&a.at));
@@ -530,20 +562,24 @@ mod tests {
         let sized = |files: &[Position], bytes: u64| -> Vec<Listed> {
             files.iter().map(|at| Listed { at: at.clone(), bytes: if at.id == "run-b" { bytes } else { 7 } }).collect()
         };
-        let plan = index.plan_listing(root, || sized(&files, 1), |_| None, None, NOT_LIVE).unwrap();
+        let plan = index.plan_listing(root, || sized(&files, 1), |_| None, |_| false, None, NOT_LIVE).unwrap();
         index.note_damaged(root, &plan, &at(20, "run-b"), 1);
         assert_eq!(index.unreadable(root), 1);
-        let plan = index.plan_listing(root, || sized(&files, 1), |_| None, None, NOT_LIVE).unwrap();
+        let plan = index.plan_listing(root, || sized(&files, 1), |_| None, |_| false, None, NOT_LIVE).unwrap();
         assert_eq!(plan.candidates, vec![at(30, "run-c"), at(10, "run-a")]);
         // Another size at the same time: read again.
-        let plan = index.plan_listing(root, || sized(&files, 900), |_| None, None, NOT_LIVE).unwrap();
+        let plan = index.plan_listing(root, || sized(&files, 900), |_| None, |_| false, None, NOT_LIVE).unwrap();
         assert_eq!(plan.candidates.len(), 3);
         assert_eq!(index.unreadable(root), 0);
         // Another time.
         index.note_damaged(root, &plan, &at(20, "run-b"), 900);
         let repaired = listing(&[(40, "run-b"), (30, "run-c"), (10, "run-a")]);
         assert_eq!(
-            index.plan_listing(root, || sized(&repaired, 900), |_| None, None, NOT_LIVE).unwrap().candidates.len(),
+            index
+                .plan_listing(root, || sized(&repaired, 900), |_| None, |_| false, None, NOT_LIVE)
+                .unwrap()
+                .candidates
+                .len(),
             3
         );
         assert_eq!(index.unreadable(root), 0);
@@ -557,7 +593,7 @@ mod tests {
         let sized = |files: &[Position]| -> Vec<Listed> {
             files.iter().map(|at| Listed { at: at.clone(), bytes: 7 }).collect()
         };
-        index.plan_listing(root, || sized(&files), |_| None, None, NOT_LIVE).unwrap();
+        index.plan_listing(root, || sized(&files), |_| None, |_| false, None, NOT_LIVE).unwrap();
         // The listing leaves run-b out although the file is there.
         let short = listing(&[(30, "run-c"), (10, "run-a")]);
         let asked = std::cell::RefCell::new(Vec::new());
@@ -565,14 +601,56 @@ mod tests {
             asked.borrow_mut().push(id.to_owned());
             Some(Listed { at: at(20, id), bytes: 7 })
         };
-        let plan = index.plan_listing(root, || sized(&short), find, None, NOT_LIVE).unwrap();
+        let plan = index.plan_listing(root, || sized(&short), find, |_| false, None, NOT_LIVE).unwrap();
         assert_eq!(plan.candidates, files);
         assert_eq!(plan.listing.len(), 3);
         assert_eq!(*asked.borrow(), vec!["run-b".to_owned()], "only the record that went missing");
         // Really gone: not in the page, and not asked for again.
-        let plan = index.plan_listing(root, || sized(&short), |_| None, None, NOT_LIVE).unwrap();
+        let plan = index.plan_listing(root, || sized(&short), |_| None, |_| false, None, NOT_LIVE).unwrap();
         assert_eq!(plan.candidates, short);
-        index.plan_listing(root, || sized(&short), |_| panic!("asked again"), None, NOT_LIVE).unwrap();
+        index.plan_listing(root, || sized(&short), |_| panic!("asked again"), |_| false, None, NOT_LIVE).unwrap();
+    }
+
+    #[test]
+    fn a_record_not_found_while_it_is_replaced_is_asked_for_again() {
+        let root = Path::new("/project");
+        let files = listing(&[(30, "run-c"), (20, "run-b"), (10, "run-a")]);
+        let short = listing(&[(30, "run-c"), (10, "run-a")]);
+        let sized = |files: &[Position]| -> Vec<Listed> {
+            files.iter().map(|at| Listed { at: at.clone(), bytes: 7 }).collect()
+        };
+        let known = || {
+            let index = HistoryIndex::default();
+            index.plan_listing(root, || sized(&files), |_| None, |_| false, None, NOT_LIVE).unwrap();
+            index
+        };
+        let counter = std::cell::Cell::new(0);
+        let asks = &counter;
+        let found_from = |ask: usize| {
+            asks.set(0);
+            move |id: &str| {
+                asks.set(asks.get() + 1);
+                (asks.get() >= ask).then(|| Listed { at: at(25, id), bytes: 7 })
+            }
+        };
+        let replaced = listing(&[(30, "run-c"), (25, "run-b"), (10, "run-a")]);
+        // Being replaced: neither listed nor found for two asks.
+        let plan = known().plan_listing(root, || sized(&short), found_from(3), |_| true, None, NOT_LIVE).unwrap();
+        assert_eq!((asks.get(), &plan.candidates), (3, &replaced));
+        // A replacement that never ends: asked for after every wait, then gone.
+        let plan = known().plan_listing(root, || sized(&short), found_from(99), |_| true, None, NOT_LIVE).unwrap();
+        assert_eq!((asks.get(), &plan.candidates), (1 + REPLACED_WAITS_MS.len(), &short));
+        // Not being replaced: the replacement may have ended since the first
+        // ask, so it is asked for once more, without a wait.
+        let started = std::time::Instant::now();
+        let plan = known().plan_listing(root, || sized(&short), found_from(2), |_| false, None, NOT_LIVE).unwrap();
+        assert_eq!((asks.get(), &plan.candidates), (2, &replaced));
+        let plan = known().plan_listing(root, || sized(&short), found_from(99), |_| false, None, NOT_LIVE).unwrap();
+        assert_eq!((asks.get(), &plan.candidates), (2, &short));
+        assert!(
+            started.elapsed().as_millis() < u128::from(REPLACED_WAITS_MS[0]) * 4,
+            "no wait for a record that is gone"
+        );
     }
 
     #[test]

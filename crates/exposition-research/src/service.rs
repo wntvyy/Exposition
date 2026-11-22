@@ -933,6 +933,7 @@ impl ResearchService {
             root,
             || crate::history::scan_sized(root),
             |id| crate::history::stat(root, id),
+            |id| store::being_replaced(root, id),
             request.after.as_deref(),
             &|id| live.contains_key(id),
         )?;
@@ -941,13 +942,15 @@ impl ResearchService {
         let mut settled: Vec<&str> = Vec::new();
         let mut examined = 0;
         let mut vanished = 0;
+        // Shared by the records of this page that are not there when read.
+        let mut patience = std::time::Duration::from_millis(crate::history::REPLACED_WAITS_MS.iter().sum());
         for file in &plan.candidates {
             if stored.len() == limit {
                 break;
             }
             examined += 1;
             history.count_read();
-            match store::read_record(root, &file.id) {
+            match store::read_record(root, &file.id, &mut patience) {
                 RecordRead::Manifest(manifest) => {
                     let owner = manifest.session.owner.clone();
                     stored.push(crate::runs::summary_of(&self.settle(*manifest), owner, false));

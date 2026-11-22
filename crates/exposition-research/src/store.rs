@@ -114,17 +114,43 @@ pub(crate) enum RecordRead {
 /// Read `run_id`'s record for the history. A read that fails is tried again
 /// shortly: a scanner or a sync client holds a file briefly, and a record
 /// that is being replaced can be reported as not there for a moment.
-pub(crate) fn read_record(root: &Path, run_id: &str) -> RecordRead {
+///
+/// A record that is still not there while this process is replacing it
+/// ([`being_replaced`]) is tried again for as long as `patience` lasts
+/// ([`crate::history::REPLACED_WAITS_MS`]); `patience` is shared by the
+/// records of one page. A record that is not there and is not being replaced
+/// is read once more (the replacement may just have finished) and is then
+/// taken as gone.
+pub(crate) fn read_record(root: &Path, run_id: &str, patience: &mut std::time::Duration) -> RecordRead {
+    use std::time::Duration;
     let path = root.join(EXPOSITION_DIR).join(RUNS_DIR).join(format!("{run_id}.json"));
     let mut tries = 0;
+    let mut waits = crate::history::REPLACED_WAITS_MS.iter();
+    let mut last = false;
     let bytes = loop {
         match std::fs::read(&path) {
             Ok(bytes) => break bytes,
             Err(_) if tries < 2 => {
                 tries += 1;
-                std::thread::sleep(std::time::Duration::from_millis(2));
+                std::thread::sleep(Duration::from_millis(2));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return RecordRead::Missing,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if last {
+                    return RecordRead::Missing;
+                }
+                if !being_replaced(root, run_id) {
+                    last = true;
+                    continue;
+                }
+                let Some(wait) = waits.next().map(|ms| Duration::from_millis(*ms).min(*patience)) else {
+                    return RecordRead::Missing;
+                };
+                if wait.is_zero() {
+                    return RecordRead::Missing;
+                }
+                *patience -= wait;
+                std::thread::sleep(wait);
+            }
             Err(_) => return RecordRead::Unopened,
         }
     };
@@ -186,8 +212,22 @@ pub fn transcript_holds(root: &Path, run_id: &str, entries: &[OutputEntry]) -> b
     )
 }
 
+/// The file `write_atomic` writes before it takes the place of `path`.
+fn partial_of(path: &Path) -> PathBuf {
+    path.with_extension(format!("{}.partial", std::process::id()))
+}
+
+/// Whether this process is replacing `run_id`'s record right now: its new
+/// content is written and has not taken the record's place yet. While that
+/// lasts the record can be reported as not there, by name and in a folder
+/// listing. (A replacement by another process is not seen.)
+pub(crate) fn being_replaced(root: &Path, run_id: &str) -> bool {
+    valid_run_id(run_id)
+        && partial_of(&root.join(EXPOSITION_DIR).join(RUNS_DIR).join(format!("{run_id}.json"))).exists()
+}
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ResearchError> {
-    let partial = path.with_extension(format!("{}.partial", std::process::id()));
+    let partial = partial_of(path);
     std::fs::write(&partial, bytes).map_err(|e| ResearchError::io("writing run data", e))?;
     std::fs::rename(&partial, path).map_err(|e| {
         let _ = std::fs::remove_file(&partial);
