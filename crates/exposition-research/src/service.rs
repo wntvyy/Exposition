@@ -298,28 +298,37 @@ impl Shared {
         Some(entry)
     }
 
+    /// Change the stored manifest of a run whose in-memory copy was already
+    /// released (one such write at a time, like [`Self::append_to_record`]).
+    /// `false` when the record cannot take the change (recoverably deleted,
+    /// unreadable, or not writable).
+    fn update_record(&self, root: &Path, run_id: &str, change: impl FnOnce(&mut RunManifest)) -> bool {
+        let _one = lock(&self.late_writes);
+        if crate::records::record_deleted(root, run_id) {
+            return false;
+        }
+        let Ok(mut manifest) = read_manifest(root, run_id) else { return false };
+        change(&mut manifest);
+        write_manifest(root, &manifest).is_ok()
+    }
+
     /// Record artifacts registered for a run whose in-memory copy was
-    /// already released: added to the outputs of its stored manifest (one
-    /// such write at a time, like [`Self::append_to_record`]) and to the
-    /// summary the history lists for it. Returns the ids recorded: none when
-    /// the record cannot take them, so that the display entry never names an
-    /// artifact its record does not hold.
+    /// already released: added to the outputs of its stored manifest
+    /// ([`Self::update_record`]) and to the summary the history lists for
+    /// it. Returns the ids recorded: none when the record cannot take them,
+    /// so that the display entry never names an artifact its record does not
+    /// hold.
     fn add_outputs_to_record(&self, root: &Path, run_id: &str, records: Vec<ArtifactRecord>) -> Vec<ArtifactId> {
         if records.is_empty() {
             return Vec::new();
         }
-        {
-            let _one = lock(&self.late_writes);
-            if crate::records::record_deleted(root, run_id) {
-                return Vec::new();
-            }
-            let Ok(mut manifest) = read_manifest(root, run_id) else { return Vec::new() };
+        let added = self.update_record(root, run_id, |manifest| {
             for record in &records {
                 put_output(&mut manifest.record.outputs, record);
             }
-            if write_manifest(root, &manifest).is_err() {
-                return Vec::new();
-            }
+        });
+        if !added {
+            return Vec::new();
         }
         if let Some(run) = lock(&self.runs).get_mut(run_id) {
             for record in &records {
@@ -330,6 +339,22 @@ impl Shared {
             }
         }
         records.into_iter().map(|record| record.id).collect()
+    }
+
+    /// Record the error of a run whose in-memory copy was already released:
+    /// in its stored manifest ([`Self::update_record`]) and in the summary
+    /// the history lists for it. Nothing when the record cannot take it (the
+    /// error entry of its output is recorded, or dropped, the same way).
+    fn record_error(&self, root: &Path, run_id: &str, error: RunErrorInfo) {
+        if !self.update_record(root, run_id, |manifest| manifest.error = Some(error.clone())) {
+            return;
+        }
+        if let Some(run) = lock(&self.runs).get_mut(run_id) {
+            if let Some(summary) = run.released.as_mut() {
+                summary.error = Some(error.clone());
+            }
+            run.manifest.error = Some(error);
+        }
     }
 
     fn research_dir(&self, name: &str) -> Result<PathBuf, ResearchError> {
@@ -1763,9 +1788,22 @@ impl Session {
                 self.push_output(&shared, &run_id, OutputItem::ClearOutput { wait });
             }
             HelperEvent::Error { run_id, ename, evalue, traceback } => {
-                if let Some(run) = lock(&shared.runs).get_mut(&run_id) {
-                    let redact = |text: &str| shared.config.launcher.redact(text);
-                    run.manifest.error = Some(RunErrorInfo { ename: redact(&ename), evalue: redact(&evalue) });
+                let released = {
+                    let mut runs = lock(&shared.runs);
+                    runs.get_mut(&run_id).and_then(|run| {
+                        let redact = |text: &str| shared.config.launcher.redact(text);
+                        let error = RunErrorInfo { ename: redact(&ename), evalue: redact(&evalue) };
+                        if run.released.is_none() {
+                            run.manifest.error = Some(error);
+                            None
+                        } else {
+                            // Its manifest lives in its record now: the error is written there.
+                            Some((run.root.clone(), error))
+                        }
+                    })
+                };
+                if let Some((root, error)) = released {
+                    shared.record_error(&root, &run_id, error);
                 }
                 self.push_output(&shared, &run_id, OutputItem::Error { ename, evalue, traceback });
             }
@@ -2626,6 +2664,42 @@ mod tests {
         assert_eq!(kept.entries.len(), 3, "the only copy of its output is kept");
         assert!(!kept.code.is_empty());
         assert!(runs.values().filter(|r| r.id() != unwritable).all(|r| r.released.is_some()));
+    }
+
+    /// An error the kernel reports for a run that was already released is
+    /// written to its stored manifest like late output: the run's record and
+    /// its history entry name the error, also after the project is opened
+    /// again, and the error entry is in its stored output.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_error_of_a_released_run_is_added_to_its_stored_manifest() {
+        let f = Fixture::new();
+        let service = &f._service;
+        let root = service.workspace_root().unwrap();
+        let id = finished_run(&f, 0, 10);
+        service.clear_workspace();
+        service.set_workspace(&root, true).unwrap();
+        assert!(lock(&service.shared.runs)[&id].released.is_some());
+        assert_eq!(read_manifest(&root, &id).unwrap().error, None);
+
+        f.session.on_event(HelperEvent::Error {
+            run_id: id.clone(),
+            ename: "ValueError".into(),
+            evalue: "late failure".into(),
+            traceback: vec!["Traceback (most recent call last)".into()],
+        });
+        let expected = Some(RunErrorInfo { ename: "ValueError".into(), evalue: "late failure".into() });
+        assert_eq!(read_manifest(&root, &id).unwrap().error, expected, "the stored manifest names the error");
+        assert_eq!(service.run_summary(&id).unwrap().error, expected, "the history entry names it");
+        let output = service.run_output(&id, None, 500).unwrap();
+        assert!(
+            output.entries.iter().any(|e| matches!(&e.item, OutputItem::Error { ename, .. } if ename == "ValueError")),
+            "{:?}",
+            output.entries
+        );
+        service.clear_workspace();
+        service.set_workspace(&root, true).unwrap();
+        assert_eq!(service.run_summary(&id).unwrap().error, expected);
+        assert_eq!(service.run_manifest(&id).unwrap().error, expected);
     }
 
     /// A display artifact registered for a run that was already released
