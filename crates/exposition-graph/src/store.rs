@@ -1239,6 +1239,27 @@ impl GraphStore {
         body.map(|b| decode::<Evidence>(&b)).transpose()
     }
 
+    /// At most `limit` of the newest records of `kind` about `subject`
+    /// (ordered as [`Self::evidence_for_subject`] orders them), and whether
+    /// older ones of that kind exist.
+    pub fn evidence_of_kind_bounded(
+        &self,
+        subject: &EntityId,
+        kind: EvidenceKind,
+        limit: usize,
+    ) -> StoreResult<(Vec<Evidence>, bool)> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT body FROM evidence WHERE subject = ?1 AND kind = ?2 ORDER BY recorded_at DESC, id LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![subject.as_str(), kind.as_str(), limit.saturating_add(1) as i64], |r| {
+            r.get::<_, String>(0)
+        })?;
+        let mut out: Vec<Evidence> = rows.map(|r| decode::<Evidence>(&r?)).collect::<StoreResult<_>>()?;
+        let more = out.len() > limit;
+        out.truncate(limit);
+        Ok((out, more))
+    }
+
     /// At most `limit` of the newest records about `subject`, and whether
     /// older ones exist.
     pub fn evidence_for_subject_bounded(&self, subject: &EntityId, limit: usize) -> StoreResult<(Vec<Evidence>, bool)> {

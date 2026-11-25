@@ -303,8 +303,9 @@ The agent runtime may be reworked on top of these contracts. Keep them:
   `nextStartLine`), `list_files` (`nextOffset`, `listing`, `listingChanged`),
   `run_python` (`outputTruncated`, `resultsOmitted`), `check_lean`
   (`diagnosticsOmitted`), graph reads (`truncated`, `relationsTruncated`,
-  `evidenceTruncated`). New tools follow the same rule; none may return a
-  clean short answer.
+  `evidenceTruncated`, `formalEvidenceTruncated`, and per entity summary
+  `evidenceTruncated` / `attributesTruncated`). New tools follow the same
+  rule; none may return a clean short answer.
 - **No decision is cached.** The gate, authority re-read, consent, scope and
   exposure checks run per call. `edit_document` works only on a revision the
   task has seen in full; do not resolve edits against the live text, which

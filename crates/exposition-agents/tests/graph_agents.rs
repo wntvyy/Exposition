@@ -3039,7 +3039,6 @@ mod query_bounds_review {
     /// listed: here 3 formal checks among 201 records, the one record past
     /// the read is a review, and the item says evidenceTruncated.
     #[test]
-    #[ignore = "review finding: formal-check list flagged when only non-formal records were past the 200-record read"]
     fn formal_checks_are_not_flagged_when_only_other_records_were_past_the_read() {
         let f = fixture();
         let (_, declaration, first) = lean_declaration_with_evidence(&f);
@@ -3090,7 +3089,6 @@ mod query_bounds_review {
     /// result say evidenceTruncated, which also tells the task that such a
     /// dependent exists.
     #[test]
-    #[ignore = "review finding: impact evidenceTruncated set by out-of-scope evidence; all visible evidence listed"]
     fn impact_evidence_is_not_flagged_by_evidence_the_task_cannot_see() {
         let f = fixture();
         let (_, declaration, first) = lean_declaration_with_evidence(&f);
@@ -3121,7 +3119,6 @@ mod query_bounds_review {
     /// context), and nothing says when it has more: a declaration with 6
     /// records is listed with 5 and the result reads complete.
     #[test]
-    #[ignore = "review finding: per-entity evidence summary (describe) is cut at 5 without a flag"]
     fn an_entitys_evidence_summary_says_when_records_are_left_out() {
         let f = fixture();
         let (_, declaration, first) = lean_declaration_with_evidence(&f);
@@ -3141,7 +3138,6 @@ mod query_bounds_review {
     /// formal checks of a 2,000-character statement, is returned above
     /// 64 KiB (after its relations and neighbors were cut to nothing).
     #[test]
-    #[ignore = "review finding: entity result with formalEvidence exceeds the 64 KiB size bound"]
     fn an_entity_result_stays_within_the_size_bound() {
         use exposition_graph::{BatchRef, EntityUpsert, RelationUpsert, SourceBinding};
         let f = fixture();
@@ -3211,5 +3207,119 @@ mod query_bounds_review {
             len(&result["formalEvidence"])
         );
         assert!(size <= RESULT_BYTES, "{size} bytes");
+    }
+
+    /// `n` more formal declarations of Main.lean (anchored in it, as the Lean
+    /// service admits them), each formalizing the lemma.
+    fn formalizing_declarations(f: &Fixture, file: &EntityId, n: usize) -> Vec<EntityId> {
+        use exposition_graph::{BatchRef, EntityUpsert, RelationUpsert, SourceBinding};
+        let origin = Origin::Service { service: "lean".into() };
+        let ids: Vec<EntityId> = (0..n)
+            .map(|i| {
+                let batch = ServiceBatch {
+                    entities: vec![EntityUpsert {
+                        id: None,
+                        kind: EntityKind::FormalDeclaration,
+                        roles: Vec::new(),
+                        label: format!("u{i}"),
+                        key: Some(format!("u{i}")),
+                        attributes: BTreeMap::new(),
+                        lifecycle: None,
+                        tombstone_reason: None,
+                        bindings: Some(vec![SourceBinding {
+                            entity: EntityId::mint(),
+                            path: p("Main.lean"),
+                            selector: SourceSelector::Declaration {
+                                syntax: "lean.declaration".into(),
+                                name: Some(format!("u{i}")),
+                                ordinal: None,
+                            },
+                            range: None,
+                            version: None,
+                            fingerprint: None,
+                            state: BindingState::Resolved,
+                            detail: None,
+                        }]),
+                    }],
+                    relations: vec![RelationUpsert {
+                        kind: RelationKind::AnchoredIn,
+                        from: BatchRef::Batch(0),
+                        to: BatchRef::Existing(file.clone()),
+                        status: None,
+                        evidence_kind: None,
+                        evidence: Vec::new(),
+                        note: None,
+                    }],
+                    summary: format!("Admit u{i}"),
+                    ..Default::default()
+                };
+                f.graph.apply_service_batch(&origin, &batch).unwrap().entity_ids.remove(0)
+            })
+            .collect();
+        apply_ops(
+            f,
+            ids.iter().map(|d| relation(RelationKind::Formalizes, existing(d), existing(&f.ids.lemma))).collect(),
+        );
+        ids
+    }
+
+    /// The declarations associated with a statement are listed up to 10;
+    /// past that the list says so by name (formalEvidenceTruncated), like
+    /// the other lists of the result.
+    #[test]
+    fn the_associated_declarations_are_flagged_exactly_past_their_bound() {
+        for (n, flagged) in [(10usize, false), (11, true)] {
+            let f = fixture();
+            let (file, _, _) = lean_declaration_with_evidence(&f);
+            formalizing_declarations(&f, &file, n);
+            let (result, _) = ask(&f, TaskScope::Workspace, &input("entity", "", &[], f.ids.lemma.as_str()));
+            let case = format!("{n} declarations: {} listed", len(&result["formalEvidence"]));
+            assert_eq!(len(&result["formalEvidence"]), 10, "{case}");
+            assert_eq!(result["formalEvidenceTruncated"], json!(flagged), "{case}");
+            assert_eq!(result["truncated"], json!(flagged), "{case}");
+        }
+    }
+
+    /// An entity summary lists at most 16 attributes, chosen among those
+    /// the task may see, and says when it left visible ones out: under
+    /// metadata-only consent a path-valued attribute that sorts after 20
+    /// withheld ones is still listed; with content consent 16 of 21 are
+    /// listed and the summary says so.
+    #[test]
+    fn an_entitys_attribute_summary_lists_what_the_task_may_see_and_says_when_some_are_left_out() {
+        let f = fixture();
+        let mut attributes: BTreeMap<String, String> = (0..20).map(|i| (format!("a{i:02}"), "x".to_owned())).collect();
+        attributes.insert("research.path".into(), "notes".into());
+        let claim = apply_ops(
+            &f,
+            vec![GraphOperation::CreateEntity {
+                temp_id: "attrs".into(),
+                kind: EntityKind::Claim,
+                roles: vec![],
+                label: "Attributed claim".into(),
+                key: None,
+                attributes,
+                binding: None,
+            }],
+        )["attrs"]
+            .clone();
+        let summary = |consent: ContextConsent| -> Value {
+            let mut s = spec(&f, TaskScope::Workspace);
+            s.consent = consent;
+            let out = gq::run(
+                GraphEnv { service: &f.graph, project: None },
+                &f.root,
+                &s,
+                &input("search", "", &["claim"], ""),
+            )
+            .unwrap_or_else(|e| panic!("{}", e.content));
+            out.content["entities"].as_array().unwrap().iter().find(|e| e["id"] == json!(claim)).unwrap().clone()
+        };
+        let metadata = summary(ContextConsent::MetadataOnly);
+        assert_eq!(metadata["attributes"], json!({"research.path": "notes"}), "{metadata}");
+        assert!(metadata.get("attributesTruncated").is_none(), "nothing visible was left out: {metadata}");
+        let content = summary(ContextConsent::ScopeContent);
+        assert_eq!(content["attributes"].as_object().map_or(0, |a| a.len()), 16, "{content}");
+        assert_eq!(content["attributesTruncated"], json!(true), "{content}");
     }
 }

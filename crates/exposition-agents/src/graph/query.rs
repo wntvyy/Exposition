@@ -34,8 +34,8 @@ const MAX_EVIDENCE: usize = 20;
 /// Formal-check records listed per associated declaration (`evidenceTruncated`
 /// of the `formalEvidence` item).
 const MAX_FORMAL_RECORDS: usize = 5;
-/// Evidence records of a declaration read to find its formal checks.
-const FORMAL_RECORDS_READ: usize = 200;
+/// Declarations listed under `formalEvidence` (`formalEvidenceTruncated`).
+const MAX_FORMAL_DECLARATIONS: usize = 10;
 /// Affected evidence listed by an impact result (`evidenceTruncated`).
 const MAX_IMPACT_EVIDENCE: usize = 50;
 /// Serialized size bound of one result.
@@ -178,10 +178,18 @@ fn not_visible(_id: &str) -> ToolOutput {
     )
 }
 
-/// Trim a result to its size bound; what it cuts is said (`truncated`, and
-/// `relationsTruncated` for relations).
+/// Trim a result to its size bound, list by list in this order; what it
+/// cuts is said (`truncated`, and the list's own flag where it has one).
 fn bounded(mut out: Value) -> Value {
-    for key in ["relations", "entities", "items", "neighbors"] {
+    const LISTS: [(&str, Option<&str>); 6] = [
+        ("relations", Some("relationsTruncated")),
+        ("entities", None),
+        ("items", None),
+        ("neighbors", None),
+        ("formalEvidence", Some("formalEvidenceTruncated")),
+        ("evidence", Some("evidenceTruncated")),
+    ];
+    for (key, flag) in LISTS {
         while serde_json::to_string(&out).map(|s| s.len()).unwrap_or(0) > MAX_RESULT_BYTES {
             let Some(list) = out.get_mut(key).and_then(Value::as_array_mut) else { break };
             if list.is_empty() {
@@ -190,8 +198,8 @@ fn bounded(mut out: Value) -> Value {
             let keep = list.len() / 2;
             list.truncate(keep);
             out["truncated"] = json!(true);
-            if key == "relations" {
-                out["relationsTruncated"] = json!(true);
+            if let Some(flag) = flag {
+                out[flag] = json!(true);
             }
         }
     }
@@ -327,24 +335,25 @@ fn entity(graph: GraphEnv<'_>, vis: &Visibility<'_>, input: &GraphQueryInput) ->
             // associated declaration is listed apart, with the state of the
             // association (rejected ones are left out).
             let mut formal_evidence = Vec::new();
+            let mut formal_truncated = false;
             if e.kind != EntityKind::FormalDeclaration {
                 for r in store.relations_to(&id)? {
                     if r.kind != RelationKind::Formalizes || r.status == AssertionStatus::Rejected {
                         continue;
                     }
                     let Some((declaration, _)) = vis.entity_id(store, &r.from)? else { continue };
-                    if formal_evidence.len() >= 10 {
+                    if formal_evidence.len() >= MAX_FORMAL_DECLARATIONS {
                         truncated = true;
+                        formal_truncated = true;
                         break;
                     }
-                    let (read, more_read) = store.evidence_for_subject_bounded(&declaration.id, FORMAL_RECORDS_READ)?;
-                    let mut records: Vec<Evidence> =
-                        read.into_iter().filter(|x| x.kind == EvidenceKind::FormalCheck).collect();
-                    records.sort_by_key(|x| std::cmp::Reverse(x.recorded_at_ms));
-                    let records_truncated = more_read || records.len() > MAX_FORMAL_RECORDS;
+                    let (records, records_truncated) = store.evidence_of_kind_bounded(
+                        &declaration.id,
+                        EvidenceKind::FormalCheck,
+                        MAX_FORMAL_RECORDS,
+                    )?;
                     truncated |= records_truncated;
-                    let records: Vec<Value> =
-                        records.iter().take(MAX_FORMAL_RECORDS).map(|x| evidence_item(store, vis, x)).collect();
+                    let records: Vec<Value> = records.iter().map(|x| evidence_item(store, vis, x)).collect();
                     let mut item = json!({
                         "declaration": declaration.id,
                         "label": vis.label(&declaration),
@@ -390,6 +399,7 @@ fn entity(graph: GraphEnv<'_>, vis: &Visibility<'_>, input: &GraphQueryInput) ->
             });
             if e.kind != EntityKind::FormalDeclaration && !formal_evidence.is_empty() {
                 out["formalEvidence"] = json!(formal_evidence);
+                out["formalEvidenceTruncated"] = json!(formal_truncated);
             }
             if formal {
                 out["evidenceNote"] = json!(FORMAL_EVIDENCE_NOTE);
@@ -609,12 +619,18 @@ fn impact(
                 items.push(v);
             }
             // Evidence the change would affect, with its current
-            // applicability (only evidence of entities the task may see).
+            // applicability. Only evidence of entities the task may see
+            // counts, listed or left out: a hidden record neither appears nor
+            // makes the list read as incomplete.
             let mut evidence = Vec::new();
-            let evidence_truncated = report.evidence.len() > MAX_IMPACT_EVIDENCE;
-            for hit in report.evidence.iter().take(MAX_IMPACT_EVIDENCE) {
+            let mut evidence_truncated = false;
+            for hit in &report.evidence {
                 if vis.entity_id(store, &hit.subject)?.is_none() {
                     continue;
+                }
+                if evidence.len() >= MAX_IMPACT_EVIDENCE {
+                    evidence_truncated = true;
+                    break;
                 }
                 let freshness = match &hit.freshness {
                     Freshness::Current => "current",
