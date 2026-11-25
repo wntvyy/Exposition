@@ -64,8 +64,8 @@ struct FakeData {
     data_restores: Mutex<Vec<String>>,
     /// Graph entities the source side asks about.
     details: Vec<exposition_graph::model::EntityDetail>,
-    /// Extraction coverage of the project's files (what the graph has indexed).
-    coverage: exposition_graph::model::CoverageSummary,
+    /// What the graph has read of the project's files (`None`: as without a graph).
+    indexing: Option<crate::source_removal::Indexing>,
 }
 
 fn wp(s: &str) -> WorkspacePath {
@@ -149,8 +149,8 @@ impl DataSide for FakeData {
     fn entity_detail(&self, entity: &str) -> Option<exposition_graph::model::EntityDetail> {
         self.details.iter().find(|d| d.entity.id.as_str() == entity).cloned()
     }
-    fn coverage(&self) -> exposition_graph::model::CoverageSummary {
-        self.coverage.clone()
+    fn indexing(&self) -> Option<crate::source_removal::Indexing> {
+        self.indexing.clone()
     }
     fn after_paths(&self, outcomes: &[OpOutcome]) {
         self.after.lock().unwrap().push(outcomes.to_vec());
@@ -1456,13 +1456,31 @@ fn files_the_graph_has_not_indexed_make_the_list_of_uses_incomplete() {
         "every file indexed: {:?}",
         complete.impacts
     );
-    for (pending, failed, reason) in [
-        (2, 0, "2 files are not indexed yet"),
-        (0, 1, "1 file could not be indexed"),
-        (1, 3, "1 file is not indexed yet; 3 files could not be indexed"),
+    use exposition_graph::model::CoverageState::{Complete, Failed, Pending};
+    let read = |files: &[(&str, exposition_graph::model::CoverageState)], first_read: bool| {
+        let mut files: BTreeMap<WorkspacePath, _> = files.iter().map(|(p, s)| (wp(p), *s)).collect();
+        files.insert(wp("paper.tex"), Complete);
+        Some(crate::source_removal::Indexing { files, first_read })
+    };
+    let indexed = FakeData { details: p.data.details.clone(), indexing: read(&[], false), ..FakeData::default() };
+    let plan = ops.plan(&fx.ws, &indexed, delete(&[&p.theorem], false, OpActor::User)).unwrap();
+    assert!(plan.impacts.iter().all(|i| !i.message.starts_with("Not every use of")), "{:?}", plan.impacts);
+    for (indexing, reason) in [
+        (read(&[("a.tex", Pending), ("b.tex", Pending)], false), "2 files are not indexed yet (a.tex, b.tex)"),
+        (
+            read(&[("c.tex", Failed), ("x.py", Failed), ("L.lean", Pending)], false),
+            "1 file could not be indexed (c.tex)",
+        ),
+        (
+            read(
+                &[("a.tex", Pending), ("c.tex", Failed), ("d.tex", Failed), ("e.ltx", Failed), ("f.tex", Failed)],
+                false,
+            ),
+            "1 file is not indexed yet (a.tex); 4 files could not be indexed (c.tex, d.tex, e.ltx and 1 more)",
+        ),
+        (read(&[], true), "the project's files are still being read"),
     ] {
-        let mut data = FakeData { details: p.data.details.clone(), ..FakeData::default() };
-        data.coverage = exposition_graph::model::CoverageSummary { pending, failed, ..Default::default() };
+        let data = FakeData { details: p.data.details.clone(), indexing, ..FakeData::default() };
         let plan = ops.plan(&fx.ws, &data, delete(&[&p.theorem], false, OpActor::User)).unwrap();
         let incomplete: Vec<&OpImpact> =
             plan.impacts.iter().filter(|i| i.message.starts_with("Not every use of “Theorem thm:main”")).collect();
@@ -1729,7 +1747,7 @@ mod incomplete_uses_review {
 /// Delete from Source with the real graph service: the plan's data side reads
 /// the entity detail and the coverage exactly as `AppData` does.
 mod coverage_review {
-    use exposition_graph::model::{CoverageSummary, Entity, EntityDetail};
+    use exposition_graph::model::{Entity, EntityDetail};
     use exposition_graph::reconcile::{ReconcileOptions, Scope};
     use exposition_graph::{GraphConfig, GraphService};
 
@@ -1764,8 +1782,8 @@ mod coverage_review {
             let id = exposition_graph::ids::EntityId::parse(entity).ok()?;
             self.0.entity_detail(&id).ok()
         }
-        fn coverage(&self) -> CoverageSummary {
-            self.0.status().coverage
+        fn indexing(&self) -> Option<crate::source_removal::Indexing> {
+            crate::source_removal::indexing_of(&self.0)
         }
     }
 
@@ -1872,7 +1890,6 @@ mod coverage_review {
     /// LaTeX, Typst or BibTeX item in this project now asks for a decision
     /// ("2 files could not be indexed"), for as long as those files stay.
     #[test]
-    #[ignore = "review finding: unindexable files that cannot refer to the item (.py, .lean) force a decision"]
     fn files_that_cannot_refer_to_the_item_do_not_make_its_uses_incomplete() {
         let r = real(&[
             ("analysis/legacy.py", &latin1("# caf\u{e9}\nx = 1\n")),
@@ -1888,7 +1905,6 @@ mod coverage_review {
     /// saved a moment ago makes the removal of a LaTeX lemma ask for a
     /// decision until the graph has read it again.
     #[test]
-    #[ignore = "review finding: a pending file that cannot refer to the item (.py) forces a decision"]
     fn a_pending_file_that_cannot_refer_to_the_item_does_not_make_its_uses_incomplete() {
         let r = real(&[("analysis/run.py", b"x = 1\n")]);
         r.graph.mark_pending(&[wp("analysis/run.py")]).unwrap();
@@ -1926,7 +1942,6 @@ mod coverage_review {
     /// Pending/Reconciling) — is not counted: here a new LaTeX file refers
     /// to the lemma, and the plan lists no use and says nothing.
     #[test]
-    #[ignore = "review finding: files not yet read after opening the project are neither listed nor counted"]
     fn a_file_the_graph_has_not_read_since_opening_is_said() {
         let r = real(&[]);
         r.write("other.tex", b"See Lemma~\\ref{lem:a}.\n");

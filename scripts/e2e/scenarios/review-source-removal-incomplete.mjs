@@ -124,7 +124,7 @@ export default async function reviewSourceRemovalIncomplete({ launchApp, assert 
     await decision(page).waitFor({ timeout: 15_000 });
     const latex = await decision(page).locator('[data-testid="op-impact"][data-kind="sourceDependents"]').allTextContents();
     assert.equal(latex.length, 1, JSON.stringify(latex));
-    assert.match(latex[0], /^Not every use of “.+” could be checked: 1 file could not be indexed\. Uses not listed here may break too; check the sources before you save\.$/);
+    assert.match(latex[0], /^Not every use of “.+” could be checked: 1 file could not be indexed \(other\.tex\)\. Uses not listed here may break too; check the sources before you save\.$/);
     await decision(page).getByRole("button", { name: "Cancel" }).click();
     await decision(page).waitFor({ state: "detached", timeout: 10_000 });
     assert.equal(await buffer(page, "main.tex"), null, "Cancel changes nothing");

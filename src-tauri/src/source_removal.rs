@@ -33,7 +33,8 @@ use exposition_core::ops::{
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::TextRange;
 use exposition_graph::model::{
-    AssertionStatus, BindingState, EntityDetail, Lifecycle, Origin, SourceBinding, SourceSelector,
+    AssertionStatus, BindingState, CoverageState, EntityDetail, Lifecycle, Origin, SourceBinding, SourceSelector,
+    SyncState,
 };
 use exposition_graph::source_removal::{self as sr, NotLocated};
 use exposition_graph::vocabulary::{EntityKind, RelationKind};
@@ -49,6 +50,49 @@ const MAX_LEAN_FILES: usize = 2000;
 const MAX_CONSUMERS: usize = 25;
 /// Relationships to an item the graph's detail read returns at most.
 const MAX_RELATIONS_READ: usize = exposition_graph::store::MAX_ROWS;
+/// Files that could refer to an item checked against what the graph has read
+/// (bounded walk).
+const MAX_SOURCE_FILES: usize = 2000;
+
+/// What the graph has read of the project's files.
+#[derive(Clone, Debug, Default)]
+pub struct Indexing {
+    /// Every file the graph knows, with its extraction state.
+    pub files: BTreeMap<WorkspacePath, CoverageState>,
+    /// No pass has completed since the project was opened: files changed
+    /// while it was closed may not have been read yet.
+    pub first_read: bool,
+}
+
+/// What `graph` has read of the project's files (`None`: no graph).
+pub fn indexing_of(graph: &exposition_graph::GraphService) -> Option<Indexing> {
+    let files = graph.with_store(|s| Ok(s.all_coverage()?)).ok()?;
+    let freshness = graph.freshness();
+    Some(Indexing {
+        files: files.into_iter().map(|c| (c.path, c.state)).collect(),
+        first_read: matches!(freshness.state, SyncState::Pending | SyncState::Reconciling)
+            && freshness.checkpoint_ms.is_none(),
+    })
+}
+
+/// The kinds of file (extensions) whose text can refer to an item declared
+/// with `syntax`: a LaTeX item from LaTeX, a Typst item from Typst, a BibTeX
+/// entry from the files that cite (LaTeX, Typst, Markdown), a Markdown item
+/// from Markdown. Never code or Lean (a Lean declaration's uses are searched
+/// in the Lean files themselves).
+fn referring_extensions(syntax: &str) -> &'static [&'static str] {
+    match syntax.split('.').next() {
+        Some("latex") => &["tex", "ltx"],
+        Some("typst") => &["typ"],
+        Some("bibtex") => &["tex", "ltx", "typ", "md", "markdown"],
+        Some("markdown") => &["md", "markdown"],
+        _ => &[],
+    }
+}
+
+fn has_extension(path: &WorkspacePath, extensions: &[&str]) -> bool {
+    path.extension().is_some_and(|e| extensions.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
 
 fn quoted(s: &str) -> String {
     format!("“{s}”")
@@ -210,8 +254,10 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
         })
         .collect();
     let mut texts = Texts::new(ws);
-    // How far the graph has indexed the project (read once, when needed).
-    let mut coverage: Option<exposition_graph::model::CoverageSummary> = None;
+    // What the graph has read (read once, when needed), and the project's
+    // files that could refer to an item, by kind (walked once per kind).
+    let mut indexing: Option<Option<Indexing>> = None;
+    let mut walks: HashMap<&'static [&'static str], FileWalk> = HashMap::new();
     // Lean declarations whose name mentions are looked up after every removal is known.
     let mut lean: Vec<(usize, String)> = Vec::new();
     let mut proofs_found = false;
@@ -378,18 +424,21 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
         if unread_users {
             unseen.push("it has more relationships than this plan reads".to_owned());
         }
-        // Its uses come from the files the graph has indexed; a Lean
-        // declaration's are searched in the Lean files themselves (below).
-        let lean_item =
-            matches!(&binding.selector, SourceSelector::Declaration { syntax, .. } if syntax.starts_with("lean."));
-        if !lean_item {
-            let coverage = coverage.get_or_insert_with(|| data.coverage());
-            if coverage.pending > 0 {
-                unseen.push(format!("{} not indexed yet", plural_is(coverage.pending, "file", "files")));
-            }
-            if coverage.failed > 0 {
-                unseen.push(format!("{} could not be indexed", plural(coverage.failed as usize, "file", "files")));
-            }
+        // Its uses come from what the graph has read of the files that can
+        // refer to it; a Lean declaration's are searched in the Lean files
+        // themselves (below).
+        let extensions = match &binding.selector {
+            SourceSelector::Declaration { syntax, .. } => referring_extensions(syntax),
+            _ => &[],
+        };
+        if !extensions.is_empty()
+            && let Some(read) = indexing.get_or_insert_with(|| data.indexing()).as_ref()
+        {
+            let walk = walks.entry(extensions).or_insert_with(|| match ws.open_root() {
+                Some(root) => source_files(&root, extensions, MAX_SOURCE_FILES),
+                None => FileWalk::default(),
+            });
+            unseen.extend(unread_files(read, extensions, walk));
         }
         out.effects.push(OpEffect {
             target: target.clone(),
@@ -444,22 +493,117 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
     out
 }
 
-/// The project's `.lean` files as one bounded walk found them, and what the
-/// walk could not see.
+/// The project's files of some kind as one bounded walk found them, and
+/// what the walk could not see.
 #[derive(Debug, Default)]
-struct LeanWalk {
+struct FileWalk {
     files: Vec<WorkspacePath>,
-    /// More `.lean` files exist than `files` lists (the walk stopped).
+    /// More such files exist than `files` lists (the walk stopped).
     capped: bool,
     /// Folders that could not be listed in full (`""`: the project folder).
     unlisted: Vec<String>,
 }
 
+/// `N folders could not be listed (…)`, naming the project folder as such.
+fn unlisted_reason(unlisted: &[String]) -> String {
+    let folders: Vec<String> =
+        unlisted.iter().map(|f| if f.is_empty() { "the project folder".to_owned() } else { f.clone() }).collect();
+    format!("{} could not be listed ({})", plural(folders.len(), "folder", "folders"), some_of(&folders))
+}
+
+/// The project's files with one of `extensions` that the graph's scan
+/// admits (the same folders skipped and depth bound, links not followed),
+/// at most `limit`.
+fn source_files(root: &Path, extensions: &[&str], limit: usize) -> FileWalk {
+    use exposition_graph::admission::{Admission, classify, scan_directory};
+    let mut walk = FileWalk::default();
+    let mut stack: Vec<(PathBuf, Option<WorkspacePath>, usize)> = vec![(root.to_path_buf(), None, 0)];
+    while let Some((dir, rel, depth)) = stack.pop() {
+        let shown = rel.as_ref().map(|r| r.as_str().to_owned()).unwrap_or_default();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            walk.unlisted.push(shown);
+            continue;
+        };
+        let mut listed = true;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                listed = false;
+                continue;
+            };
+            let Ok(kind) = entry.file_type() else {
+                listed = false;
+                continue;
+            };
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
+            let path = match &rel {
+                Some(d) => d.join(&name),
+                None => WorkspacePath::parse(&name),
+            };
+            let Ok(path) = path else { continue };
+            if kind.is_dir() {
+                if depth < exposition_graph::reconcile::scan::MAX_DEPTH && scan_directory(&path) {
+                    stack.push((entry.path(), Some(path), depth + 1));
+                }
+            } else if kind.is_file()
+                && has_extension(&path, extensions)
+                && matches!(classify(&path), Admission::Admit(_))
+            {
+                if walk.files.len() >= limit {
+                    walk.capped = true;
+                    return walk;
+                }
+                walk.files.push(path);
+            }
+        }
+        if !listed {
+            walk.unlisted.push(shown);
+        }
+    }
+    walk.files.sort();
+    walk
+}
+
+/// Why the graph's relations may not hold every use of an item whose uses
+/// are written in files with one of `extensions`: such files it has not read
+/// yet (pending, or on disk and unknown to it), could not read (failed), or
+/// may not have read since the project was opened; and what the walk of
+/// those files could not see.
+fn unread_files(read: &Indexing, extensions: &[&str], walk: &FileWalk) -> Vec<String> {
+    let mut out = Vec::new();
+    if read.first_read {
+        out.push("the project's files are still being read".to_owned());
+    }
+    let state_of = |state: CoverageState| -> BTreeSet<String> {
+        read.files
+            .iter()
+            .filter(|(p, s)| **s == state && has_extension(p, extensions))
+            .map(|(p, _)| p.as_str().to_owned())
+            .collect()
+    };
+    let mut not_read = state_of(CoverageState::Pending);
+    not_read.extend(walk.files.iter().filter(|p| !read.files.contains_key(*p)).map(|p| p.as_str().to_owned()));
+    if !not_read.is_empty() {
+        let names: Vec<String> = not_read.into_iter().collect();
+        out.push(format!("{} not indexed yet ({})", plural_is(names.len(), "file", "files"), some_of(&names)));
+    }
+    let failed: Vec<String> = state_of(CoverageState::Failed).into_iter().collect();
+    if !failed.is_empty() {
+        out.push(format!("{} could not be indexed ({})", plural(failed.len(), "file", "files"), some_of(&failed)));
+    }
+    if walk.capped {
+        out.push(format!("only the first {MAX_SOURCE_FILES} files that could refer to it were checked"));
+    }
+    if !walk.unlisted.is_empty() {
+        out.push(unlisted_reason(&walk.unlisted));
+    }
+    out
+}
+
 /// `.lean` files of the project (at most `limit`; tool and build folders
 /// skipped; links not followed).
-fn lean_files(root: &Path, limit: usize) -> LeanWalk {
+fn lean_files(root: &Path, limit: usize) -> FileWalk {
     const SKIP: &[&str] = &[".lake", ".git", ".exposition", "node_modules", "target", "build", ".elan"];
-    let mut walk = LeanWalk::default();
+    let mut walk = FileWalk::default();
     let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
     while let Some((dir, rel)) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -513,7 +657,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 /// `1 file is` / `2 files are`.
-fn plural_is(n: u32, one: &str, many: &str) -> String {
+fn plural_is(n: usize, one: &str, many: &str) -> String {
     if n == 1 { format!("1 {one} is") } else { format!("{n} {many} are") }
 }
 
@@ -538,16 +682,7 @@ fn lean_mentions(ws: &WorkspaceService, texts: &mut Texts<'_>, out: &mut SourceP
         unseen.push(format!("only the first {MAX_LEAN_FILES} Lean files of the project were searched"));
     }
     if !walk.unlisted.is_empty() {
-        let folders: Vec<String> = walk
-            .unlisted
-            .iter()
-            .map(|f| if f.is_empty() { "the project folder".to_owned() } else { f.clone() })
-            .collect();
-        unseen.push(format!(
-            "{} could not be listed ({})",
-            plural(folders.len(), "folder", "folders"),
-            some_of(&folders)
-        ));
+        unseen.push(unlisted_reason(&walk.unlisted));
     }
     let unreadable: Vec<String> =
         files.iter().filter(|p| texts.get(p).is_err()).map(|p| p.as_str().to_owned()).collect();
