@@ -618,6 +618,119 @@ async fn graph_queries_are_scoped_and_consent_filtered() {
     }
 }
 
+/// Apply `ops` as the user and return the ids of the entities created, by temporary id.
+fn apply_ops(f: &Fixture, ops: Vec<GraphOperation>) -> BTreeMap<String, EntityId> {
+    let base_revision = f.graph.status().revision;
+    let (_, outcome) = f
+        .graph
+        .propose_and_apply(Origin::User, &ChangeRequest { base_revision, operations: ops, summary: None })
+        .unwrap();
+    match outcome {
+        exposition_graph::ApplyOutcome::Applied { created, .. } => {
+            created.into_iter().map(|c| (c.temp_id, c.id)).collect()
+        }
+        other => panic!("not applied: {other:?}"),
+    }
+}
+
+fn unbound_claim(temp_id: String, label: String) -> GraphOperation {
+    GraphOperation::CreateEntity {
+        temp_id,
+        kind: EntityKind::Claim,
+        roles: vec![],
+        label,
+        key: None,
+        attributes: BTreeMap::new(),
+        binding: None,
+    }
+}
+
+/// Fewer relations listed than exist among the listed entities is said in
+/// the result (`relationsTruncated`, and `truncated`), also when the result
+/// is far below its size bound: 13 claims that depend on and refer to each
+/// other (312 relations) are listed with 300 of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_queries_say_when_relations_are_left_out() {
+    let f = fixture();
+    const N: usize = 13;
+    let mut ops: Vec<GraphOperation> =
+        (0..N).map(|i| unbound_claim(format!("d{i}"), format!("Dense {i:02}"))).collect();
+    for i in 0..N {
+        for j in 0..N {
+            if i == j {
+                continue;
+            }
+            for kind in [RelationKind::DependsOn, RelationKind::References] {
+                ops.push(GraphOperation::AddRelation {
+                    kind,
+                    from: EntityRef::Temp { temp_id: format!("d{i}") },
+                    to: EntityRef::Temp { temp_id: format!("d{j}") },
+                    evidence_kind: None,
+                    evidence: vec![],
+                    note: None,
+                });
+            }
+        }
+    }
+    let created = apply_ops(&f, ops);
+    let among = N * (N - 1) * 2;
+    let first = created["d0"].as_str().to_owned();
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let queries = vec![query("search", "search", "Dense", "", "", 1), query("near", "neighborhood", "", &first, "", 1)];
+    let (id, _) = run(&mut h, req, queries, true).await;
+    for tool_use_id in ["search", "near"] {
+        let (_, err, text) = call(&h, &id, tool_use_id);
+        assert!(!err, "{tool_use_id}: {text}");
+        let result: Value = serde_json::from_str(&text).unwrap();
+        let entities = result["entities"].as_array().unwrap().len();
+        let relations = result["relations"].as_array().unwrap().len();
+        println!("{tool_use_id}: {entities} entities, {relations} of {among} relations, {} bytes", text.len());
+        assert_eq!(entities, N, "{tool_use_id}: every dense claim is listed");
+        assert!(relations < among, "{tool_use_id}: the relation bound applies ({relations})");
+        assert_eq!(result["relationsTruncated"], json!(true), "{tool_use_id}: left-out relations are said");
+        assert_eq!(result["truncated"], json!(true), "{tool_use_id}: the result is incomplete");
+    }
+    // A complete result says so too.
+    let lemma = f.ids.lemma.as_str().to_owned();
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let (id, _) = run(&mut h, req, vec![query("near", "neighborhood", "", &lemma, "", 1)], true).await;
+    let (_, _, text) = call(&h, &id, "near");
+    let result: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        (result["relationsTruncated"].clone(), result["truncated"].clone()),
+        (json!(false), json!(false)),
+        "{text}"
+    );
+}
+
+/// A search scans a bounded number of matches before the scope filter: when
+/// more matches exist than were scanned, an empty or short result is not
+/// presented as complete. 2,000 claims outside a narrow scope sort before
+/// the one claim inside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_search_says_when_matches_past_its_scan_were_not_looked_at() {
+    let f = fixture();
+    for batch in 0..4 {
+        let ops = (0..500).map(|i| unbound_claim(format!("a{i}"), format!("Aaa {batch}-{i:03}"))).collect();
+        apply_ops(&f, ops);
+    }
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let req = request(&f.root, files_scope(), PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let search = tool(
+        "claims",
+        tools::GRAPH_QUERY,
+        json!({"query": "search", "text": "", "kinds": ["claim"], "entity": "", "path": "", "depth": 1, "limit": 100}),
+    );
+    let (id, _) = run(&mut h, req, vec![search], true).await;
+    let (_, err, text) = call(&h, &id, "claims");
+    assert!(!err, "{text}");
+    let result: Value = serde_json::from_str(&text).unwrap();
+    println!("claims in scope listed: {}", result["entities"]);
+    assert!(!text.contains("Aaa "), "claims outside the scope are never listed: {text}");
+    assert_eq!(result["truncated"], json!(true), "matches past the scan were not looked at: {text}");
+}
+
 /// A formal declaration of `Main.lean` admitted as the Lean service admits
 /// one, with one formal-check evidence record of the file's indexed text.
 fn lean_declaration_with_evidence(f: &Fixture) -> (EntityId, EntityId, exposition_graph::EvidenceId) {
@@ -700,6 +813,64 @@ fn lean_declaration_with_evidence(f: &Fixture) -> (EntityId, EntityId, expositio
     };
     let evidence = f.graph.register_evidence(&origin, evidence).unwrap();
     (file, declaration, evidence)
+}
+
+/// Evidence lists are bounded (an entity's own records, the records of each
+/// associated declaration, the evidence an impact affects); a list that left
+/// records out says so (`evidenceTruncated`, and `truncated`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_queries_say_when_evidence_is_left_out() {
+    let f = fixture();
+    let (_, declaration, first) = lean_declaration_with_evidence(&f);
+    let record = f.graph.with_store(|s| Ok(s.evidence(&first)?)).unwrap().expect("the first record");
+    let origin = Origin::Service { service: "lean".into() };
+    for i in 0..50u64 {
+        let copy = exposition_graph::Evidence {
+            id: exposition_graph::EvidenceId::mint(),
+            recorded_at_ms: 2 + i,
+            ..record.clone()
+        };
+        f.graph.register_evidence(&origin, copy).unwrap();
+    }
+    apply_ops(
+        &f,
+        vec![GraphOperation::AddRelation {
+            kind: RelationKind::Formalizes,
+            from: EntityRef::Id { id: declaration.clone() },
+            to: EntityRef::Id { id: f.ids.lemma.clone() },
+            evidence_kind: None,
+            evidence: vec![],
+            note: None,
+        }],
+    );
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let queries = vec![
+        query("decl", "entity", "", declaration.as_str(), "", 1),
+        query("lemma", "entity", "", f.ids.lemma.as_str(), "", 1),
+        query("impact", "impact", "", declaration.as_str(), "", 1),
+    ];
+    let (id, _) = run(&mut h, req, queries, true).await;
+    let parse = |tool_use_id: &str| -> Value {
+        let (_, err, text) = call(&h, &id, tool_use_id);
+        assert!(!err, "{tool_use_id}: {text}");
+        serde_json::from_str(&text).unwrap()
+    };
+    let decl = parse("decl");
+    assert!(decl["evidence"].as_array().unwrap().len() < 51, "{}", decl["evidence"]);
+    assert_eq!((decl["evidenceTruncated"].clone(), decl["truncated"].clone()), (json!(true), json!(true)), "{decl}");
+    let lemma = parse("lemma");
+    let formal = &lemma["formalEvidence"][0];
+    assert!(formal["evidence"].as_array().unwrap().len() < 51, "{formal}");
+    assert_eq!(formal["evidenceTruncated"], json!(true), "{formal}");
+    assert_eq!(lemma["truncated"], json!(true), "{lemma}");
+    let impact = parse("impact");
+    assert!(impact["evidence"].as_array().unwrap().len() < 51, "{}", impact["evidence"]);
+    assert_eq!(
+        (impact["evidenceTruncated"].clone(), impact["truncated"].clone()),
+        (json!(true), json!(true)),
+        "{impact}"
+    );
 }
 
 /// Pre-review walkthrough, leads A and B. The agent asked what a change to a
