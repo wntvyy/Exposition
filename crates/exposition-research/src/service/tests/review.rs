@@ -979,6 +979,9 @@ async fn review_late_output_racing_a_permanent_deletion_never_brings_the_record_
         random ^= random >> 7;
         random ^= random << 17;
         let delay = Duration::from_micros(random % 3000);
+        // The figure is in the run's folder before the race (the deletion
+        // removes the folder only when it is empty).
+        std::fs::write(dir.join("output-1.png"), png("racing")).unwrap();
         let deleted = std::thread::scope(|s| {
             let deleter = s.spawn(|| {
                 std::thread::sleep(delay);
@@ -1116,71 +1119,82 @@ async fn review_late_writes_deletions_restores_releases_and_reads_at_once_never_
     let service = &f._service;
     let made: Vec<(String, PathBuf)> = (0..12).map(|n| stored_run_with_folder(&f, n, 2_000)).collect();
     release_all(service);
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<usize>();
     let deadline = Instant::now() + Duration::from_secs(4);
     std::thread::scope(|s| {
-        for worker in 0..6u64 {
-            let (made, done_tx, session) = (&made, done_tx.clone(), f.session.clone());
-            s.spawn(move || {
-                let mut random = 0x9E37_79B9_7F4A_7C15u64 ^ (worker + 1).wrapping_mul(0xA24B_AED4_963E_E407);
-                let mut steps = 0usize;
-                while Instant::now() < deadline {
-                    random ^= random << 13;
-                    random ^= random >> 7;
-                    random ^= random << 17;
-                    let (id, dir) = &made[(random % made.len() as u64) as usize];
-                    match (random >> 8) % 10 {
-                        0 => late_display(&session, id, dir, "output-1.png", &png("stress")),
-                        1 => session.on_event(HelperEvent::Stream {
-                            run_id: id.clone(),
-                            name: "stdout".into(),
-                            text: "stress\n".into(),
-                        }),
-                        2 => session.on_event(HelperEvent::Error {
-                            run_id: id.clone(),
-                            ename: "E".into(),
-                            evalue: "stress".into(),
-                            traceback: Vec::new(),
-                        }),
-                        3 => {
-                            service.shared.release_run(id);
+        let workers: Vec<_> = (0..6u64)
+            .map(|worker| {
+                let (made, session) = (&made, f.session.clone());
+                s.spawn(move || {
+                    let mut random = 0x9E37_79B9_7F4A_7C15u64 ^ (worker + 1).wrapping_mul(0xA24B_AED4_963E_E407);
+                    let mut steps = 0usize;
+                    while Instant::now() < deadline {
+                        random ^= random << 13;
+                        random ^= random >> 7;
+                        random ^= random << 17;
+                        let (id, dir) = &made[(random % made.len() as u64) as usize];
+                        match (random >> 8) % 10 {
+                            0 => {
+                                // A permanent deletion removes the emptied folder; the kernel writes anew.
+                                let _ = std::fs::create_dir_all(dir);
+                                if std::fs::write(dir.join("output-1.png"), png("stress")).is_ok() {
+                                    late_display(&session, id, dir, "output-1.png", &png("stress"))
+                                }
+                            }
+                            1 => session.on_event(HelperEvent::Stream {
+                                run_id: id.clone(),
+                                name: "stdout".into(),
+                                text: "stress
+"
+                                .into(),
+                            }),
+                            2 => session.on_event(HelperEvent::Error {
+                                run_id: id.clone(),
+                                ename: "E".into(),
+                                evalue: "stress".into(),
+                                traceback: Vec::new(),
+                            }),
+                            3 => {
+                                service.shared.release_run(id);
+                            }
+                            4 => {
+                                let _ = service.delete_run_record(id, false);
+                            }
+                            5 if (random >> 20).is_multiple_of(8) => {
+                                let _ = service.delete_run_record(id, true);
+                            }
+                            6 => {
+                                let _ = service.restore_run_record(id);
+                            }
+                            7 => {
+                                let _ = service.run_history(&RunHistoryRequest::default());
+                            }
+                            8 => {
+                                let _ = service.active_run_records();
+                                let _ = service.run_records();
+                            }
+                            _ => {
+                                let _ = service.run_output(id, None, 50);
+                            }
                         }
-                        4 => {
-                            let _ = service.delete_run_record(id, false);
-                        }
-                        5 if (random >> 20) % 8 == 0 => {
-                            let _ = service.delete_run_record(id, true);
-                        }
-                        6 => {
-                            let _ = service.restore_run_record(id);
-                        }
-                        7 => {
-                            let _ = service.run_history(&RunHistoryRequest::default());
-                        }
-                        8 => {
-                            let _ = service.active_run_records();
-                            let _ = service.run_records();
-                        }
-                        _ => {
-                            let _ = service.run_output(id, None, 50);
-                        }
+                        steps += 1;
                     }
-                    steps += 1;
-                }
-                done_tx.send(steps).unwrap();
-            });
-        }
-        drop(done_tx);
-        let mut finished = 0;
-        while finished < 6 {
-            match done_rx.recv_timeout(Duration::from_secs(60)) {
-                Ok(_) => finished += 1,
-                Err(e) => {
-                    // The scope would wait for the stuck threads forever.
-                    eprintln!("{finished} of 6 workers finished; the others are stuck ({e:?}): a deadlock");
-                    std::process::abort();
-                }
+                    steps
+                })
+            })
+            .collect();
+        // A worker still running a minute after the deadline is stuck; the
+        // scope would wait for it forever.
+        let limit = deadline + Duration::from_secs(60);
+        while !workers.iter().all(|w| w.is_finished()) {
+            if Instant::now() > limit {
+                let stuck = workers.iter().filter(|w| !w.is_finished()).count();
+                eprintln!("{stuck} of 6 workers are still running a minute after the deadline: a deadlock");
+                std::process::abort();
             }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        for worker in workers {
+            assert!(worker.join().expect("a worker panicked") > 0);
         }
     });
 }
