@@ -20,9 +20,11 @@ tokio.workspace = true
 uuid.workspace = true
 sha2.workspace = true
 
-# Link counts of batch output files (hard-link detection).
+# Link counts of batch output files (hard-link detection); change time of run
+# records (GetFileInformationByHandleEx) for the run history's record stamps.
 [target.'cfg(windows)'.dependencies]
 winapi-util.workspace = true
+windows-sys.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
