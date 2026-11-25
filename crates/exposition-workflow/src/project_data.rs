@@ -117,7 +117,7 @@ pub trait TaskRecords: Send + Sync {
     fn deleted(&self) -> Result<Vec<TaskRecord>, OpError>;
     fn record(&self, id: &str) -> Result<TaskRecord, OpError>;
     /// Project files the task may write or touched.
-    fn paths(&self, id: &str) -> Vec<WorkspacePath>;
+    fn paths(&self, id: &str) -> Result<Vec<WorkspacePath>, OpError>;
     fn delete(&self, id: &str, permanent: bool) -> Result<(), OpError>;
     fn restore(&self, id: &str) -> Result<(), OpError>;
     fn stop(&self, id: &str) -> bool;
@@ -208,8 +208,8 @@ impl TaskRecords for exposition_agents::AgentService {
     fn record(&self, id: &str) -> Result<TaskRecord, OpError> {
         self.task_record(&exposition_agents::TaskId(id.to_owned())).map_err(agent_error)
     }
-    fn paths(&self, id: &str) -> Vec<WorkspacePath> {
-        self.task_paths(&exposition_agents::TaskId(id.to_owned())).unwrap_or_default()
+    fn paths(&self, id: &str) -> Result<Vec<WorkspacePath>, OpError> {
+        self.task_paths(&exposition_agents::TaskId(id.to_owned())).map_err(agent_error)
     }
     fn delete(&self, id: &str, permanent: bool) -> Result<(), OpError> {
         self.delete_task(&exposition_agents::TaskId(id.to_owned()), permanent).map_err(agent_error)
@@ -423,7 +423,10 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
     match cx.graph.path_impacts(paths) {
         Ok(impacts) => plan.impacts.extend(impacts),
         // An unavailable graph cannot report consumers; editing files keeps
-        // working, and the fingerprint records that nothing was known.
+        // working, and the fingerprint records that nothing was known. The
+        // readers of active work and triggers below do the same: a reader
+        // that fails is never taken as "nothing uses these paths", and a plan
+        // made while it failed goes stale once it reads again.
         Err(e) => plan.fingerprint.push(format!("graph:{}", e.code)),
     }
     // Active work using the paths.
@@ -435,31 +438,43 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
             }
         }
     }
-    if let Some(research) = cx.research
-        && let Ok(records) = research.active_records()
-    {
-        for r in &records {
-            // A workflow batch is part of its workflow run (listed and
-            // stopped as that run, never on its own).
-            let owner = research_consumer(cx, r);
-            for input in &r.inputs {
-                if let Some(t) = under_any(input, paths) {
-                    active.entry(t).or_default().push(owner.clone());
-                }
-            }
-        }
-    }
-    if let Some(tasks) = cx.tasks
-        && let Ok(records) = tasks.records()
-    {
-        for task in records.iter().filter(|t| t.active && in_project(cx, &t.workspace_root)) {
-            for p in tasks.paths(task.id.0.as_str()) {
-                for (t, target) in paths.iter().enumerate() {
-                    if overlaps(&p, target) {
-                        active.entry(t).or_default().push(consumer("task", &task.id.0, &task.title));
+    match cx.research.map(|research| research.active_records()) {
+        Some(Ok(records)) => {
+            for r in &records {
+                // A workflow batch is part of its workflow run (listed and
+                // stopped as that run, never on its own).
+                let owner = research_consumer(cx, r);
+                for input in &r.inputs {
+                    if let Some(t) = under_any(input, paths) {
+                        active.entry(t).or_default().push(owner.clone());
                     }
                 }
             }
+        }
+        Some(Err(e)) => plan.fingerprint.push(format!("research:{}", e.code)),
+        None => {}
+    }
+    if let Some(tasks) = cx.tasks {
+        match tasks.records() {
+            Ok(records) => {
+                for task in records.iter().filter(|t| t.active && in_project(cx, &t.workspace_root)) {
+                    let used = match tasks.paths(task.id.0.as_str()) {
+                        Ok(used) => used,
+                        Err(e) => {
+                            plan.fingerprint.push(format!("taskPaths:{}:{}", task.id.0, e.code));
+                            continue;
+                        }
+                    };
+                    for p in used {
+                        for (t, target) in paths.iter().enumerate() {
+                            if overlaps(&p, target) {
+                                active.entry(t).or_default().push(consumer("task", &task.id.0, &task.title));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => plan.fingerprint.push(format!("tasks:{}", e.code)),
         }
     }
     for (t, mut consumers) in active {
@@ -481,7 +496,11 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
     // Enabled triggers watching the paths.
     if let Some(triggers) = cx.triggers {
         let mut watching: BTreeMap<usize, Vec<OpConsumer>> = BTreeMap::new();
-        for trigger in triggers.watching(paths) {
+        let enabled = triggers.try_watching(paths).unwrap_or_else(|e| {
+            plan.fingerprint.push(format!("triggers:{}", e.code));
+            Vec::new()
+        });
+        for trigger in enabled {
             for w in &trigger.watched {
                 if let Some(t) = under_any(&w.path, paths) {
                     watching.entry(t).or_default().push(OpConsumer {

@@ -28,6 +28,8 @@ struct Research {
     stopped: Mutex<Vec<String>>,
     /// Outputs moved aside for recovery, per run.
     held: Mutex<BTreeMap<String, Vec<OutputFile>>>,
+    /// The records cannot be read (a damaged or unreachable store).
+    failing: Mutex<Option<OpError>>,
 }
 
 impl Research {
@@ -64,6 +66,9 @@ impl Research {
 
 impl ResearchRecords for Research {
     fn records(&self) -> Result<Vec<ResearchRecord>, OpError> {
+        if let Some(e) = self.failing.lock().unwrap().clone() {
+            return Err(e);
+        }
         let all: Vec<ResearchRecord> = self.records.lock().unwrap().clone();
         Ok(all.into_iter().filter(|r| r.deleted_at_ms.is_none()).map(|r| self.current(r)).collect())
     }
@@ -148,10 +153,17 @@ struct Tasks {
     records: Mutex<Vec<TaskRecord>>,
     paths: Mutex<BTreeMap<String, Vec<WorkspacePath>>>,
     stoppable: AtomicBool,
+    /// The task records cannot be read.
+    failing: Mutex<Option<OpError>>,
+    /// Tasks whose files cannot be read.
+    unreadable_paths: Mutex<Vec<String>>,
 }
 
 impl TaskRecords for Tasks {
     fn records(&self) -> Result<Vec<TaskRecord>, OpError> {
+        if let Some(e) = self.failing.lock().unwrap().clone() {
+            return Err(e);
+        }
         Ok(self.records.lock().unwrap().iter().filter(|t| t.deleted_at_ms.is_none()).cloned().collect())
     }
     fn deleted(&self) -> Result<Vec<TaskRecord>, OpError> {
@@ -166,8 +178,11 @@ impl TaskRecords for Tasks {
             .cloned()
             .ok_or_else(|| OpError::new("agents.notFound", "unknown task"))
     }
-    fn paths(&self, id: &str) -> Vec<WorkspacePath> {
-        self.paths.lock().unwrap().get(id).cloned().unwrap_or_default()
+    fn paths(&self, id: &str) -> Result<Vec<WorkspacePath>, OpError> {
+        if self.unreadable_paths.lock().unwrap().iter().any(|t| t == id) {
+            return Err(OpError::new("agents.store", "the task's files cannot be read"));
+        }
+        Ok(self.paths.lock().unwrap().get(id).cloned().unwrap_or_default())
     }
     fn delete(&self, id: &str, permanent: bool) -> Result<(), OpError> {
         let mut records = self.records.lock().unwrap();
@@ -458,6 +473,65 @@ fn active_work_on_a_path_is_coordinated_before_deletion() {
     assert_eq!(e.fx.runs.get(&run).unwrap().state, WorkflowRunState::Canceled);
     assert_eq!(e.research.stopped.lock().unwrap().as_slice(), ["run-live"]);
     release.store(true, Ordering::SeqCst);
+}
+
+/// A reader of active work or triggers that fails does not answer "nothing
+/// uses these paths": the plan records what could not be read (as it does
+/// for an unavailable graph), so it is never the plan of a project in which
+/// nothing runs, and a plan made while a reader failed goes stale once it
+/// reads again.
+#[test]
+fn active_work_that_cannot_be_read_is_never_taken_as_none() {
+    let e = env();
+    let request = || e.request(delete(false), vec![p("data/obs.csv")]);
+    let idle = e.plan(request());
+    assert_eq!(idle.impacts, vec![]);
+
+    *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
+    let research = e.plan(request());
+    assert_eq!(research.impacts, vec![]);
+    assert_ne!(research.plan_hash, idle.plan_hash, "research records that could not be read are not \"none\"");
+    *e.research.failing.lock().unwrap() = None;
+    assert_eq!(e.plan(request()).plan_hash, idle.plan_hash, "readable again: the same plan as before");
+
+    *e.tasks.failing.lock().unwrap() = Some(OpError::new("agents.store", "the task records cannot be read"));
+    let tasks = e.plan(request());
+    assert_eq!(tasks.impacts, vec![]);
+    assert_ne!(tasks.plan_hash, idle.plan_hash, "agent tasks that could not be read are not \"none\"");
+    assert_ne!(tasks.plan_hash, research.plan_hash, "which reader failed is part of the plan");
+    *e.tasks.failing.lock().unwrap() = None;
+
+    // An active task of this project whose files cannot be read.
+    e.tasks.records.lock().unwrap().push(task(&e, "task-1", true));
+    assert_eq!(e.plan(request()).plan_hash, idle.plan_hash, "an active task that uses no files");
+    e.tasks.unreadable_paths.lock().unwrap().push("task-1".into());
+    let unknown = e.plan(request());
+    assert_eq!(unknown.impacts, vec![]);
+    assert_ne!(unknown.plan_hash, idle.plan_hash, "a task whose files are unknown may use these paths");
+}
+
+/// The same for triggers: a trigger store that cannot be read (another
+/// program holds it) is not a project without enabled triggers.
+#[cfg(windows)]
+#[test]
+fn triggers_that_cannot_be_read_are_never_taken_as_none() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let e = env();
+    let id = e.workflow();
+    e.fx.enable(&id, watch(&["data"]));
+    let paths = [path("notes.md")];
+    let readable = impacts_for_paths(&e.cx(), &paths, &delete(false));
+    assert_eq!((readable.impacts.len(), readable.fingerprint.len()), (0, 0), "nothing watches the notes");
+    let _held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&e.fx.store).unwrap();
+    let restarted = TriggerService::new(TriggerConfig {
+        store: Some(e.fx.store.clone()),
+        starter: e.fx.starter.clone(),
+        clock: e.fx.clock.clone(),
+    });
+    let cx = DataContext { triggers: Some(&restarted), ..e.cx() };
+    let unread = impacts_for_paths(&cx, &paths, &delete(false));
+    assert_eq!(unread.impacts, vec![]);
+    assert_ne!(unread.fingerprint, readable.fingerprint, "triggers that could not be read are not \"none\"");
 }
 
 // ----------------------------------------------------------- workflows ----
