@@ -1187,3 +1187,234 @@ mod index_order {
         assert_eq!(index.plan(root, &now, Some(&next), NOT_LIVE).unwrap_err().code(), HISTORY_CHANGED);
     }
 }
+
+// ---- review: the file stamp of damaged records ----------------------------
+//
+// Independent review of "a repaired record with the same size and time is
+// listed again" (damaged records remembered with a file stamp). Tests
+// marked `#[ignore = "review finding: ..."]` (on the platform named) fail
+// against the change and document a finding; every other test passes.
+
+/// A service started afresh on the fixture's project (nothing remembered).
+fn fresh_service(f: &Fixture, name: &str) -> ResearchService {
+    let fresh = ResearchService::new(ResearchConfig::new(
+        f.dir.path().join(name),
+        Arc::new(NoLauncher),
+        Arc::new(DocumentService::new()),
+    ));
+    fresh.set_workspace(&f.root, true).unwrap();
+    fresh
+}
+
+fn listed_ids(pages: &[RunHistoryPage]) -> BTreeSet<String> {
+    pages.iter().flat_map(ids).collect()
+}
+
+/// A record damaged to its own size and then repaired from a backup by a
+/// copy (the backup has the record's time, as a backup with times kept
+/// does). On Windows every standard copy (CopyFile: `std::fs::copy`,
+/// Explorer, `copy`, `Copy-Item`, robocopy) writes into the existing file:
+/// volume, file index and creation time stay (checked on this host with
+/// `fsutil file queryFileID`), so nothing the stamp holds changes, and the
+/// long-lived service keeps the repaired record out of the history while a
+/// fresh service lists it. This is the repair the earlier review named ("a
+/// copy back from a backup with times preserved").
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "review finding: on Windows a record repaired by copying a backup over it (CopyFile, as copy, Copy-Item, robocopy and Explorer do) keeps its stamp and stays unlisted until the project is opened again"
+)]
+fn review_a_damaged_record_repaired_by_copying_a_backup_over_it_is_listed_again() {
+    for damage_by_replacing in [false, true] {
+        let f = fixture();
+        for i in 0..6 {
+            store_run(&f.root, &run_id(i), i);
+        }
+        let id = run_id(2);
+        let file = record_file(&f.root, &id);
+        let good = std::fs::read(&file).unwrap();
+        let backup = f.dir.path().join("backup.json");
+        std::fs::write(&backup, &good).unwrap();
+        let damaged = vec![b' '; good.len()];
+        if damage_by_replacing {
+            replace_record(&f.root, &id, &damaged);
+        } else {
+            std::fs::write(&file, &damaged).unwrap();
+        }
+        set_modified(&f.root, &id, 2);
+        assert_eq!(all_pages(&f.service, 2).last().unwrap().unreadable, 1);
+        std::fs::copy(&backup, &file).unwrap();
+        set_modified(&f.root, &id, 2);
+        assert_eq!(std::fs::read(&file).unwrap(), good);
+        let uncached = all_pages(&fresh_service(&f, "fresh"), 500);
+        assert_eq!(uncached.last().unwrap().unreadable, 0, "a fresh service lists the repaired run");
+        let cached = all_pages(&f.service, 2);
+        assert_eq!(
+            (listed_ids(&cached), cached.last().unwrap().unreadable),
+            (listed_ids(&uncached), 0),
+            "the long-lived service lists what a fresh one lists (damaged by replacing: {damage_by_replacing})"
+        );
+    }
+}
+
+/// Deleted and written again with the same bytes, time and size (another
+/// file with the record's name): listed again by the next page.
+#[test]
+fn review_a_damaged_record_deleted_and_written_again_is_listed_again() {
+    let f = fixture();
+    for i in 0..6 {
+        store_run(&f.root, &run_id(i), i);
+    }
+    let id = run_id(3);
+    let file = record_file(&f.root, &id);
+    let good = std::fs::read(&file).unwrap();
+    std::fs::write(&file, vec![b'x'; good.len()]).unwrap();
+    set_modified(&f.root, &id, 3);
+    assert_eq!(all_pages(&f.service, 4).last().unwrap().unreadable, 1);
+    std::fs::remove_file(&file).unwrap();
+    std::fs::write(&file, &good).unwrap();
+    set_modified(&f.root, &id, 3);
+    let pages = all_pages(&f.service, 4);
+    assert_eq!(pages.last().unwrap().unreadable, 0);
+    assert_each_once(&pages.iter().flat_map(ids).collect::<Vec<_>>(), (0..6).map(run_id), "written again");
+}
+
+/// The cost claim, by counters: with many damaged records (time and size
+/// unchanged) no damaged record is read again, each page asks for the stamp
+/// of every damaged record once (a metadata query, no read) and nothing
+/// else is stamped; a changed damaged record is read once more.
+#[test]
+fn review_each_page_stamps_every_unchanged_damaged_record_once_and_reads_none() {
+    let f = fixture();
+    let (records, damaged) = (300u64, 120u64);
+    for i in 0..records {
+        store_run(&f.root, &run_id(i), i);
+    }
+    for i in 0..damaged {
+        let file = record_file(&f.root, &run_id(i * 2));
+        let len = std::fs::metadata(&file).unwrap().len() as usize;
+        std::fs::write(&file, vec![b' '; len]).unwrap();
+        set_modified(&f.root, &run_id(i * 2), i * 2);
+    }
+    let first = all_pages(&f.service, 50);
+    assert_eq!(first.last().unwrap().unreadable, damaged as u32);
+    for _ in 0..2 {
+        let before = f.service.history_counters();
+        let pages = all_pages(&f.service, 50);
+        let after = f.service.history_counters();
+        assert_eq!(pages.len(), 4, "180 readable runs in pages of 50");
+        assert_eq!(after.scans - before.scans, pages.len() as u64);
+        assert_eq!(after.manifests_read - before.manifests_read, records - damaged, "no damaged record read again");
+        assert_eq!(after.stamps_checked - before.stamps_checked, damaged * pages.len() as u64, "per page");
+        assert!(pages.iter().all(|p| p.unreadable == damaged as u32));
+    }
+    // One damaged record is replaced by another damaged file of its size and
+    // time: read once more (and found damaged again), the others are not.
+    replace_record(&f.root, &run_id(0), &std::fs::read(record_file(&f.root, &run_id(0))).unwrap());
+    set_modified(&f.root, &run_id(0), 0);
+    let before = f.service.history_counters();
+    let pages = all_pages(&f.service, 50);
+    let after = f.service.history_counters();
+    assert_eq!(after.manifests_read - before.manifests_read, records - damaged + 1);
+    assert_eq!(pages.last().unwrap().unreadable, damaged as u32);
+}
+
+/// Windows: a damaged record that another program holds without sharing
+/// keeps its stamp (opened for its attributes only): it is neither read
+/// again nor counted twice while held.
+#[cfg(windows)]
+#[test]
+fn review_a_damaged_record_held_without_sharing_is_stamped_and_not_read_again() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = fixture();
+    for i in 0..4 {
+        store_run(&f.root, &run_id(i), i);
+    }
+    let file = record_file(&f.root, &run_id(1));
+    let len = std::fs::metadata(&file).unwrap().len() as usize;
+    std::fs::write(&file, vec![b' '; len]).unwrap();
+    set_modified(&f.root, &run_id(1), 1);
+    assert_eq!(all_pages(&f.service, 500).last().unwrap().unreadable, 1);
+    let _held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&file).unwrap();
+    let before = f.service.history_counters();
+    let pages = all_pages(&f.service, 500);
+    let after = f.service.history_counters();
+    assert_eq!(pages.last().unwrap().unreadable, 1);
+    assert_eq!(after.stamps_checked - before.stamps_checked, 1);
+    assert_eq!(after.manifests_read - before.manifests_read, 3, "the held damaged record is not read again");
+}
+
+/// Differential test of the damaged-record memory under changes the
+/// change's own differential leaves out: deleted and written again, a
+/// record moved away and an earlier version moved back (its old identity
+/// returns), and, off Windows, a copy over the record. After every step the
+/// long-lived service lists what a fresh service lists.
+#[test]
+fn review_the_damaged_record_memory_matches_a_fresh_service_under_identity_changes() {
+    let records = 6u64;
+    for seed in 1..=8u64 {
+        let mut random = Random(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
+        let f = fixture();
+        for i in 0..records {
+            store_run(&f.root, &run_id(i), i % 2);
+        }
+        let good: Vec<Vec<u8>> =
+            (0..records).map(|i| std::fs::read(record_file(&f.root, &run_id(i))).unwrap()).collect();
+        let parked = f.dir.path().join("parked");
+        std::fs::create_dir_all(&parked).unwrap();
+        let mut tick: Vec<u64> = (0..records).map(|i| i % 2).collect();
+        for step in 0..30 {
+            let i = random.below(records) as usize;
+            let id = run_id(i as u64);
+            let file = record_file(&f.root, &id);
+            let damaged = vec![b'#'; good[i].len()];
+            let away = parked.join(format!("{id}.json"));
+            match random.below(if cfg!(windows) { 6 } else { 8 }) {
+                0 => std::fs::write(&file, &damaged).unwrap(),
+                1 => {
+                    std::fs::remove_file(&file).unwrap();
+                    std::fs::write(&file, &good[i]).unwrap();
+                }
+                2 => {
+                    std::fs::remove_file(&file).unwrap();
+                    std::fs::write(&file, &damaged).unwrap();
+                }
+                3 | 4 => {
+                    // Swap the record with the version parked earlier (both
+                    // keep their identity), or park it and put a fresh copy
+                    // of the other content in its place.
+                    if away.exists() {
+                        let swap = parked.join("swap");
+                        std::fs::rename(&file, &swap).unwrap();
+                        std::fs::rename(&away, &file).unwrap();
+                        std::fs::rename(&swap, &away).unwrap();
+                    } else {
+                        let now = std::fs::read(&file).unwrap();
+                        std::fs::rename(&file, &away).unwrap();
+                        std::fs::write(&file, if now == good[i] { &damaged } else { &good[i] }).unwrap();
+                    }
+                }
+                5 => tick[i] = random.below(2),
+                6 => {
+                    let source = parked.join("copy");
+                    std::fs::write(&source, &good[i]).unwrap();
+                    std::fs::copy(&source, &file).unwrap();
+                }
+                _ => {
+                    let source = parked.join("copy");
+                    std::fs::write(&source, &damaged).unwrap();
+                    std::fs::copy(&source, &file).unwrap();
+                }
+            }
+            set_modified(&f.root, &id, tick[i]);
+            let cached = all_pages(&f.service, random.below(3) as u32 + 1);
+            let uncached = all_pages(&fresh_service(&f, &format!("fresh-{step}")), 500);
+            assert_eq!(listed_ids(&cached), listed_ids(&uncached), "seed {seed} step {step}");
+            assert_eq!(
+                cached.last().unwrap().unreadable,
+                uncached.last().unwrap().unreadable,
+                "seed {seed} step {step}"
+            );
+        }
+    }
+}

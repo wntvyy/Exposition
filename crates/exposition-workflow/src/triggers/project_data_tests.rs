@@ -1452,3 +1452,152 @@ fn a_file_deletion_that_does_not_happen_leaves_a_suspended_trigger_suspended() {
     );
     assert_eq!(e.trigger_state(&id), suspended, "the rollback never grants Active");
 }
+
+// ------------------------------------------------- independent review ----
+//
+// Review of "a delete plan never takes a reader that failed for no active
+// work". Tests marked `#[ignore = "review finding: ..."]` fail against the
+// change under review and document a finding; every other test passes.
+
+/// What the base computed as the data-side fingerprint of a path plan whose
+/// readers all answered: the graph's part (nothing, when it answered) and
+/// one entry per impact (kind, target, sorted consumer ids).
+fn base_fingerprint(impacts: &[exposition_core::ops::OpImpact]) -> Vec<String> {
+    impacts
+        .iter()
+        .map(|i| {
+            let mut ids: Vec<&str> = i.consumers.iter().map(|c| c.id.as_str()).collect();
+            ids.sort();
+            format!("{:?}|{}|{}", i.kind, serde_json::to_string(&i.target).unwrap(), ids.join(","))
+        })
+        .collect()
+}
+
+/// No churn: with every reader answering, the fingerprint (and so the plan
+/// hash) is exactly what the base computed, for an idle project and for one
+/// with every kind of consumer (workflow run, agent task, research run,
+/// enabled trigger, workflow input).
+#[test]
+fn review_a_healthy_plan_has_the_base_fingerprint() {
+    let e = env();
+    let paths = [path("data/obs.csv"), path("notes.md")];
+    let idle = impacts_for_paths(&e.cx(), &paths, &delete(false));
+    assert_eq!(idle.fingerprint, base_fingerprint(&idle.impacts));
+
+    let id = e.workflow();
+    e.fx.enable(&id, watch(&["data"]));
+    let (_run, release) = e.hold_run(&id);
+    e.tasks.records.lock().unwrap().push(task(&e, "task-1", true));
+    e.tasks.paths.lock().unwrap().insert("task-1".into(), vec![path("notes.md")]);
+    e.research.records.lock().unwrap().push(research_run("run-live", true, &["data/obs.csv"], &[]));
+    let busy = impacts_for_paths(&e.cx(), &paths, &delete(false));
+    let mut kinds: Vec<ImpactKind> = busy.impacts.iter().map(|i| i.kind).collect();
+    kinds.sort();
+    kinds.dedup();
+    for kind in [ImpactKind::WorkflowInput, ImpactKind::ActiveWork, ImpactKind::EnabledTrigger] {
+        assert!(kinds.contains(&kind), "{kind:?} in {kinds:?}");
+    }
+    assert_eq!(busy.fingerprint, base_fingerprint(&busy.impacts), "no entry for a reader that answered");
+    release.store(true, Ordering::SeqCst);
+}
+
+/// A reader that answers at plan time and fails at apply time (the
+/// orchestrator recomputes the plan and compares hashes): the recomputed
+/// plan differs, whether the plan had found a consumer or not, for each
+/// reader in turn.
+#[test]
+fn review_a_reader_that_fails_only_at_apply_makes_the_plan_stale() {
+    let e = env();
+    let request = || e.request(delete(false), vec![p("notes.md")]);
+    e.tasks.records.lock().unwrap().push(task(&e, "task-1", true));
+    for consumer in [false, true] {
+        if consumer {
+            e.tasks.paths.lock().unwrap().insert("task-1".into(), vec![path("notes.md")]);
+            e.research.records.lock().unwrap().push(research_run("run-live", true, &["notes.md"], &[]));
+        }
+        let planned = e.plan(request());
+        assert_eq!(planned.impacts.is_empty(), !consumer);
+        *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "x"));
+        assert_ne!(e.plan(request()).plan_hash, planned.plan_hash, "research fails at apply ({consumer})");
+        *e.research.failing.lock().unwrap() = None;
+        *e.tasks.failing.lock().unwrap() = Some(OpError::new("agents.store", "x"));
+        assert_ne!(e.plan(request()).plan_hash, planned.plan_hash, "tasks fail at apply ({consumer})");
+        *e.tasks.failing.lock().unwrap() = None;
+        e.tasks.unreadable_paths.lock().unwrap().push("task-1".into());
+        assert_ne!(e.plan(request()).plan_hash, planned.plan_hash, "task files fail at apply ({consumer})");
+        e.tasks.unreadable_paths.lock().unwrap().clear();
+        assert_eq!(e.plan(request()).plan_hash, planned.plan_hash, "all readable again ({consumer})");
+    }
+}
+
+/// While a reader keeps failing, the plan has no impact, no choice and
+/// needs no decision, and a plan recomputed at apply time has the same hash:
+/// the orchestrator applies it as the plan of a project where nothing is
+/// active, and `prepare_paths` stops or refuses nothing. (Documented in
+/// docs/functionality.md 8.1; recorded here as the behaviour reviewed.)
+#[test]
+fn review_a_plan_made_while_a_reader_keeps_failing_applies_without_a_decision() {
+    let e = env();
+    e.research.records.lock().unwrap().push(research_run("run-live", true, &["notes.md"], &[]));
+    let request = || e.request(delete(false), vec![p("notes.md")]);
+    let known = e.plan(request());
+    assert!(known.needs_decision);
+    *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
+    let planned = e.plan(request());
+    let at_apply = e.plan(request());
+    assert_eq!(at_apply.plan_hash, planned.plan_hash, "apply-time recomputation accepts the plan");
+    assert_eq!((planned.impacts.len(), planned.choices.len(), planned.needs_decision), (0, 0, false));
+    assert_eq!(e.prepare(&planned, &[]), vec![], "nothing is stopped or refused");
+    assert!(e.research.stopped.lock().unwrap().is_empty());
+}
+
+/// An agent may not delete a path that active work uses (`ops.agentScope`).
+/// While the research records cannot be read, the same deletion by an agent
+/// is neither refused nor put to the user: the failed reader is recorded
+/// only in the plan hash, which nobody sees.
+#[test]
+#[ignore = "review finding: a reader that keeps failing lets an agent delete a path active work uses (no refusal, no decision)"]
+fn review_an_agent_is_not_refused_while_a_reader_fails() {
+    let e = env();
+    e.research.records.lock().unwrap().push(research_run("run-live", true, &["notes.md"], &[]));
+    let request = || OpRequest {
+        kind: delete(false),
+        targets: vec![p("notes.md")],
+        actor: OpActor::Agent { task: "task-x".into() },
+    };
+    let known = e.plan(request());
+    assert_eq!(e.prepare(&known, &[])[0].code, "ops.agentScope", "known active work: refused");
+    *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
+    let unknown = e.plan(request());
+    let refused = e.prepare(&unknown, &[]);
+    assert!(
+        unknown.needs_decision || !unknown.refusals.is_empty() || !refused.is_empty(),
+        "an agent's deletion goes ahead although what uses the path is unknown"
+    );
+}
+
+/// The first reader of active work, the workflow runs' own inputs
+/// (`WorkflowRunService::active_run_inputs`), is still infallible: an active
+/// workflow run whose stored record cannot be read is dropped without a
+/// trace, so the plan is that of a project in which it does not run.
+#[test]
+#[ignore = "review finding: active_run_inputs drops an active workflow run whose record cannot be read (no impact, no fingerprint entry)"]
+fn review_an_active_workflow_run_whose_record_cannot_be_read_is_never_taken_as_none() {
+    let e = env();
+    let id = e.workflow();
+    let request = || e.request(delete(false), vec![p("data/obs.csv")]);
+    let idle = e.plan(request());
+    let (run, release) = e.hold_run(&id);
+    let busy = e.plan(request());
+    assert!(busy.impacts.iter().any(|i| i.kind == ImpactKind::ActiveWork), "the held run is active work");
+    // Its record in the run store becomes unreadable (a damaged row).
+    let db = rusqlite::Connection::open(e.fx._data.path().join("workflow-runs.sqlite3")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(db.execute("UPDATE runs SET body = 'damaged' WHERE id = ?1", [run.as_str()]).unwrap(), 1);
+    assert!(e.fx.runs.is_active(&run), "still running");
+    assert!(e.fx.runs.get(&run).is_err(), "its record cannot be read");
+    let unread = e.plan(request());
+    let seen = unread.impacts.iter().any(|i| i.kind == ImpactKind::ActiveWork);
+    release.store(true, Ordering::SeqCst);
+    assert!(seen || unread.plan_hash != idle.plan_hash, "an active run that cannot be read is taken as none");
+}
