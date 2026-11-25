@@ -127,7 +127,12 @@ host at the `large` scale unless a row says otherwise; release-profile figures f
 A scoped pass and a full reindex must produce the same graph, record for
 record (entities, bindings, relations, coverage, awaited targets, the stored
 index) and the same overlays: `review_perf_differential` checks this over
-random operation sequences and is part of the normal test suite.
+random operation sequences and is part of the normal test suite. The
+session's index of labels, LaTeX main files and awaited targets is a cache of
+the stored index that passes and overlays read; the same test compares it
+with a fresh read of the store after every step. An overlay computed while a
+pass started elsewhere holds that index reads its own copy from the store
+(one read of every index record) rather than resolve against less.
 
 A change that concerns other files costs those files and no more, each resolved
 from its stored index without being read: a label that gains or loses a
