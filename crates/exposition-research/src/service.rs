@@ -950,9 +950,10 @@ impl ResearchService {
     /// stored records after `request.after`. Within a page runs are ordered
     /// by start time, newest first. A page reads only the manifests it
     /// examines (at most `limit` readable ones, plus records found damaged
-    /// on the way, which are remembered by modification time and size and
-    /// not read again until one of them changes). A record that cannot be
-    /// opened is counted in `unreadable` and read again by the next listing.
+    /// on the way, which are remembered by modification time, size and file
+    /// stamp and not read again until one of them changes:
+    /// [`crate::history`]). A record that cannot be opened is counted in
+    /// `unreadable` and read again by the next listing.
     ///
     /// Paging until `next` is absent returns every stored run that existed
     /// the whole time exactly once, whatever was created or deleted between
@@ -978,6 +979,7 @@ impl ResearchService {
             || crate::history::scan_sized(root),
             |id| crate::history::stat(root, id),
             |id| store::being_replaced(root, id),
+            |id| crate::history::stamp(root, id),
             request.after.as_deref(),
             &|id| live.contains_key(id),
         )?;
@@ -1008,7 +1010,7 @@ impl ResearchService {
                 // Counted with this listing and read again by the next:
                 // nothing is known about what the record holds.
                 RecordRead::Unopened => history.note_unopened(root, &plan, file),
-                RecordRead::Damaged { bytes } => history.note_damaged(root, &plan, file, bytes),
+                RecordRead::Damaged { bytes, stamp } => history.note_damaged(root, &plan, file, bytes, stamp),
             }
         }
         history.note_settled(root, &plan, &settled);

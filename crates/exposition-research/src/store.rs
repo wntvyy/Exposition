@@ -105,9 +105,11 @@ pub(crate) enum RecordRead {
     /// The file exists and could not be opened or read (held by another
     /// program, a failing disk): nothing is known about its content.
     Unopened,
-    /// The file was read (`bytes` bytes) and is not a manifest of this run.
+    /// The file was read (`bytes` bytes) and is not a manifest of this run;
+    /// `stamp` is its [`crate::history::Stamp`] taken before it was read.
     Damaged {
         bytes: u64,
+        stamp: Option<crate::history::Stamp>,
     },
 }
 
@@ -127,9 +129,9 @@ pub(crate) fn read_record(root: &Path, run_id: &str, patience: &mut std::time::D
     let mut tries = 0;
     let mut waits = crate::history::REPLACED_WAITS_MS.iter();
     let mut last = false;
-    let bytes = loop {
-        match std::fs::read(&path) {
-            Ok(bytes) => break bytes,
+    let (bytes, stamp) = loop {
+        match read_stamped(&path) {
+            Ok(read) => break read,
             Err(_) if tries < 2 => {
                 tries += 1;
                 std::thread::sleep(Duration::from_millis(2));
@@ -156,8 +158,19 @@ pub(crate) fn read_record(root: &Path, run_id: &str, patience: &mut std::time::D
     };
     match serde_json::from_slice::<RunManifest>(&bytes) {
         Ok(manifest) if manifest.record.id.0 == run_id => RecordRead::Manifest(Box::new(manifest)),
-        _ => RecordRead::Damaged { bytes: bytes.len() as u64 },
+        _ => RecordRead::Damaged { bytes: bytes.len() as u64, stamp },
     }
+}
+
+/// The content of the file at `path` and its stamp, taken before the content
+/// is read (a change made after the stamp is a change of the stamp).
+fn read_stamped(path: &Path) -> std::io::Result<(Vec<u8>, Option<crate::history::Stamp>)> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let stamp = crate::history::file_stamp(&file);
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok((bytes, stamp))
 }
 
 /// Ids of every run record of `root`, most recently modified first. Reads

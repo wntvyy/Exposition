@@ -805,11 +805,9 @@ fn a_damaged_record_repaired_with_a_new_time_is_listed_again_at_once() {
     assert_each_once(&pages.iter().flat_map(ids).collect::<Vec<_>>(), (0..6).map(run_id), "repaired");
 }
 
-/// The record of damaged files is keyed by modification time alone. On a
-/// file system with coarse times (or a repair that keeps the file's time: a
-/// copy back from a backup with times preserved) the repaired record has the
-/// time the damaged one had, and stays out of the history, counted as
-/// unreadable, until the project is reopened.
+/// On a file system with coarse times (or a repair that keeps the file's
+/// time: a copy back from a backup with times preserved) the repaired record
+/// has the time the damaged one had; here its size differs.
 #[test]
 fn a_damaged_record_repaired_at_the_same_time_is_listed_again() {
     let f = fixture();
@@ -826,6 +824,123 @@ fn a_damaged_record_repaired_at_the_same_time_is_listed_again() {
     let pages = all_pages(&f.service, 2);
     assert_eq!(pages.last().unwrap().unreadable, 0, "nothing is unreadable any more");
     assert_each_once(&pages.iter().flat_map(ids).collect::<Vec<_>>(), (0..6).map(run_id), "repaired");
+}
+
+/// Puts `bytes` in place of a record the way a repair tool (or this app's
+/// store) does: a new file takes the old one's name.
+fn replace_record(root: &Path, id: &str, bytes: &[u8]) {
+    let file = record_file(root, id);
+    let fresh = file.with_extension("repair");
+    std::fs::write(&fresh, bytes).unwrap();
+    std::fs::rename(&fresh, &file).unwrap();
+}
+
+/// A record damaged to its own size (a crash can leave a file of the right
+/// length and the wrong content) and then repaired with its time kept: size
+/// and time are those the damaged file had, and the repaired run is still
+/// listed by the next page, not only after the project is opened again.
+#[test]
+fn a_damaged_record_repaired_to_the_same_size_and_time_is_listed_again() {
+    let f = fixture();
+    for i in 0..6 {
+        store_run(&f.root, &run_id(i), i);
+    }
+    let good = std::fs::read(record_file(&f.root, &run_id(2))).unwrap();
+    replace_record(&f.root, &run_id(2), &vec![b' '; good.len()]);
+    set_modified(&f.root, &run_id(2), 2);
+    assert_eq!(all_pages(&f.service, 2).last().unwrap().unreadable, 1);
+    let before = f.service.history_counters();
+    assert_eq!(all_pages(&f.service, 2).last().unwrap().unreadable, 1);
+    let reads = f.service.history_counters().manifests_read - before.manifests_read;
+    assert_eq!(reads, 5, "the damaged record is not read again while it is unchanged");
+
+    // Repaired from a copy: the same bytes as before, at the same time.
+    replace_record(&f.root, &run_id(2), &good);
+    set_modified(&f.root, &run_id(2), 2);
+    let pages = all_pages(&f.service, 2);
+    assert_eq!(pages.last().unwrap().unreadable, 0, "nothing is unreadable any more");
+    assert_each_once(&pages.iter().flat_map(ids).collect::<Vec<_>>(), (0..6).map(run_id), "repaired");
+
+    // Damaged again, and written by this app's store (the same manifest, so
+    // the same size) at the same time.
+    replace_record(&f.root, &run_id(2), &vec![b' '; good.len()]);
+    set_modified(&f.root, &run_id(2), 2);
+    assert_eq!(all_pages(&f.service, 2).last().unwrap().unreadable, 1);
+    store_run(&f.root, &run_id(2), 2);
+    assert_eq!(std::fs::read(record_file(&f.root, &run_id(2))).unwrap(), good);
+    let pages = all_pages(&f.service, 2);
+    assert_eq!(pages.last().unwrap().unreadable, 0);
+    assert_each_once(&pages.iter().flat_map(ids).collect::<Vec<_>>(), (0..6).map(run_id), "written again");
+}
+
+/// The same for a record damaged and repaired in place (the file is
+/// rewritten, not replaced). Unix: the change time moves with every write.
+/// (On Windows only a replaced file is seen before the project is opened
+/// again: an in-place rewrite that keeps size and time changes nothing the
+/// folder listing or the file's identity shows.)
+#[cfg(unix)]
+#[test]
+fn a_damaged_record_repaired_in_place_to_the_same_size_and_time_is_listed_again() {
+    let f = fixture();
+    for i in 0..6 {
+        store_run(&f.root, &run_id(i), i);
+    }
+    let file = record_file(&f.root, &run_id(2));
+    let good = std::fs::read(&file).unwrap();
+    std::fs::write(&file, vec![b' '; good.len()]).unwrap();
+    set_modified(&f.root, &run_id(2), 2);
+    assert_eq!(all_pages(&f.service, 2).last().unwrap().unreadable, 1);
+    std::fs::write(&file, &good).unwrap();
+    set_modified(&f.root, &run_id(2), 2);
+    let pages = all_pages(&f.service, 2);
+    assert_eq!(pages.last().unwrap().unreadable, 0);
+    assert_each_once(&pages.iter().flat_map(ids).collect::<Vec<_>>(), (0..6).map(run_id), "repaired in place");
+}
+
+/// Differential test of the record of damaged files: after every change
+/// (records damaged and repaired to the same size, by a new file, by this
+/// app's store, or in place where the platform shows it; times moved back and
+/// forth among a few values, so they collide), the history listed by the
+/// long-lived service is the one a service without that record lists.
+#[test]
+fn the_record_of_damaged_files_never_changes_what_the_history_lists() {
+    let records = 8u64;
+    for seed in 1..=12u64 {
+        let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let f = fixture();
+        for i in 0..records {
+            store_run(&f.root, &run_id(i), i % 3);
+        }
+        let good: Vec<Vec<u8>> =
+            (0..records).map(|i| std::fs::read(record_file(&f.root, &run_id(i))).unwrap()).collect();
+        let mut tick: Vec<u64> = (0..records).map(|i| i % 3).collect();
+        for step in 0..30 {
+            let i = random.below(records) as usize;
+            let id = run_id(i as u64);
+            let damaged = vec![b' '; good[i].len()];
+            match random.below(if cfg!(unix) { 6 } else { 5 }) {
+                0 => replace_record(&f.root, &id, &damaged),
+                1 => replace_record(&f.root, &id, &good[i]),
+                2 => write_manifest(&f.root, &manifest(&id, 1_000 + i as u64 % 3)).unwrap(),
+                3 => std::fs::write(record_file(&f.root, &id), &damaged).unwrap(),
+                4 => tick[i] = random.below(3),
+                _ => std::fs::write(record_file(&f.root, &id), &good[i]).unwrap(),
+            }
+            set_modified(&f.root, &id, tick[i]);
+            let cached = all_pages(&f.service, random.below(4) as u32 + 1);
+            let fresh = ResearchService::new(ResearchConfig::new(
+                f.dir.path().join(format!("fresh-{step}")),
+                Arc::new(NoLauncher),
+                Arc::new(DocumentService::new()),
+            ));
+            fresh.set_workspace(&f.root, true).unwrap();
+            let uncached = all_pages(&fresh, 500);
+            let listed = |pages: &[RunHistoryPage]| -> BTreeSet<String> { pages.iter().flat_map(ids).collect() };
+            let unreadable = |pages: &[RunHistoryPage]| pages.last().unwrap().unreadable;
+            assert_eq!(listed(&cached), listed(&uncached), "seed {seed} step {step}");
+            assert_eq!(unreadable(&cached), unreadable(&uncached), "seed {seed} step {step}");
+        }
+    }
 }
 
 /// A read that fails for a passing reason (another program holds the file

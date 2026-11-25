@@ -24,9 +24,17 @@
 //! needs to see is logged whichever listing arrives first.
 //!
 //! A record that is not a manifest of its run is remembered by modification
-//! time and size and not read again until one of them changes. A record that
-//! could not be opened (another program holds it) is counted, never
-//! remembered as damaged, and read again by the next page that reaches it.
+//! time, size and [`Stamp`] (the file's identity and, on Unix, its change
+//! time) and not read again until one of them changes; each listing checks
+//! the stamps of the damaged records whose time and size are unchanged (a
+//! metadata query each, no read). A repair that keeps time and size is so
+//! seen by the next listing when it replaces the file (as this app's store
+//! and most tools write) and, on Unix, also when it rewrites the file in
+//! place. On Windows an in-place rewrite that keeps time and size changes
+//! nothing a stamp holds: it is seen when the project is opened again. A
+//! record that could not be opened (another program holds it) is counted,
+//! never remembered as damaged, and read again by the next page that reaches
+//! it.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -111,6 +119,65 @@ pub(crate) fn stat(root: &Path, id: &str) -> Option<Listed> {
     listed(id.to_owned(), &std::fs::symlink_metadata(path).ok()?)
 }
 
+/// What tells one version of a record file from another without reading
+/// it, beyond its modification time and size. Unix: the device, the inode
+/// and the change time (moved by every write and by setting the modification
+/// time; no tool sets it back). Windows: the volume, the file index and the
+/// creation time (a file that replaces the record has another index; the
+/// change time is not available through the standard library there).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Stamp([u64; 4]);
+
+#[cfg(unix)]
+fn metadata_stamp(metadata: &std::fs::Metadata) -> Stamp {
+    use std::os::unix::fs::MetadataExt;
+    Stamp([metadata.dev(), metadata.ino(), metadata.ctime() as u64, metadata.ctime_nsec() as u64])
+}
+
+/// The stamp of an open file. Taken before its content is read, so that a
+/// change made after the stamp is a change of the stamp.
+pub(crate) fn file_stamp(file: &std::fs::File) -> Option<Stamp> {
+    #[cfg(unix)]
+    {
+        file.metadata().ok().map(|metadata| metadata_stamp(&metadata))
+    }
+    #[cfg(windows)]
+    {
+        let info = winapi_util::file::information(file).ok()?;
+        Some(Stamp([info.volume_serial_number(), info.file_index(), info.creation_time().unwrap_or(0), 0]))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        None
+    }
+}
+
+/// The stamp of `id`'s record file now: `None` when there is none or it
+/// cannot be queried. On Windows the file is opened for its attributes only,
+/// which another program holding it does not prevent.
+pub(crate) fn stamp(root: &Path, id: &str) -> Option<Stamp> {
+    if !valid_run_id(id) {
+        return None;
+    }
+    let path = root.join(".exposition").join("runs").join(format!("{id}.json"));
+    #[cfg(unix)]
+    {
+        std::fs::metadata(path).ok().map(|metadata| metadata_stamp(&metadata))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_READ_ATTRIBUTES: u32 = 0x80;
+        file_stamp(&std::fs::OpenOptions::new().access_mode(FILE_READ_ATTRIBUTES).open(path).ok()?)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// A parsed continuation: the listing it belongs to, the changes it has
 /// seen, and the last position examined.
 struct Cursor {
@@ -154,6 +221,17 @@ struct Seen {
     present: bool,
 }
 
+/// A record that was read and is not a manifest of its run, as it was then.
+struct Damaged {
+    /// Its modification time in the listing it was read from.
+    modified: u128,
+    /// Its size as read.
+    bytes: u64,
+    /// Its stamp before it was read. Without one nothing proves it
+    /// unchanged: it is dropped by the next listing and read again.
+    stamp: Option<Stamp>,
+}
+
 struct State {
     root: PathBuf,
     /// Identifies this index: a continuation of another one (another
@@ -165,9 +243,9 @@ struct State {
     floor: u64,
     known: HashMap<String, Seen>,
     moved: VecDeque<Moved>,
-    /// Records that are not a manifest of their run, by the modification
-    /// time and size they had when they were read.
-    damaged: HashMap<String, (u128, u64)>,
+    /// Records that are not a manifest of their run, by the version they
+    /// had when they were read.
+    damaged: HashMap<String, Damaged>,
     /// Records that could not be opened when a page last tried.
     unopened: HashSet<String>,
 }
@@ -189,8 +267,15 @@ impl State {
     /// Apply `listing` as the folder's content, logging every record whose
     /// modification time differs from the one last seen for it (also when
     /// the record was gone in between: its time is not forgotten). `sizes`
-    /// are the files' sizes where the listing has them.
-    fn observe(&mut self, listing: &[Position], sizes: Option<&HashMap<&str, u64>>) {
+    /// are the files' sizes where the listing has them; `stamps` gives a
+    /// record's [`Stamp`] now, asked for each damaged record whose time and
+    /// size are unchanged (without it the stamps are not compared).
+    fn observe(
+        &mut self,
+        listing: &[Position],
+        sizes: Option<&HashMap<&str, u64>>,
+        stamps: Option<&dyn Fn(&str) -> Option<Stamp>>,
+    ) {
         let listed: HashSet<&str> = listing.iter().map(|file| file.id.as_str()).collect();
         let mut gone = 0;
         for (id, seen) in &mut self.known {
@@ -226,9 +311,10 @@ impl State {
         }
         let known = &self.known;
         let present = |id: &str| known.get(id).filter(|seen| seen.present);
-        self.damaged.retain(|id, (modified, bytes)| {
-            present(id).is_some_and(|seen| seen.modified == *modified)
-                && sizes.is_none_or(|sizes| sizes.get(id.as_str()) == Some(bytes))
+        self.damaged.retain(|id, damaged| {
+            present(id).is_some_and(|seen| seen.modified == damaged.modified)
+                && sizes.is_none_or(|sizes| sizes.get(id.as_str()) == Some(&damaged.bytes))
+                && stamps.is_none_or(|stamp| damaged.stamp.is_some() && stamp(id.as_str()) == damaged.stamp)
         });
         self.unopened.retain(|id| present(id).is_some());
     }
@@ -260,10 +346,11 @@ impl State {
         &mut self,
         listing: Vec<Position>,
         sizes: Option<&HashMap<&str, u64>>,
+        stamps: Option<&dyn Fn(&str) -> Option<Stamp>>,
         cursor: Option<&Cursor>,
         live: &dyn Fn(&str) -> bool,
     ) -> Result<Plan, ResearchError> {
-        self.observe(&listing, sizes);
+        self.observe(&listing, sizes, stamps);
         if let Some(cursor) = cursor
             && !self.holds(cursor, live)
         {
@@ -275,7 +362,7 @@ impl State {
         let candidates = listing
             .iter()
             .filter(|file| cursor.is_none_or(|c| **file < c.at))
-            .filter(|file| !live(&file.id) && self.damaged.get(&file.id).is_none_or(|(at, _)| *at != file.modified))
+            .filter(|file| !live(&file.id) && self.damaged.get(&file.id).is_none_or(|d| d.modified != file.modified))
             .cloned()
             .collect();
         Ok(Plan { epoch: self.epoch, serial: self.serial, candidates, listing })
@@ -306,6 +393,9 @@ pub struct HistoryCounters {
     pub scans: u64,
     /// Manifests read from disk.
     pub manifests_read: u64,
+    /// Stamps of damaged records asked for (a metadata query each, no read):
+    /// one per damaged record whose time and size are unchanged, per listing.
+    pub stamps_checked: u64,
 }
 
 #[derive(Default)]
@@ -313,6 +403,7 @@ pub(crate) struct HistoryIndex {
     state: Mutex<Option<State>>,
     scans: AtomicU64,
     reads: AtomicU64,
+    stamps: AtomicU64,
 }
 
 impl HistoryIndex {
@@ -324,6 +415,7 @@ impl HistoryIndex {
         HistoryCounters {
             scans: self.scans.load(Ordering::Relaxed),
             manifests_read: self.reads.load(Ordering::Relaxed),
+            stamps_checked: self.stamps.load(Ordering::Relaxed),
         }
     }
 
@@ -354,7 +446,7 @@ impl HistoryIndex {
     ) -> Result<Plan, ResearchError> {
         let cursor = after.map(Cursor::parse).transpose()?;
         let mut guard = self.lock();
-        Self::state(&mut guard, root).plan(listing.to_vec(), None, cursor.as_ref(), live)
+        Self::state(&mut guard, root).plan(listing.to_vec(), None, None, cursor.as_ref(), live)
     }
 
     /// [`Self::plan`] for the folder as `scan` lists it now. The folder is
@@ -365,13 +457,16 @@ impl HistoryIndex {
     /// name either while it is being replaced (`replacing`) is asked for
     /// again after each of a few short waits ([`REPLACED_WAITS_MS`], per
     /// listing, not per record); one that is not being replaced is asked for
-    /// once more (the replacement may just have finished).
+    /// once more (the replacement may just have finished). `stamp` gives a
+    /// record's [`Stamp`] now (asked for damaged records only).
+    #[allow(clippy::too_many_arguments)]
     pub fn plan_listing(
         &self,
         root: &Path,
         scan: impl FnOnce() -> Vec<Listed>,
         find: impl Fn(&str) -> Option<Listed>,
         replacing: impl Fn(&str) -> bool,
+        stamp: impl Fn(&str) -> Option<Stamp>,
         after: Option<&str>,
         live: &dyn Fn(&str) -> bool,
     ) -> Result<Plan, ResearchError> {
@@ -416,7 +511,11 @@ impl HistoryIndex {
         }
         let sizes: HashMap<&str, u64> = files.iter().map(|file| (file.at.id.as_str(), file.bytes)).collect();
         let listing = files.iter().map(|file| file.at.clone()).collect();
-        Self::state(&mut guard, root).plan(listing, Some(&sizes), cursor.as_ref(), live)
+        let counted = |id: &str| {
+            self.stamps.fetch_add(1, Ordering::Relaxed);
+            stamp(id)
+        };
+        Self::state(&mut guard, root).plan(listing, Some(&sizes), Some(&counted), cursor.as_ref(), live)
     }
 
     fn noted(&self, root: &Path, plan: &Plan, note: impl FnOnce(&mut State)) {
@@ -429,11 +528,11 @@ impl HistoryIndex {
     }
 
     /// A record of `bytes` bytes that was read and is not a manifest of its
-    /// run.
-    pub fn note_damaged(&self, root: &Path, plan: &Plan, file: &Position, bytes: u64) {
+    /// run; `stamp` is its [`Stamp`] taken before it was read.
+    pub fn note_damaged(&self, root: &Path, plan: &Plan, file: &Position, bytes: u64, stamp: Option<Stamp>) {
         self.noted(root, plan, |state| {
             state.unopened.remove(&file.id);
-            state.damaged.insert(file.id.clone(), (file.modified, bytes));
+            state.damaged.insert(file.id.clone(), Damaged { modified: file.modified, bytes, stamp });
         });
     }
 
@@ -554,6 +653,8 @@ mod tests {
         assert_eq!(index.plan(root, &files, Some(&next), NOT_LIVE).unwrap_err().code(), HISTORY_CHANGED);
     }
 
+    const STAMP: Option<Stamp> = Some(Stamp([1, 2, 3, 4]));
+
     #[test]
     fn damaged_records_are_skipped_until_their_time_or_size_changes() {
         let index = HistoryIndex::default();
@@ -562,27 +663,85 @@ mod tests {
         let sized = |files: &[Position], bytes: u64| -> Vec<Listed> {
             files.iter().map(|at| Listed { at: at.clone(), bytes: if at.id == "run-b" { bytes } else { 7 } }).collect()
         };
-        let plan = index.plan_listing(root, || sized(&files, 1), |_| None, |_| false, None, NOT_LIVE).unwrap();
-        index.note_damaged(root, &plan, &at(20, "run-b"), 1);
+        let same = |_: &str| STAMP;
+        let plan = index.plan_listing(root, || sized(&files, 1), |_| None, |_| false, same, None, NOT_LIVE).unwrap();
+        index.note_damaged(root, &plan, &at(20, "run-b"), 1, STAMP);
         assert_eq!(index.unreadable(root), 1);
-        let plan = index.plan_listing(root, || sized(&files, 1), |_| None, |_| false, None, NOT_LIVE).unwrap();
+        let plan = index.plan_listing(root, || sized(&files, 1), |_| None, |_| false, same, None, NOT_LIVE).unwrap();
         assert_eq!(plan.candidates, vec![at(30, "run-c"), at(10, "run-a")]);
         // Another size at the same time: read again.
-        let plan = index.plan_listing(root, || sized(&files, 900), |_| None, |_| false, None, NOT_LIVE).unwrap();
+        let plan = index.plan_listing(root, || sized(&files, 900), |_| None, |_| false, same, None, NOT_LIVE).unwrap();
         assert_eq!(plan.candidates.len(), 3);
         assert_eq!(index.unreadable(root), 0);
         // Another time.
-        index.note_damaged(root, &plan, &at(20, "run-b"), 900);
+        index.note_damaged(root, &plan, &at(20, "run-b"), 900, STAMP);
         let repaired = listing(&[(40, "run-b"), (30, "run-c"), (10, "run-a")]);
         assert_eq!(
             index
-                .plan_listing(root, || sized(&repaired, 900), |_| None, |_| false, None, NOT_LIVE)
+                .plan_listing(root, || sized(&repaired, 900), |_| None, |_| false, same, None, NOT_LIVE)
                 .unwrap()
                 .candidates
                 .len(),
             3
         );
         assert_eq!(index.unreadable(root), 0);
+    }
+
+    #[test]
+    fn damaged_records_are_read_again_when_their_stamp_changes_or_is_unknown() {
+        let index = HistoryIndex::default();
+        let root = Path::new("/project");
+        let files = listing(&[(30, "run-c"), (20, "run-b"), (10, "run-a")]);
+        let sized = || -> Vec<Listed> { files.iter().map(|at| Listed { at: at.clone(), bytes: 7 }).collect() };
+        let current = std::cell::Cell::new(STAMP);
+        let asked = std::cell::Cell::new(0);
+        let stamp = |id: &str| {
+            assert_eq!(id, "run-b", "only damaged records are stamped");
+            asked.set(asked.get() + 1);
+            current.get()
+        };
+        let plan = index.plan_listing(root, sized, |_| None, |_| false, stamp, None, NOT_LIVE).unwrap();
+        assert_eq!((plan.candidates.len(), asked.get()), (3, 0), "nothing is damaged yet");
+        index.note_damaged(root, &plan, &at(20, "run-b"), 7, STAMP);
+        let before = index.counters().stamps_checked;
+        let plan = index.plan_listing(root, sized, |_| None, |_| false, stamp, None, NOT_LIVE).unwrap();
+        assert_eq!((plan.candidates.len(), asked.get()), (2, 1), "unchanged: skipped after one stamp");
+        assert_eq!(index.counters().stamps_checked - before, 1);
+        // The same time and size, another file (replaced, or rewritten where the stamp shows it).
+        current.set(Some(Stamp([1, 9, 3, 4])));
+        let plan = index.plan_listing(root, sized, |_| None, |_| false, stamp, None, NOT_LIVE).unwrap();
+        assert_eq!(plan.candidates.len(), 3, "read again");
+        assert_eq!(index.unreadable(root), 0);
+        // Read as damaged without a stamp: nothing proves it unchanged.
+        index.note_damaged(root, &plan, &at(20, "run-b"), 7, None);
+        assert_eq!(index.unreadable(root), 1);
+        let plan = index.plan_listing(root, sized, |_| None, |_| false, stamp, None, NOT_LIVE).unwrap();
+        assert_eq!(plan.candidates.len(), 3, "read again");
+        // No stamp now: read again too.
+        index.note_damaged(root, &plan, &at(20, "run-b"), 7, STAMP);
+        current.set(None);
+        let plan = index.plan_listing(root, sized, |_| None, |_| false, stamp, None, NOT_LIVE).unwrap();
+        assert_eq!(plan.candidates.len(), 3, "read again");
+    }
+
+    #[test]
+    fn a_stamp_follows_a_replacement_and_holds_for_an_unchanged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let runs = root.join(".exposition").join("runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        let file = runs.join("run-ab.json");
+        std::fs::write(&file, "one").unwrap();
+        let first = stamp(root, "run-ab");
+        assert!(first.is_some());
+        assert_eq!(stamp(root, "run-ab"), first, "an unchanged file keeps its stamp");
+        assert_eq!(file_stamp(&std::fs::File::open(&file).unwrap()), first, "by name and by handle");
+        let fresh = runs.join("run-ab.fresh");
+        std::fs::write(&fresh, "two").unwrap();
+        std::fs::rename(&fresh, &file).unwrap();
+        assert_ne!(stamp(root, "run-ab"), first, "a file put in its place has another stamp");
+        assert_eq!(stamp(root, "run-cd"), None, "no such record");
+        assert_eq!(stamp(root, "../x"), None, "not a run id");
     }
 
     #[test]
@@ -593,7 +752,7 @@ mod tests {
         let sized = |files: &[Position]| -> Vec<Listed> {
             files.iter().map(|at| Listed { at: at.clone(), bytes: 7 }).collect()
         };
-        index.plan_listing(root, || sized(&files), |_| None, |_| false, None, NOT_LIVE).unwrap();
+        index.plan_listing(root, || sized(&files), |_| None, |_| false, |_| None, None, NOT_LIVE).unwrap();
         // The listing leaves run-b out although the file is there.
         let short = listing(&[(30, "run-c"), (10, "run-a")]);
         let asked = std::cell::RefCell::new(Vec::new());
@@ -601,14 +760,16 @@ mod tests {
             asked.borrow_mut().push(id.to_owned());
             Some(Listed { at: at(20, id), bytes: 7 })
         };
-        let plan = index.plan_listing(root, || sized(&short), find, |_| false, None, NOT_LIVE).unwrap();
+        let plan = index.plan_listing(root, || sized(&short), find, |_| false, |_| None, None, NOT_LIVE).unwrap();
         assert_eq!(plan.candidates, files);
         assert_eq!(plan.listing.len(), 3);
         assert_eq!(*asked.borrow(), vec!["run-b".to_owned()], "only the record that went missing");
         // Really gone: not in the page, and not asked for again.
-        let plan = index.plan_listing(root, || sized(&short), |_| None, |_| false, None, NOT_LIVE).unwrap();
+        let plan = index.plan_listing(root, || sized(&short), |_| None, |_| false, |_| None, None, NOT_LIVE).unwrap();
         assert_eq!(plan.candidates, short);
-        index.plan_listing(root, || sized(&short), |_| panic!("asked again"), |_| false, None, NOT_LIVE).unwrap();
+        index
+            .plan_listing(root, || sized(&short), |_| panic!("asked again"), |_| false, |_| None, None, NOT_LIVE)
+            .unwrap();
     }
 
     #[test]
@@ -621,7 +782,7 @@ mod tests {
         };
         let known = || {
             let index = HistoryIndex::default();
-            index.plan_listing(root, || sized(&files), |_| None, |_| false, None, NOT_LIVE).unwrap();
+            index.plan_listing(root, || sized(&files), |_| None, |_| false, |_| None, None, NOT_LIVE).unwrap();
             index
         };
         let counter = std::cell::Cell::new(0);
@@ -635,17 +796,21 @@ mod tests {
         };
         let replaced = listing(&[(30, "run-c"), (25, "run-b"), (10, "run-a")]);
         // Being replaced: neither listed nor found for two asks.
-        let plan = known().plan_listing(root, || sized(&short), found_from(3), |_| true, None, NOT_LIVE).unwrap();
+        let plan =
+            known().plan_listing(root, || sized(&short), found_from(3), |_| true, |_| None, None, NOT_LIVE).unwrap();
         assert_eq!((asks.get(), &plan.candidates), (3, &replaced));
         // A replacement that never ends: asked for after every wait, then gone.
-        let plan = known().plan_listing(root, || sized(&short), found_from(99), |_| true, None, NOT_LIVE).unwrap();
+        let plan =
+            known().plan_listing(root, || sized(&short), found_from(99), |_| true, |_| None, None, NOT_LIVE).unwrap();
         assert_eq!((asks.get(), &plan.candidates), (1 + REPLACED_WAITS_MS.len(), &short));
         // Not being replaced: the replacement may have ended since the first
         // ask, so it is asked for once more, without a wait.
         let started = std::time::Instant::now();
-        let plan = known().plan_listing(root, || sized(&short), found_from(2), |_| false, None, NOT_LIVE).unwrap();
+        let plan =
+            known().plan_listing(root, || sized(&short), found_from(2), |_| false, |_| None, None, NOT_LIVE).unwrap();
         assert_eq!((asks.get(), &plan.candidates), (2, &replaced));
-        let plan = known().plan_listing(root, || sized(&short), found_from(99), |_| false, None, NOT_LIVE).unwrap();
+        let plan =
+            known().plan_listing(root, || sized(&short), found_from(99), |_| false, |_| None, None, NOT_LIVE).unwrap();
         assert_eq!((asks.get(), &plan.candidates), (2, &short));
         assert!(
             started.elapsed().as_millis() < u128::from(REPLACED_WAITS_MS[0]) * 4,

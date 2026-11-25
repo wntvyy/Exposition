@@ -165,7 +165,7 @@ else rebuilds.
 |---|---|---|
 | Job output event | a notification without text; no job-list read | 50 MB of output: 10.5 MB of event text → about 90 bytes per event |
 | Run history listing | decodes only records that changed since the last listing | 100 records of 870 KB: 440 → 0.06 ms, 0 records decoded |
-| Research run history page | one folder listing and the manifests of the runs returned (at most 500), whatever the folder holds; a damaged record is read once per modification time and size | 2,000 runs of 209 KB: first page 500 manifests, 75 ms; every run in 4 pages, 2,000 manifests, 300 ms (debug build) |
+| Research run history page | one folder listing and the manifests of the runs returned (at most 500), whatever the folder holds; a damaged record is read once per modification time, size and file identity, and each page checks the identity of the damaged records whose time and size are unchanged (one metadata query each, no read) | 2,000 runs of 209 KB: first page 500 manifests, 75 ms; every run in 4 pages, 2,000 manifests, 300 ms (debug build) |
 | Finished research runs in memory | output kept for the 16 most recent of the open project; older runs read from their verified records | 300 runs × 1 MB: 300 → 16 MB; 0 after a project switch |
 | Restricted preflight | one engine query answers presence and identity; nothing cached | 2 → 1 process per preflight, 7 → 6 per job |
 | Interpreter discovery | one scan at a time; concurrent requests share it | two concurrent requests: 10 → 5 probes |
@@ -233,7 +233,7 @@ Adding one means adding a row here and a differential test.
 | Research output in the webview | research store | run id (listed runs and runs read by id) | re-read on selection; released when a run finishes or another run is selected | selected + executing + newest 8 finished |
 | Runs read by id | research store | run id | project operations on the run, any restore, project change | 64 |
 | Run record positions | `ResearchService` history index | run id → last modification time, kept while the record is gone | each listing; cleared on project change | records seen; 16,384 gone records and 4,096 logged changes, past which earlier continuations are refused |
-| Damaged run records | `ResearchService` history index | run id, modification time, size | dropped when either changes or the record is gone | damaged records present |
+| Damaged run records | `ResearchService` history index | run id, modification time, size, file stamp (Unix: device, inode, change time; Windows: volume, file index, creation time) | dropped when any of them changes (the stamp is checked by every listing) or the record is gone; an in-place rewrite on Windows that keeps time and size is not seen until the project is opened again | damaged records present |
 | LaTeX page images | `TexService` | content reference + scale | none needed (content-keyed); cleared when the folder is released | 96 MiB, least recently used |
 | Page image URLs | `PageSession` | render reference of the shown build | revoked on detach | displayed pages + 12 |
 | Build markers | Monaco model (weak) | path, revision, latest build | recomputed when any of the three changes | one per model |
