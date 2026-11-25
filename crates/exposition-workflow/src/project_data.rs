@@ -619,6 +619,13 @@ pub fn prepare_paths(cx: &DataContext<'_>, plan: &OpPlan, choices: &BTreeMap<Str
                 "ops.agentScope",
                 "Work is running on this item; an agent cannot stop it. Ask the user.".into(),
             ),
+            // What uses it could not be checked: an agent cannot show that
+            // deleting it is safe (the person decides for themselves).
+            ImpactKind::ConsumersUnknown if agent => refuse(
+                &impact.target,
+                "ops.agentScope",
+                "What uses this item could not be checked; an agent cannot delete it. Ask the user.".into(),
+            ),
             ImpactKind::ActiveWork if !stop => refuse(
                 &impact.target,
                 "ops.activeWork",

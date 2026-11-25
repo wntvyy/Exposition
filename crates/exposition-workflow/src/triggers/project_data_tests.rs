@@ -608,6 +608,30 @@ fn an_active_run_whose_record_cannot_be_read_is_not_left_out() {
     release.store(true, Ordering::SeqCst);
 }
 
+/// What uses a path could not be checked: an agent's deletion of it is
+/// refused at once (it cannot be shown to be safe), whatever the approval
+/// said; the person's own deletion is theirs to decide and is not refused.
+#[test]
+fn an_agent_may_not_delete_what_could_not_be_checked() {
+    let e = env();
+    *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
+    let agent = e.plan(OpRequest {
+        kind: delete(false),
+        targets: vec![p("notes.md")],
+        actor: OpActor::Agent { task: "task-x".into() },
+    });
+    assert!(agent.needs_decision);
+    let refused = e.prepare(&agent, &[]);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0].target, p("notes.md"));
+    assert_eq!(
+        (refused[0].code.as_str(), refused[0].message.as_str()),
+        ("ops.agentScope", "What uses this item could not be checked; an agent cannot delete it. Ask the user.")
+    );
+    let person = e.plan(e.request(delete(false), vec![p("notes.md")]));
+    assert_eq!(e.prepare(&person, &[]), vec![], "the person's decision is not refused");
+}
+
 /// The same for triggers: a trigger store that cannot be read (another
 /// program holds it) is not a project without enabled triggers.
 #[cfg(windows)]
@@ -1530,13 +1554,14 @@ fn review_a_reader_that_fails_only_at_apply_makes_the_plan_stale() {
     }
 }
 
-/// While a reader keeps failing, the plan has no impact, no choice and
-/// needs no decision, and a plan recomputed at apply time has the same hash:
-/// the orchestrator applies it as the plan of a project where nothing is
-/// active, and `prepare_paths` stops or refuses nothing. (Documented in
-/// docs/functionality.md 8.1; recorded here as the behaviour reviewed.)
+/// While a reader keeps failing, a plan recomputed at apply time has the
+/// same hash, so the plan itself must say it: it carries what could not be
+/// checked and needs the person's decision (no choice to make), and for the
+/// person `prepare_paths` stops or refuses nothing. (The review recorded the
+/// earlier behaviour, a plan with no impact that needed no decision; the
+/// user decided that such a plan is decided by the person.)
 #[test]
-fn review_a_plan_made_while_a_reader_keeps_failing_applies_without_a_decision() {
+fn review_a_plan_made_while_a_reader_keeps_failing_needs_a_decision() {
     let e = env();
     e.research.records.lock().unwrap().push(research_run("run-live", true, &["notes.md"], &[]));
     let request = || e.request(delete(false), vec![p("notes.md")]);
@@ -1546,7 +1571,9 @@ fn review_a_plan_made_while_a_reader_keeps_failing_applies_without_a_decision() 
     let planned = e.plan(request());
     let at_apply = e.plan(request());
     assert_eq!(at_apply.plan_hash, planned.plan_hash, "apply-time recomputation accepts the plan");
-    assert_eq!((planned.impacts.len(), planned.choices.len(), planned.needs_decision), (0, 0, false));
+    assert_eq!((planned.choices.len(), planned.needs_decision), (0, true), "the person decides; nothing to choose");
+    assert!(!planned.impacts.is_empty());
+    assert_eq!(unchecked(&planned).len(), planned.impacts.len(), "only what could not be checked");
     assert_eq!(e.prepare(&planned, &[]), vec![], "nothing is stopped or refused");
     assert!(e.research.stopped.lock().unwrap().is_empty());
 }
@@ -1556,7 +1583,6 @@ fn review_a_plan_made_while_a_reader_keeps_failing_applies_without_a_decision() 
 /// is neither refused nor put to the user: the failed reader is recorded
 /// only in the plan hash, which nobody sees.
 #[test]
-#[ignore = "review finding: a reader that keeps failing lets an agent delete a path active work uses (no refusal, no decision)"]
 fn review_an_agent_is_not_refused_while_a_reader_fails() {
     let e = env();
     e.research.records.lock().unwrap().push(research_run("run-live", true, &["notes.md"], &[]));
@@ -1581,7 +1607,6 @@ fn review_an_agent_is_not_refused_while_a_reader_fails() {
 /// workflow run whose stored record cannot be read is dropped without a
 /// trace, so the plan is that of a project in which it does not run.
 #[test]
-#[ignore = "review finding: active_run_inputs drops an active workflow run whose record cannot be read (no impact, no fingerprint entry)"]
 fn review_an_active_workflow_run_whose_record_cannot_be_read_is_never_taken_as_none() {
     let e = env();
     let id = e.workflow();
