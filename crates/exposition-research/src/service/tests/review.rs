@@ -798,7 +798,6 @@ async fn review_late_artifacts_and_late_output_at_once_lose_nothing() {
 /// by the history, from memory, until the app restarts (a recoverably
 /// deleted one is left out); a fresh service does not list it.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "review finding (also in the base version): a permanently deleted run of this app session is still listed by the history from memory"]
 async fn review_a_permanently_deleted_run_leaves_the_history() {
     let f = Fixture::new();
     let service = &f._service;
@@ -858,7 +857,6 @@ fn race_late_output_with_deletion(kind: u8, runs: usize) -> (Vec<String>, usize)
 
 /// New in this change: a late display with a figure.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "review finding: a late artifact written to a released run's record can recreate a record deleted at the same moment (check-then-write not ordered with the deletion)"]
 async fn review_a_late_artifact_racing_a_deletion_never_resurrects_the_record() {
     let (resurrected, both) = race_late_output_with_deletion(0, 40);
     assert!(
@@ -870,7 +868,6 @@ async fn review_a_late_artifact_racing_a_deletion_never_resurrects_the_record() 
 
 /// The same race in the base version's path (a late stream line).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "review finding (also in the base version): late output appended to a released run's record can recreate a record deleted at the same moment"]
 async fn review_late_output_racing_a_deletion_never_resurrects_the_record() {
     let (resurrected, both) = race_late_output_with_deletion(1, 40);
     assert!(
@@ -884,7 +881,6 @@ async fn review_late_output_racing_a_deletion_never_resurrects_the_record() {
 /// from `active_run_records` (the reader the project operations use for
 /// active research work) without an error.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "review finding: active_run_records drops an active batch whose record cannot be read instead of failing"]
 async fn review_an_active_batch_whose_record_cannot_be_read_is_not_dropped() {
     let f = Fixture::new();
     let service = &f._service;

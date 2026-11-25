@@ -165,7 +165,10 @@ struct Shared {
     /// Finished runs that still hold their output and code in memory although
     /// their record is on disk, oldest first ([`Shared::run_stored`]).
     stored_runs: Mutex<VecDeque<String>>,
-    /// Serializes appends to the records of released runs.
+    /// Serializes the writes to the stored records of finished runs (late
+    /// output, artifacts and errors; a release's last write) with the
+    /// deletion and restore of records, so that no write brings back a
+    /// record deleted at the same moment.
     late_writes: Mutex<()>,
     /// Workflow batch runs executing now (their manifests read "running"
     /// legitimately and are not settled as orphans).
@@ -246,11 +249,16 @@ impl Shared {
                 run.late = false;
                 (run.root.clone(), run.manifest.clone(), run.entries.iter().cloned().collect::<Vec<_>>())
             };
-            // Written without the run table's lock, like the final record.
-            let written = !crate::records::record_deleted(&root, run_id)
-                && write_manifest(&root, &manifest).is_ok()
-                && write_transcript(&root, run_id, &entries).is_ok()
-                && store::transcript_holds(&root, run_id, &entries);
+            // Written without the run table's lock, like the final record,
+            // and ordered with deletions ([`Self::late_writes`]).
+            let written = {
+                let _one = lock(&self.late_writes);
+                crate::records::manifest_exists(&root, run_id)
+                    && !crate::records::record_deleted(&root, run_id)
+                    && write_manifest(&root, &manifest).is_ok()
+                    && write_transcript(&root, run_id, &entries).is_ok()
+                    && store::transcript_holds(&root, run_id, &entries)
+            };
             if !written {
                 if let Some(run) = lock(&self.runs).get_mut(run_id) {
                     run.late = true;
@@ -390,6 +398,25 @@ impl ResearchService {
 
     pub fn subscribe(&self) -> broadcast::Receiver<ResearchEvent> {
         self.shared.events.subscribe()
+    }
+
+    /// The lock that orders writes to finished runs' records with the
+    /// deletion and restore of records ([`Shared::late_writes`]).
+    pub(crate) fn late_writes(&self) -> MutexGuard<'_, ()> {
+        lock(&self.shared.late_writes)
+    }
+
+    /// Forget a finished run whose record was deleted for good: the history
+    /// no longer lists it from memory, and output that still arrives for it
+    /// is dropped. A run that has not finished is kept (it is refused
+    /// deletion anyway).
+    pub(crate) fn forget_finished_run(&self, run_id: &str) {
+        let mut runs = lock(&self.shared.runs);
+        if runs.get(run_id).is_some_and(|run| run.finished) {
+            runs.remove(run_id);
+            drop(runs);
+            lock(&self.shared.stored_runs).retain(|id| id != run_id);
+        }
     }
 
     /// Run states held in memory now (benchmarks and retention tests).
