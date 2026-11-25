@@ -48,6 +48,19 @@ describe("decision wording", () => {
     expect(decisionGroups(plan).map((g) => g.kind)).toEqual(["manuscriptDependency", "recoveryLoss"]);
   });
 
+  it("consumers that could not be checked need the decision and have their own group", () => {
+    const unchecked: OpPlan = {
+      ...plan,
+      impacts: [
+        ...plan.impacts,
+        { kind: "consumersUnknown", target: path("figures/plot.png"), consumers: [], message: "… could not be checked: the project graph could not be read." },
+      ],
+    };
+    const groups = decisionGroups(unchecked);
+    expect(groups.map((g) => g.kind)).toEqual(["manuscriptDependency", "consumersUnknown", "recoveryLoss"]);
+    expect(groups[1]!.heading).toBe("Could not be checked");
+  });
+
   it("choices start at their non-destructive default; presets only for offered values", () => {
     expect(initialChoices(plan.choices)).toEqual({ unsavedBuffers: "preserve" });
     expect(initialChoices(plan.choices, { unsavedBuffers: "discard", other: "x" })).toEqual({ unsavedBuffers: "discard" });

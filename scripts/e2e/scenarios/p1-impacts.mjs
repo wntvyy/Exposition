@@ -15,7 +15,11 @@
 //     reported with its reason — no false success, nothing permanent.
 //  F. Interruption: the app is killed right after a delete and relaunched;
 //     disk and graph agree after reconciliation.
-// Screens: impact decision (light/dark, details open), partial failure.
+//  G. What uses a file could not be checked (the project graph is made
+//     unavailable): deleting an unused file asks, naming what could not be
+//     checked; Cancel changes nothing.
+// Screens: impact decision (light/dark, details open), partial failure,
+// consumers that could not be checked.
 import { spawn } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -231,6 +235,30 @@ export default async function p1Impacts({ launchApp, artifactsDir, assert, fixtu
     await decision(page).getByRole("button", { name: "Cancel" }).click();
     assert.ok(existsSync(join(root, "scratch", "unused.txt")) && existsSync(join(root, "experiment.py")), "Cancel kept the whole batch");
     await expectNoDialog(page, assert, 400, "no second confirmation");
+
+    // --- G. what uses a file could not be checked (the project graph is unavailable) -------
+    // A source of consumers that cannot be read is not "nothing uses it": the
+    // deletion asks, naming what could not be checked; Cancel changes nothing.
+    await invoke(page, "workspace_close");
+    await writeFile(join(root, ".exposition", "graph.sqlite3"), Buffer.from("SQLite format 3\0" + "x".repeat(4000)));
+    await invoke(page, "workspace_open", { path: root });
+    await page.locator('[data-testid="file-tree"] [data-path="paper.tex"]').waitFor({ timeout: 15_000 });
+    await waitFor(async () => (await invoke(page, "graph_status")).state.kind === "unavailable", { timeout: 20_000, message: "graph unavailable" });
+    await selectFiles(page, ["scratch/unused.txt"]);
+    await page.keyboard.press("Delete");
+    await decision(page).waitFor({ timeout: 15_000 });
+    const unchecked = decision(page).locator('[data-testid="op-impact"][data-kind="consumersUnknown"]');
+    assert.equal(await unchecked.count(), 1, "one notice: the project graph could not be read");
+    assert.match(
+      await unchecked.textContent(),
+      /Manuscripts, workflows and retained evidence that use “scratch\/unused\.txt” could not be checked: the project graph could not be read\./,
+    );
+    assert.equal(await decision(page).locator("[data-choice]").count(), 0, "nothing to choose, only Cancel or Delete");
+    await shot(page, "p1-impact-unchecked-light");
+    await decision(page).getByRole("button", { name: "Cancel" }).click();
+    await page.waitForTimeout(400);
+    assert.ok(existsSync(join(root, "scratch", "unused.txt")), "Cancel changed nothing");
+    evidence.notes.push("graph unavailable: deleting an unused file asked under 'Could not be checked'; Cancel kept it");
 
     assert.deepEqual(consoleErrors(app), [], "no console errors");
   } finally {

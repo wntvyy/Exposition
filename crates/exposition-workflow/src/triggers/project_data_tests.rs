@@ -489,14 +489,14 @@ fn active_work_that_cannot_be_read_is_never_taken_as_none() {
 
     *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
     let research = e.plan(request());
-    assert_eq!(research.impacts, vec![]);
+    assert_eq!(unchecked(&research).len(), research.impacts.len(), "only what could not be checked");
     assert_ne!(research.plan_hash, idle.plan_hash, "research records that could not be read are not \"none\"");
     *e.research.failing.lock().unwrap() = None;
     assert_eq!(e.plan(request()).plan_hash, idle.plan_hash, "readable again: the same plan as before");
 
     *e.tasks.failing.lock().unwrap() = Some(OpError::new("agents.store", "the task records cannot be read"));
     let tasks = e.plan(request());
-    assert_eq!(tasks.impacts, vec![]);
+    assert_eq!(unchecked(&tasks).len(), tasks.impacts.len(), "only what could not be checked");
     assert_ne!(tasks.plan_hash, idle.plan_hash, "agent tasks that could not be read are not \"none\"");
     assert_ne!(tasks.plan_hash, research.plan_hash, "which reader failed is part of the plan");
     *e.tasks.failing.lock().unwrap() = None;
@@ -506,8 +506,106 @@ fn active_work_that_cannot_be_read_is_never_taken_as_none() {
     assert_eq!(e.plan(request()).plan_hash, idle.plan_hash, "an active task that uses no files");
     e.tasks.unreadable_paths.lock().unwrap().push("task-1".into());
     let unknown = e.plan(request());
-    assert_eq!(unknown.impacts, vec![]);
+    assert_eq!(unchecked(&unknown).len(), unknown.impacts.len(), "only what could not be checked");
     assert_ne!(unknown.plan_hash, idle.plan_hash, "a task whose files are unknown may use these paths");
+}
+
+/// The messages of the plan's "could not be checked" impacts, by target.
+fn unchecked(plan: &OpPlan) -> Vec<(String, String)> {
+    plan.impacts
+        .iter()
+        .filter(|i| serde_json::to_value(i.kind).unwrap() == "consumersUnknown")
+        .map(|i| {
+            let target = match &i.target {
+                OpTarget::Path { path } => path.to_string(),
+                other => format!("{other:?}"),
+            };
+            (target, i.message.clone())
+        })
+        .collect()
+}
+
+/// A plan whose consumers could not all be read says so to the user: one
+/// "could not be checked" impact per deleted path and per source that
+/// failed, which needs the decision like every other impact. A plan whose
+/// readers all work is the plan it always was.
+#[test]
+fn a_plan_says_which_consumers_could_not_be_checked() {
+    let e = env();
+    let request = || e.request(delete(false), vec![p("data/obs.csv"), p("notes.md")]);
+    let healthy = e.plan(request());
+    assert_eq!((healthy.impacts.len(), healthy.needs_decision, healthy.plan_hash.as_str()), (0, false, ""));
+
+    *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
+    let research = e.plan(request());
+    assert!(research.needs_decision, "the user decides a plan whose consumers could not be checked");
+    assert!(research.choices.is_empty(), "there is nothing to choose, only to confirm or cancel");
+    assert_eq!(
+        unchecked(&research),
+        vec![
+            (
+                "data/obs.csv".to_owned(),
+                "Running research runs that use “data/obs.csv” could not be checked: the research run records could not be read. They may be affected if you delete it.".to_owned()
+            ),
+            (
+                "notes.md".to_owned(),
+                "Running research runs that use “notes.md” could not be checked: the research run records could not be read. They may be affected if you delete it.".to_owned()
+            ),
+        ]
+    );
+    *e.research.failing.lock().unwrap() = None;
+    let again = e.plan(request());
+    assert_eq!(
+        (again.impacts, again.plan_hash),
+        (healthy.impacts.clone(), healthy.plan_hash.clone()),
+        "readable again"
+    );
+
+    *e.tasks.failing.lock().unwrap() = Some(OpError::new("agents.store", "the task records cannot be read"));
+    let tasks = unchecked(&e.plan(request()));
+    assert_eq!(tasks.len(), 2);
+    assert!(tasks[0].1.starts_with("Running agent tasks that use “data/obs.csv” could not be checked: the agent task records could not be read."), "{tasks:?}");
+    *e.tasks.failing.lock().unwrap() = None;
+
+    e.tasks.records.lock().unwrap().push(task(&e, "task-1", true));
+    e.tasks.unreadable_paths.lock().unwrap().push("task-1".into());
+    let task_files = unchecked(&e.plan(request()));
+    assert!(task_files[0].1.contains("the files of “Task task-1” could not be read"), "{task_files:?}");
+    e.tasks.unreadable_paths.lock().unwrap().clear();
+
+    // The project graph, and two sources at once: one impact each.
+    e.fx.graph.detach();
+    *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
+    let both = e.plan(request());
+    let messages: Vec<String> =
+        unchecked(&both).into_iter().filter(|(t, _)| t == "data/obs.csv").map(|(_, m)| m).collect();
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages.iter().any(|m| m.starts_with("Manuscripts, workflows and retained evidence that use “data/obs.csv” could not be checked: the project graph could not be read.")), "{messages:?}");
+    assert!(both.needs_decision);
+}
+
+/// An active workflow run whose record cannot be read is not a run that reads
+/// nothing: the plan says that running workflows could not be checked.
+#[test]
+fn an_active_run_whose_record_cannot_be_read_is_not_left_out() {
+    let e = env();
+    let id = e.workflow();
+    let (run, release) = e.hold_run(&id);
+    let request = || e.request(delete(false), vec![p("data/obs.csv")]);
+    let readable = e.plan(request());
+    assert!(readable.impacts.iter().any(|i| i.kind == ImpactKind::ActiveWork), "the run uses the file");
+    let db = rusqlite::Connection::open(e.fx._data.path().join("workflow-runs.sqlite3")).unwrap();
+    db.execute("UPDATE runs SET body = 'not a run record' WHERE id = ?1", [run.as_str()]).unwrap();
+    let unread = e.plan(request());
+    assert!(unread.needs_decision);
+    assert_eq!(
+        unchecked(&unread),
+        vec![(
+            "data/obs.csv".to_owned(),
+            "Running workflows that use “data/obs.csv” could not be checked: the record of a running workflow could not be read. They may be affected if you delete it.".to_owned()
+        )]
+    );
+    release.store(true, Ordering::SeqCst);
 }
 
 /// The same for triggers: a trigger store that cannot be read (another
@@ -530,7 +628,12 @@ fn triggers_that_cannot_be_read_are_never_taken_as_none() {
     });
     let cx = DataContext { triggers: Some(&restarted), ..e.cx() };
     let unread = impacts_for_paths(&cx, &paths, &delete(false));
-    assert_eq!(unread.impacts, vec![]);
+    assert_eq!(unread.impacts.len(), 1);
+    assert_eq!(serde_json::to_value(unread.impacts[0].kind).unwrap(), "consumersUnknown");
+    assert_eq!(
+        unread.impacts[0].message,
+        "Enabled triggers that use “notes.md” could not be checked: the workflow triggers could not be read. They may be affected if you delete it."
+    );
     assert_ne!(unread.fingerprint, readable.fingerprint, "triggers that could not be read are not \"none\"");
 }
 

@@ -256,6 +256,33 @@ describe("the combined decision", () => {
     expect(ipc.apply).toHaveBeenCalledWith({ plan: "plan-1", planHash: "hash-1", choices: { activeWork: "keep" } });
   });
 
+  it("consumers that could not be checked are decided like any consequence: shown under their own heading, nothing applied on Cancel", async () => {
+    const one = del(["data/raw.csv"]);
+    const message =
+      "Manuscripts, workflows and retained evidence that use “data/raw.csv” could not be checked: the project graph could not be read. They may be affected if you delete it.";
+    ipc.plan.mockResolvedValue(
+      plan(one, { needsDecision: true, impacts: [{ kind: "consumersUnknown", target: one.targets[0]!, consumers: [], message }] }),
+    );
+    ipc.apply.mockResolvedValue(result([outcome("data/raw.csv")]));
+    const cancelled = runOperation(one);
+    let dialog = await screen.findByRole("alertdialog");
+    const group = dialog.querySelector('[data-impact="consumersUnknown"]') as HTMLElement;
+    expect(within(group).getByRole("heading", { name: "Could not be checked" })).toBeTruthy();
+    expect(within(group).getByText(message)).toBeTruthy();
+    expect(group.querySelector('[data-testid="op-impact"]')?.getAttribute("data-kind")).toBe("consumersUnknown");
+    expect(dialog.querySelectorAll("[data-choice]")).toHaveLength(0);
+    await waitFor(() => expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Cancel" })));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(await cancelled).toBeNull();
+    expect(ipc.apply).not.toHaveBeenCalled();
+    // Proceeding is the person's decision; nothing to choose.
+    const proceeded = runOperation(one);
+    dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await proceeded;
+    expect(ipc.apply).toHaveBeenCalledWith({ plan: "plan-1", planHash: "hash-1", choices: {} });
+  });
+
   it("an explicitly scoped action presets its choice and is always reviewed", async () => {
     const runDelete: OpRequest = { kind: { kind: "delete", permanent: false }, targets: [{ kind: "workflowRun", run: "wrun-1" }], actor: { kind: "user" } };
     ipc.plan.mockResolvedValue(

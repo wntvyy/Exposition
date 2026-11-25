@@ -68,9 +68,18 @@ impl WorkflowRunService {
         self.inner.active.lock().unwrap_or_else(|p| p.into_inner()).contains_key(id)
     }
 
-    /// Active runs of the open project with the project files their plans read.
+    /// Active runs of the open project with the project files their plans
+    /// read. An active run whose record cannot be read is left out:
+    /// [`Self::read_active_run_inputs`] reports it.
     pub fn active_run_inputs(&self) -> Vec<ActiveRunInputs> {
-        let Ok(root) = self.root() else { return Vec::new() };
+        self.read_active_run_inputs().0
+    }
+
+    /// [`Self::active_run_inputs`], and the errors of the active runs whose
+    /// record could not be read (what they read is unknown), for callers that
+    /// must not take such a run as reading nothing.
+    pub fn read_active_run_inputs(&self) -> (Vec<ActiveRunInputs>, Vec<WorkflowRunError>) {
+        let Ok(root) = self.root() else { return (Vec::new(), Vec::new()) };
         let key = project_key(&root);
         let ids: Vec<WorkflowRunId> = self
             .inner
@@ -81,14 +90,18 @@ impl WorkflowRunService {
             .filter(|(_, a)| project_key(&a.root) == key)
             .map(|(id, _)| id.clone())
             .collect();
-        ids.into_iter()
-            .filter_map(|id| self.load(&id).ok())
-            .map(|(_, run)| ActiveRunInputs {
-                run: run.id.clone(),
-                title: run.title.clone(),
-                inputs: run.plan.inputs.iter().map(|i| i.path.clone()).collect(),
-            })
-            .collect()
+        let (mut runs, mut unread) = (Vec::new(), Vec::new());
+        for id in ids {
+            match self.load(&id) {
+                Ok((_, run)) => runs.push(ActiveRunInputs {
+                    run: run.id.clone(),
+                    title: run.title.clone(),
+                    inputs: run.plan.inputs.iter().map(|i| i.path.clone()).collect(),
+                }),
+                Err(e) => unread.push(e),
+            }
+        }
+        (runs, unread)
     }
 
     /// Run records of the open project (not deleted), newest first.

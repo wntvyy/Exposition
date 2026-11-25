@@ -132,6 +132,7 @@ export const IMPACT_HEADINGS: Record<ImpactKind, string> = {
   workflowInput: "Required workflow inputs",
   pinnedRevision: "Pinned workflow revisions",
   retainedEvidence: "Retained evidence",
+  consumersUnknown: "Could not be checked",
   recoveryLoss: "Cannot be restored",
   savedVersionCopied: "Saved version copied",
 };

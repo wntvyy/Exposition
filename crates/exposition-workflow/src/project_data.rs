@@ -412,31 +412,62 @@ fn run_error(e: crate::model::WorkflowRunError) -> OpError {
 
 // ------------------------------------------------------- path impacts ----
 
+/// A source of a deleted path's consumers that could not be read.
+struct Unchecked {
+    /// The consumers it would have reported (plural, sentence start).
+    what: &'static str,
+    /// Why they are unknown.
+    cause: String,
+}
+
 /// Concrete consequences of deleting these project paths for data
 /// consumers (manuscripts, workflows, retained evidence, triggers, active
 /// work). Copies have none here.
+///
+/// A source of consumers that cannot be read (the project graph, the
+/// records of running workflows, research run records, agent tasks or a
+/// task's files, triggers) is never taken as "nothing uses these paths":
+/// each such source adds a `consumersUnknown` impact per path (decided by
+/// the user like any other) and its error code to the fingerprint, so a plan
+/// made while it failed goes stale once it reads again.
 pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &OpKind) -> DataPlan {
     let mut plan = DataPlan::default();
     if !matches!(kind, OpKind::Delete { .. }) || paths.is_empty() {
         return plan;
     }
+    let mut unchecked: Vec<Unchecked> = Vec::new();
     match cx.graph.path_impacts(paths) {
         Ok(impacts) => plan.impacts.extend(impacts),
-        // An unavailable graph cannot report consumers; editing files keeps
-        // working, and the fingerprint records that nothing was known. The
-        // readers of active work and triggers below do the same: a reader
-        // that fails is never taken as "nothing uses these paths", and a plan
-        // made while it failed goes stale once it reads again.
-        Err(e) => plan.fingerprint.push(format!("graph:{}", e.code)),
+        // Editing files keeps working while the graph is unavailable.
+        Err(e) => {
+            plan.fingerprint.push(format!("graph:{}", e.code));
+            unchecked.push(Unchecked {
+                what: "Manuscripts, workflows and retained evidence",
+                cause: "the project graph could not be read".into(),
+            });
+        }
     }
     // Active work using the paths.
     let mut active: BTreeMap<usize, Vec<OpConsumer>> = BTreeMap::new();
-    for run in cx.runs.active_run_inputs() {
+    let (runs, unread_runs) = cx.runs.read_active_run_inputs();
+    for run in runs {
         for input in &run.inputs {
             if let Some(t) = under_any(input, paths) {
                 active.entry(t).or_default().push(consumer("run", run.run.as_str(), &run.title));
             }
         }
+    }
+    if !unread_runs.is_empty() {
+        for e in &unread_runs {
+            plan.fingerprint.push(format!("runs:{}", e.code));
+        }
+        unchecked.push(Unchecked {
+            what: "Running workflows",
+            cause: match unread_runs.len() {
+                1 => "the record of a running workflow could not be read".into(),
+                n => format!("the records of {n} running workflows could not be read"),
+            },
+        });
     }
     match cx.research.map(|research| research.active_records()) {
         Some(Ok(records)) => {
@@ -451,7 +482,13 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
                 }
             }
         }
-        Some(Err(e)) => plan.fingerprint.push(format!("research:{}", e.code)),
+        Some(Err(e)) => {
+            plan.fingerprint.push(format!("research:{}", e.code));
+            unchecked.push(Unchecked {
+                what: "Running research runs",
+                cause: "the research run records could not be read".into(),
+            });
+        }
         None => {}
     }
     if let Some(tasks) = cx.tasks {
@@ -462,6 +499,10 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
                         Ok(used) => used,
                         Err(e) => {
                             plan.fingerprint.push(format!("taskPaths:{}:{}", task.id.0, e.code));
+                            unchecked.push(Unchecked {
+                                what: "Running agent tasks",
+                                cause: format!("the files of {} could not be read", quoted(&task.title)),
+                            });
                             continue;
                         }
                     };
@@ -474,7 +515,13 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
                     }
                 }
             }
-            Err(e) => plan.fingerprint.push(format!("tasks:{}", e.code)),
+            Err(e) => {
+                plan.fingerprint.push(format!("tasks:{}", e.code));
+                unchecked.push(Unchecked {
+                    what: "Running agent tasks",
+                    cause: "the agent task records could not be read".into(),
+                });
+            }
         }
     }
     for (t, mut consumers) in active {
@@ -498,6 +545,8 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
         let mut watching: BTreeMap<usize, Vec<OpConsumer>> = BTreeMap::new();
         let enabled = triggers.try_watching(paths).unwrap_or_else(|e| {
             plan.fingerprint.push(format!("triggers:{}", e.code));
+            unchecked
+                .push(Unchecked { what: "Enabled triggers", cause: "the workflow triggers could not be read".into() });
             Vec::new()
         });
         for trigger in enabled {
@@ -526,6 +575,21 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
                 consumers,
             });
             push_choice(&mut plan.choices, triggers_choice());
+        }
+    }
+    for path in paths {
+        for u in &unchecked {
+            plan.impacts.push(OpImpact {
+                kind: ImpactKind::ConsumersUnknown,
+                target: OpTarget::Path { path: path.clone() },
+                consumers: Vec::new(),
+                message: format!(
+                    "{} that use {} could not be checked: {}. They may be affected if you delete it.",
+                    u.what,
+                    quoted(path.as_str()),
+                    u.cause
+                ),
+            });
         }
     }
     plan.fingerprint.extend(fingerprint_of(&plan.impacts));

@@ -151,6 +151,11 @@ pub enum ImpactKind {
     /// literal mention of a Lean declaration's name. The manuscript or proof
     /// shows the reference broken until it is edited too.
     SourceDependents,
+    /// What uses it could not be fully checked: a source of consumers (the
+    /// project graph, workflow run records, research run records, agent
+    /// tasks or their files, triggers) could not be read. The plan does not
+    /// pass for one in which nothing uses it: the user decides.
+    ConsumersUnknown,
 }
 
 impl ImpactKind {
