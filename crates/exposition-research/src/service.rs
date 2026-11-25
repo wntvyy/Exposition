@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-use exposition_core::artifact::{ArtifactRecord, Producer, RunId, RunInput, RunRecord, RunStatus, ToolVersion};
+use exposition_core::artifact::{
+    ArtifactId, ArtifactRecord, Producer, RunId, RunInput, RunRecord, RunStatus, ToolVersion,
+};
 use exposition_core::job::{ExecutionPolicy, JobSpec};
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::utf16_range_to_bytes;
@@ -176,6 +178,14 @@ struct Shared {
     selections: crate::selection::SelectionStore,
 }
 
+/// Put `record` among `outputs`, in place of an earlier record with its id.
+fn put_output(outputs: &mut Vec<ArtifactRecord>, record: &ArtifactRecord) {
+    match outputs.iter_mut().find(|output| output.id == record.id) {
+        Some(output) => *output = record.clone(),
+        None => outputs.push(record.clone()),
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -286,6 +296,40 @@ impl Shared {
         write_transcript(root, run_id, &entries).ok()?;
         write_manifest(root, &manifest).ok()?;
         Some(entry)
+    }
+
+    /// Record artifacts registered for a run whose in-memory copy was
+    /// already released: added to the outputs of its stored manifest (one
+    /// such write at a time, like [`Self::append_to_record`]) and to the
+    /// summary the history lists for it. Returns the ids recorded: none when
+    /// the record cannot take them, so that the display entry never names an
+    /// artifact its record does not hold.
+    fn add_outputs_to_record(&self, root: &Path, run_id: &str, records: Vec<ArtifactRecord>) -> Vec<ArtifactId> {
+        if records.is_empty() {
+            return Vec::new();
+        }
+        {
+            let _one = lock(&self.late_writes);
+            if crate::records::record_deleted(root, run_id) {
+                return Vec::new();
+            }
+            let Ok(mut manifest) = read_manifest(root, run_id) else { return Vec::new() };
+            for record in &records {
+                put_output(&mut manifest.record.outputs, record);
+            }
+            if write_manifest(root, &manifest).is_err() {
+                return Vec::new();
+            }
+        }
+        if let Some(run) = lock(&self.runs).get_mut(run_id) {
+            for record in &records {
+                if let Some(summary) = run.released.as_mut() {
+                    put_output(&mut summary.outputs, record);
+                }
+                put_output(&mut run.manifest.record.outputs, record);
+            }
+        }
+        records.into_iter().map(|record| record.id).collect()
     }
 
     fn research_dir(&self, name: &str) -> Result<PathBuf, ResearchError> {
@@ -1680,14 +1724,21 @@ impl Session {
                     };
                     let mut runs = lock(&shared.runs);
                     let Some(run) = runs.get_mut(&run_id) else { return };
-                    records
-                        .into_iter()
-                        .map(|record| {
-                            let id = record.id.clone();
-                            run.add_output(record);
-                            id
-                        })
-                        .collect()
+                    if run.released.is_none() {
+                        records
+                            .into_iter()
+                            .map(|record| {
+                                let id = record.id.clone();
+                                run.add_output(record);
+                                id
+                            })
+                            .collect()
+                    } else {
+                        // Its outputs live in its record now: they are added there.
+                        let root = run.root.clone();
+                        drop(runs);
+                        shared.add_outputs_to_record(&root, &run_id, records)
+                    }
                 };
                 if files.iter().any(|f| f.truncated) {
                     self.push_output(
@@ -2573,6 +2624,72 @@ mod tests {
         assert_eq!(kept.entries.len(), 3, "the only copy of its output is kept");
         assert!(!kept.code.is_empty());
         assert!(runs.values().filter(|r| r.id() != unwritable).all(|r| r.released.is_some()));
+    }
+
+    /// A display artifact registered for a run that was already released
+    /// (output the kernel sent after the run's record was written and its
+    /// in-memory copy was let go) is added to the stored manifest: the record
+    /// on disk names it, the artifact opens, and the history lists it, in
+    /// this session and after the project is opened again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_display_artifact_of_a_released_run_is_added_to_its_stored_manifest() {
+        let f = Fixture::new();
+        let service = &f._service;
+        let root = service.workspace_root().unwrap();
+        let id = queued_run(&f, 0, 10);
+        let dir = ensure_dir_within(&root, &artifact_dir_path(&id)).unwrap();
+        lock(&service.shared.runs).get_mut(&id).unwrap().output_dir = Some(dir.clone());
+        f.session.finish_run(&id, RunStatus::Succeeded, Some(1), None, false);
+        // Leave the project and come back: the run is released.
+        service.clear_workspace();
+        service.set_workspace(&root, true).unwrap();
+        assert!(lock(&service.shared.runs)[&id].released.is_some());
+        assert!(read_manifest(&root, &id).unwrap().record.outputs.is_empty());
+
+        // The kernel's late display, with a figure in the run's folder.
+        let png = b"\x89PNG\r\n\x1a\nlate figure".to_vec();
+        std::fs::write(dir.join("output-1.png"), &png).unwrap();
+        f.session.on_event(HelperEvent::Display {
+            run_id: id.clone(),
+            output_type: "display_data".into(),
+            execution_count: Some(1),
+            text: None,
+            files: vec![crate::protocol::HelperFile {
+                path: dir.join("output-1.png").display().to_string(),
+                name: "output-1.png".into(),
+                media_type: "image/png".into(),
+                role: "image".into(),
+                size: png.len() as u64,
+                sha256: sha256_hex(&png),
+                seq: 1,
+                truncated: false,
+            }],
+        });
+        let artifact = format!("{id}/output-1.png");
+        let stored = read_manifest(&root, &id).unwrap();
+        let named: Vec<&str> = stored.record.outputs.iter().map(|o| o.id.0.as_str()).collect();
+        assert_eq!(named, vec![artifact.as_str()], "the stored manifest names the artifact");
+        assert_eq!(stored.record.outputs[0].content_hash, format!("sha256:{}", sha256_hex(&png)));
+        // The display entry that names it is in the stored output, and it opens.
+        let output = service.run_output(&id, None, 500).unwrap();
+        assert!(
+            output.entries.iter().any(|e| matches!(
+                &e.item,
+                OutputItem::Display { artifacts, .. } if artifacts.iter().any(|a| a.0 == artifact)
+            )),
+            "{:?}",
+            output.entries
+        );
+        let (record, file) = service.artifact(&id, &artifact).unwrap();
+        assert_eq!(record, stored.record.outputs[0]);
+        assert_eq!(std::fs::read(file).unwrap(), png);
+        // The history lists it with the run.
+        assert_eq!(service.run_summary(&id).unwrap().outputs, stored.record.outputs);
+        let listed = service.runs().unwrap();
+        assert_eq!(listed.iter().find(|r| r.id.0 == id).unwrap().outputs, stored.record.outputs);
+        service.clear_workspace();
+        service.set_workspace(&root, true).unwrap();
+        assert_eq!(service.run_summary(&id).unwrap().outputs, stored.record.outputs);
     }
 
     /// The active records found directly are the ones the full record
