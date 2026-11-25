@@ -24,17 +24,18 @@
 //! needs to see is logged whichever listing arrives first.
 //!
 //! A record that is not a manifest of its run is remembered by modification
-//! time, size and [`Stamp`] (the file's identity and, on Unix, its change
-//! time) and not read again until one of them changes; each listing checks
-//! the stamps of the damaged records whose time and size are unchanged (a
-//! metadata query each, no read). A repair that keeps time and size is so
-//! seen by the next listing when it replaces the file (as this app's store
-//! and most tools write) and, on Unix, also when it rewrites the file in
-//! place. On Windows an in-place rewrite that keeps time and size changes
-//! nothing a stamp holds: it is seen when the project is opened again. A
-//! record that could not be opened (another program holds it) is counted,
-//! never remembered as damaged, and read again by the next page that reaches
-//! it.
+//! time, size and [`Stamp`] (the file's identity and its change time) and
+//! not read again until one of them changes; each listing checks the stamps
+//! of the damaged records whose time and size are unchanged (a metadata
+//! query each, no read). A repair that keeps time and size is so seen by the
+//! next listing, whether it replaces the file (as this app's store and most
+//! tools write) or rewrites it in place: the change time moves with every
+//! write and with setting the modification time back. Two rewrites within
+//! one tick of the file system's clock (NTFS: the system timer, 15.6 ms
+//! unless raised; Linux: a scheduler tick) that also keep size and
+//! modification time cannot be told apart. A record that could not be
+//! opened (another program holds it) is counted, never remembered as
+//! damaged, and read again by the next page that reaches it.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -120,11 +121,11 @@ pub(crate) fn stat(root: &Path, id: &str) -> Option<Listed> {
 }
 
 /// What tells one version of a record file from another without reading
-/// it, beyond its modification time and size. Unix: the device, the inode
-/// and the change time (moved by every write and by setting the modification
-/// time; no tool sets it back). Windows: the volume, the file index and the
-/// creation time (a file that replaces the record has another index; the
-/// change time is not available through the standard library there).
+/// it, beyond its modification time and size: the file's identity and its
+/// change time, which every write and every change of the file's times
+/// moves (ordinary tools never set it back). Unix: the device, the inode and
+/// the change time. Windows: the volume, the file index, the change time
+/// and the creation time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Stamp([u64; 4]);
 
@@ -147,7 +148,8 @@ pub(crate) fn file_stamp(file: &std::fs::File) -> Option<Stamp> {
     #[cfg(windows)]
     {
         let info = winapi_util::file::information(file).ok()?;
-        Some(Stamp([info.volume_serial_number(), info.file_index(), info.creation_time().unwrap_or(0), 0]))
+        let changed = change_time(file)?;
+        Some(Stamp([info.volume_serial_number(), info.file_index(), changed, info.creation_time().unwrap_or(0)]))
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -156,9 +158,32 @@ pub(crate) fn file_stamp(file: &std::fs::File) -> Option<Stamp> {
     }
 }
 
+/// The change time of an open file (100 ns units since 1601), from
+/// `GetFileInformationByHandleEx(FileBasicInfo)`: the standard library has
+/// it only behind an unstable feature.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn change_time(file: &std::fs::File) -> Option<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx};
+    let mut info = FILE_BASIC_INFO::default();
+    // SAFETY: the handle stays open while `file` is borrowed; the buffer is
+    // a FILE_BASIC_INFO of exactly the size passed, and the call only writes
+    // into it.
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            (&mut info as *mut FILE_BASIC_INFO).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    (read != 0).then_some(info.ChangeTime as u64)
+}
+
 /// The stamp of `id`'s record file now: `None` when there is none or it
-/// cannot be queried. On Windows the file is opened for its attributes only,
-/// which another program holding it does not prevent.
+/// cannot be queried. On Windows the file is opened for its attributes only
+/// (all a stamp needs), which another program holding it does not prevent.
 pub(crate) fn stamp(root: &Path, id: &str) -> Option<Stamp> {
     if !valid_run_id(id) {
         return None;
@@ -738,6 +763,14 @@ mod tests {
         std::fs::write(&fresh, "two").unwrap();
         std::fs::rename(&fresh, &file).unwrap();
         assert_ne!(stamp(root, "run-ab"), first, "a file put in its place has another stamp");
+        // Rewritten in place with its size and modification time kept.
+        let replaced = stamp(root, "run-ab");
+        let modified = std::fs::metadata(&file).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        std::fs::write(&file, "TWO").unwrap();
+        std::fs::OpenOptions::new().write(true).open(&file).unwrap().set_modified(modified).unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), modified);
+        assert_ne!(stamp(root, "run-ab"), replaced, "a rewrite in place moves the change time");
         assert_eq!(stamp(root, "run-cd"), None, "no such record");
         assert_eq!(stamp(root, "../x"), None, "not a run id");
     }

@@ -873,12 +873,18 @@ fn a_damaged_record_repaired_to_the_same_size_and_time_is_listed_again() {
     assert_each_once(&pages.iter().flat_map(ids).collect::<Vec<_>>(), (0..6).map(run_id), "written again");
 }
 
+/// File systems record a file's change time at the resolution of their clock
+/// (NTFS: the system timer, 15.6 ms unless an application raised it; Linux:
+/// a scheduler tick): two rewrites within one tick that also restore size
+/// and modification time cannot be told apart. Tests that rewrite a record
+/// in place step past a tick first.
+fn past_a_clock_tick() {
+    std::thread::sleep(Duration::from_millis(40));
+}
+
 /// The same for a record damaged and repaired in place (the file is
-/// rewritten, not replaced). Unix: the change time moves with every write.
-/// (On Windows only a replaced file is seen before the project is opened
-/// again: an in-place rewrite that keeps size and time changes nothing the
-/// folder listing or the file's identity shows.)
-#[cfg(unix)]
+/// rewritten, not replaced, and its modification time set back): the
+/// change time moves with every write, on Windows as on Unix.
 #[test]
 fn a_damaged_record_repaired_in_place_to_the_same_size_and_time_is_listed_again() {
     let f = fixture();
@@ -890,8 +896,12 @@ fn a_damaged_record_repaired_in_place_to_the_same_size_and_time_is_listed_again(
     std::fs::write(&file, vec![b' '; good.len()]).unwrap();
     set_modified(&f.root, &run_id(2), 2);
     assert_eq!(all_pages(&f.service, 2).last().unwrap().unreadable, 1);
+    assert_eq!(all_pages(&f.service, 2).last().unwrap().unreadable, 1, "unchanged: still left out");
+    past_a_clock_tick();
     std::fs::write(&file, &good).unwrap();
     set_modified(&f.root, &run_id(2), 2);
+    assert_eq!(std::fs::metadata(&file).unwrap().len(), good.len() as u64, "the same size");
+    assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), time(2), "the same time");
     let pages = all_pages(&f.service, 2);
     assert_eq!(pages.last().unwrap().unreadable, 0);
     assert_each_once(&pages.iter().flat_map(ids).collect::<Vec<_>>(), (0..6).map(run_id), "repaired in place");
@@ -899,9 +909,9 @@ fn a_damaged_record_repaired_in_place_to_the_same_size_and_time_is_listed_again(
 
 /// Differential test of the record of damaged files: after every change
 /// (records damaged and repaired to the same size, by a new file, by this
-/// app's store, or in place where the platform shows it; times moved back and
-/// forth among a few values, so they collide), the history listed by the
-/// long-lived service is the one a service without that record lists.
+/// app's store, or in place; times moved back and forth among a few values,
+/// so they collide), the history listed by the long-lived service is the one
+/// a service without that record lists.
 #[test]
 fn the_record_of_damaged_files_never_changes_what_the_history_lists() {
     let records = 8u64;
@@ -918,13 +928,16 @@ fn the_record_of_damaged_files_never_changes_what_the_history_lists() {
             let i = random.below(records) as usize;
             let id = run_id(i as u64);
             let damaged = vec![b' '; good[i].len()];
-            match random.below(if cfg!(unix) { 6 } else { 5 }) {
+            match random.below(6) {
                 0 => replace_record(&f.root, &id, &damaged),
                 1 => replace_record(&f.root, &id, &good[i]),
                 2 => write_manifest(&f.root, &manifest(&id, 1_000 + i as u64 % 3)).unwrap(),
                 3 => std::fs::write(record_file(&f.root, &id), &damaged).unwrap(),
                 4 => tick[i] = random.below(3),
-                _ => std::fs::write(record_file(&f.root, &id), &good[i]).unwrap(),
+                _ => {
+                    past_a_clock_tick();
+                    std::fs::write(record_file(&f.root, &id), &good[i]).unwrap()
+                }
             }
             set_modified(&f.root, &id, tick[i]);
             let cached = all_pages(&f.service, random.below(4) as u32 + 1);
