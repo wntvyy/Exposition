@@ -128,6 +128,9 @@ pub(crate) fn stat(root: &Path, id: &str) -> Option<Listed> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Stamp([u64; 4]);
 
+/// Gives a record's [`Stamp`] now, by run id.
+type StampOf<'a> = &'a dyn Fn(&str) -> Option<Stamp>;
+
 #[cfg(unix)]
 fn metadata_stamp(metadata: &std::fs::Metadata) -> Stamp {
     use std::os::unix::fs::MetadataExt;
@@ -270,12 +273,7 @@ impl State {
     /// are the files' sizes where the listing has them; `stamps` gives a
     /// record's [`Stamp`] now, asked for each damaged record whose time and
     /// size are unchanged (without it the stamps are not compared).
-    fn observe(
-        &mut self,
-        listing: &[Position],
-        sizes: Option<&HashMap<&str, u64>>,
-        stamps: Option<&dyn Fn(&str) -> Option<Stamp>>,
-    ) {
+    fn observe(&mut self, listing: &[Position], sizes: Option<&HashMap<&str, u64>>, stamps: Option<StampOf<'_>>) {
         let listed: HashSet<&str> = listing.iter().map(|file| file.id.as_str()).collect();
         let mut gone = 0;
         for (id, seen) in &mut self.known {
@@ -346,7 +344,7 @@ impl State {
         &mut self,
         listing: Vec<Position>,
         sizes: Option<&HashMap<&str, u64>>,
-        stamps: Option<&dyn Fn(&str) -> Option<Stamp>>,
+        stamps: Option<StampOf<'_>>,
         cursor: Option<&Cursor>,
         live: &dyn Fn(&str) -> bool,
     ) -> Result<Plan, ResearchError> {
