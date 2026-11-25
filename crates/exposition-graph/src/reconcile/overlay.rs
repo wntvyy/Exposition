@@ -79,14 +79,25 @@ pub fn compute(
         },
         extraction,
     };
-    // The session label index, unless a pass holds it (then labels known
-    // only to unchanged files are not consulted; links to them may show as
-    // unresolved in the overlay until the next computation).
-    let state = graph.try_reconcile_state();
-    let empty = ProjectIndex::default();
-    let index = state.as_ref().map(|s| &s.index).filter(|i| i.loaded).unwrap_or(&empty);
+    // Labels and LaTeX main files are looked up in the session's index, as a
+    // pass looks them up; a session that has not read it yet (no pass since
+    // the project was attached) reads it now. While a pass holds it, this
+    // computation reads its own copy from the store, which the pass has not
+    // written yet. Either way the buffer is resolved against what a fresh
+    // index has.
+    let mut state = graph.try_reconcile_state();
     let now = now_ms();
     graph.with_store_for(&root, |store| {
+        let own;
+        let index: &ProjectIndex = match state.as_deref_mut() {
+            Some(session) => session.index_of(&root, store)?,
+            None => {
+                let mut read = ProjectIndex::default();
+                read.load(store)?;
+                own = read;
+                &own
+            }
+        };
         let Some(resource) = store
             .entities_by_key(EntityKind::Resource, path.as_str())?
             .into_iter()

@@ -520,14 +520,20 @@ impl GraphService {
         })
     }
 
-    /// The reconciliation state, unless a pass holds it right now.
+    /// The reconciliation state of the current attach generation (started
+    /// afresh when it belongs to an earlier one, as for a pass), unless a
+    /// pass holds it right now.
     pub(crate) fn try_reconcile_state(&self) -> Option<MutexGuard<'_, ReconcileState>> {
-        let state = match self.reconcile.try_lock() {
+        let mut state = match self.reconcile.try_lock() {
             Ok(s) => s,
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return None,
         };
-        (state.generation == self.generation()).then_some(state)
+        let generation = self.generation();
+        if state.generation != generation {
+            *state = ReconcileState { generation, ..Default::default() };
+        }
+        Some(state)
     }
 
     pub(crate) fn reconcile_state(&self) -> MutexGuard<'_, ReconcileState> {
@@ -537,6 +543,24 @@ impl GraphService {
             *state = ReconcileState { generation, ..Default::default() };
         }
         state
+    }
+
+    /// Differential check of the session's index (labels, LaTeX main files,
+    /// awaited targets: a cache of the stored index) against a fresh read of
+    /// the store. `None` when this session has not read the index or a pass
+    /// holds it; otherwise what differs (empty: nothing). For tests.
+    #[doc(hidden)]
+    pub fn session_index_drift(&self) -> GraphResult<Option<Vec<String>>> {
+        let Some(root) = self.attached_root() else { return Ok(None) };
+        let Some(state) = self.try_reconcile_state() else { return Ok(None) };
+        if !state.index.loaded || state.root.as_deref() != Some(root.as_path()) {
+            return Ok(None);
+        }
+        self.with_store_for(&root, |store| {
+            let mut fresh = crate::reconcile::engine::ProjectIndex::default();
+            fresh.load(store)?;
+            Ok(Some(state.index.differences(&fresh)))
+        })
     }
 
     /// The LaTeX main files the reconciler knows for the attached project,

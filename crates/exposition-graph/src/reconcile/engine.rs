@@ -206,6 +206,31 @@ impl ProjectIndex {
         out
     }
 
+    /// What `self` holds that `other` does not, and the reverse: the files
+    /// declaring each label, the LaTeX main files, and the files waiting for
+    /// each target (for the differential tests of this cache).
+    pub(crate) fn differences(&self, other: &ProjectIndex) -> Vec<String> {
+        fn sorted(map: &HashMap<String, BTreeSet<WorkspacePath>>) -> BTreeMap<&str, &BTreeSet<WorkspacePath>> {
+            map.iter().map(|(k, v)| (k.as_str(), v)).collect()
+        }
+        let mut out = Vec::new();
+        for (what, mine, theirs) in [
+            ("label", sorted(&self.labels), sorted(&other.labels)),
+            ("target", sorted(&self.waiting), sorted(&other.waiting)),
+        ] {
+            for key in mine.keys().chain(theirs.keys()).collect::<BTreeSet<_>>() {
+                let (a, b) = (mine.get(key), theirs.get(key));
+                if a != b {
+                    out.push(format!("{what} {key}: session {a:?}, store {b:?}"));
+                }
+            }
+        }
+        if self.latex_mains != other.latex_mains {
+            out.push(format!("LaTeX main files: session {:?}, store {:?}", self.latex_mains, other.latex_mains));
+        }
+        out
+    }
+
     pub(crate) fn load(&mut self, store: &GraphStore) -> StoreResult<()> {
         #[derive(Deserialize)]
         struct Labels {
@@ -241,6 +266,22 @@ pub(crate) struct ReconcileState {
     pub index: ProjectIndex,
 }
 
+impl ReconcileState {
+    /// The session's index of `root`, read from the store the first time
+    /// anything in this session needs it (a pass or an overlay), so that
+    /// every reader sees the labels and main files a fresh index has.
+    pub(crate) fn index_of(&mut self, root: &Path, store: &GraphStore) -> StoreResult<&ProjectIndex> {
+        if self.root.as_deref() != Some(root) {
+            self.root = Some(root.to_path_buf());
+            self.index = ProjectIndex::default();
+        }
+        if !self.index.loaded {
+            self.index.load(store)?;
+        }
+        Ok(&self.index)
+    }
+}
+
 /// A file read in this pass.
 pub(crate) struct Fresh {
     pub meta: FileMeta,
@@ -265,10 +306,6 @@ pub(crate) fn run_locked(
     let started = Instant::now();
     let root =
         graph.attached_root().ok_or_else(|| GraphError::new("graph.noProject", "No project graph is attached."))?;
-    if state.root.as_deref() != Some(root.as_path()) {
-        state.root = Some(root.clone());
-        state.index = ProjectIndex::default();
-    }
     // 0. One key per file: every path of the scope is scanned under the
     // spelling it has on disk. The pass stays responsible for the records
     // stored under the spelling it was given too (a folder renamed only in
@@ -293,9 +330,7 @@ pub(crate) fn run_locked(
     };
     // 1. Checkpoints and known resources (short lock).
     let (checkpoints, known) = graph.with_store_for(&root, |s| {
-        if !state.index.loaded {
-            state.index.load(s)?;
-        }
+        state.index_of(&root, s)?;
         // A few paths are looked up directly; many (a burst of changes) are
         // cheaper to filter from one read.
         let prefixes = match &scope_paths {

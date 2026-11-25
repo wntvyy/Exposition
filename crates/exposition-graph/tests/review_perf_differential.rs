@@ -11,7 +11,9 @@
 //! same database after a forced full reindex of the same files: every
 //! entity, binding, relation, coverage row, awaited target and stored index
 //! record, and the overlay of every unsaved buffer. The status counts are
-//! compared with the tables at every step.
+//! compared with the tables at every step, and the session's index of
+//! labels, LaTeX main files and awaited targets (a cache of the stored
+//! index that passes and overlays read) with a fresh read of the store.
 //!
 //! Environment (all optional; the defaults are the fast fixed run):
 //! - `EXPOSITION_DIFF_SEEDS`: `a..b` or a comma list of seeds.
@@ -153,7 +155,8 @@ fn content(rng: &mut Rng, path: &str, counter: u64) -> Vec<u8> {
             if path.ends_with("main.tex") {
                 t.push_str("\\documentclass{article}\n\\begin{document}\n");
             }
-            t.push_str(&format!("\\section{{Section {counter}}}\n"));
+            // A section label is no entity: only the index of labels knows it.
+            t.push_str(&format!("\\section{{Section {counter}}}\\label{{sec:{}}}\n", rng.below(4)));
             for _ in 0..rng.below(4) {
                 let env = *rng.pick(&["lemma", "theorem", "definition", "proposition"]);
                 t.push_str(&format!("\\begin{{{env}}}\\label{{{}}}\nStatement {counter}", label(rng)));
@@ -170,7 +173,10 @@ fn content(rng: &mut Rng, path: &str, counter: u64) -> Vec<u8> {
                 match rng.below(4) {
                     0 => t.push_str(&format!("\\input{{{}}}\n", strip(&other(rng)))),
                     1 => t.push_str(&format!("\\includegraphics{{{}}}\n", strip(&other(rng)))),
-                    2 => t.push_str(&format!("See \\ref{{{}}}.\n", label(rng))),
+                    2 => {
+                        let target = if rng.chance(50) { label(rng) } else { format!("sec:{}", rng.below(4)) };
+                        t.push_str(&format!("See \\ref{{{target}}}.\n"));
+                    }
                     _ => t.push_str(&format!("Cites \\cite{{ref{}}}.\n", rng.below(3))),
                 }
             }
@@ -976,6 +982,12 @@ impl Run {
                     svc.clear_overlay(&wp(path));
                 }
             }
+        }
+        // The session's index (a cache of the stored one) against a fresh read.
+        if let Some(drift) = svc.session_index_drift().unwrap()
+            && !drift.is_empty()
+        {
+            self.finding(step, format!("the session's index differs from the stored index\n  {}", drift.join("\n  ")));
         }
         let incremental = records(&svc, false);
         let pending: Vec<&String> =

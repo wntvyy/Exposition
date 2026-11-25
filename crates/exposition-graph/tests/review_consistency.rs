@@ -184,6 +184,10 @@ impl Project {
         let overlays_b = self.overlays(&b.svc);
         b.svc.detach();
         let mut out = Vec::new();
+        // The session's index (a cache of the stored one) against a fresh read.
+        for d in self.svc.session_index_drift().unwrap().unwrap_or_default() {
+            out.push(format!("session index: {d}"));
+        }
         let a: BTreeSet<&String> = incremental.iter().collect();
         let f: BTreeSet<&String> = full.iter().collect();
         for line in a.difference(&f) {
@@ -1018,6 +1022,36 @@ fn overlays_of_unsaved_buffers_follow_other_files() {
     p.remove("d/a.tex");
     p.pass(&["r/r.tex", "d/a.tex"]);
     p.check("the files of unsaved buffers changed and were deleted");
+}
+
+/// An overlay resolves a buffer's links against the session's index of the
+/// project's labels and LaTeX main files, as a pass does. A new session (the
+/// project attached again) has not read that index until its first pass;
+/// an overlay computed before then must still see every label and main file
+/// a fresh index has: a section label (not an entity), a label declared
+/// twice in one file (ambiguous, so no entity either), and the folder of a
+/// main file that an `\input` is looked up in.
+#[test]
+fn an_overlay_in_a_new_session_sees_the_labels_a_fresh_index_has() {
+    let mut p = open(None);
+    p.write("notes/a.tex", "\\section{Intro}\\label{sec:intro}\nText.\n");
+    p.write("notes/twice.tex", &format!("{}{}", lemma("lem:twice"), lemma("lem:twice")));
+    p.write("paper/main.tex", "\\documentclass{article}\n\\begin{document}\n\\input{ch/one}\n\\end{document}\n");
+    p.write("paper/ch/one.tex", "One.\n");
+    p.write("paper/ch/two.tex", "Two.\n");
+    p.write("notes/r.tex", "See \\ref{sec:intro}.\n");
+    p.full();
+    p.buffers = vec![
+        ("notes/r.tex".into(), 3, "See \\ref{sec:intro} and \\ref{lem:twice}.\n".into()),
+        ("paper/ch/one.tex".into(), 2, "One.\n\\input{ch/two}\n".into()),
+    ];
+    p.check("in the session that indexed the project");
+    p.svc.detach();
+    assert!(matches!(p.svc.attach(&p.root).state, GraphState::Attached));
+    p.check("in a new session, before its first pass");
+    // The overlay is the same once a pass has read the index.
+    p.pass(&["notes/a.tex"]);
+    p.check("after the new session's first pass");
 }
 
 // ----- 5. more awaited targets than a list holds -----
