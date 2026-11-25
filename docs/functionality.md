@@ -1444,7 +1444,7 @@ Typesetting rules: in-process targets by extension only (`.typ` Typst, `.md`/`.m
 | `documents:resync` | `()` | Lag; editor re-reads attached documents |
 | `workspace:event` | `WorkspaceEvent`: `opened{info}`, `closed`, `filesChanged{changes: {path, kind: created\|removed\|modified}[], rescan}`, `documentReloaded{document, path}`, `conflict{conflict: {document, path, kind: modified\|deleted\|unreadable, message}}`, `conflictResolved{document}`, `recoveryChanged{entries}`, `journalFailed{path, message}`, `projectSettingsInvalid{message}` | Folder open/close, watcher batches, auto-reload, disk conflicts, recovery changes, journal failure, invalid `project.json` set aside |
 | `jobs:event` | `JobEvent`: `queued{id, label}`, `started{id, pid?}`, `output{id, stream: stdout\|stderr, text}`, `cancelRequested{id}`, `finished{result}` | Every job lifecycle step, in order (`finished` last, also for refusals). On this channel an `output` event is a notification with an empty `text`: the webview reads output by sequence number with `job_output`, and re-reads the job list only on the other events |
-| `jobs:resync` | `()` | Lag; re-read job list |
+| `jobs:resync` | `()` | Lag; re-read the job list and pull the selected job's output |
 | `trust:changed` | `TrustChanged{root, granted: bool}` or `null` | Any trust grant/revoke; before emitting, watched LaTeX entries rebuild if the change covers the open folder |
 | `lean:event` | `LeanEvent`: `document{state: LeanDocumentState}`, `removed{document}` | Lean document status/diagnostics change; document no longer tracked |
 | `lean:resync` | `()` | Lag |

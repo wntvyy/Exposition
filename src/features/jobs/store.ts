@@ -149,6 +149,12 @@ export function startJobsTracking(): void {
       if (useJobs.getState().selected === id) void pullOutput(id);
     }
   });
-  void events.jobsResync(() => scheduleRefresh());
+  // Events were dropped: the list is read again, and so is the selected
+  // job's output (its last output and its exit may be among them).
+  void events.jobsResync(() => {
+    scheduleRefresh();
+    const selected = useJobs.getState().selected;
+    if (selected) void pullOutput(selected);
+  });
   void refreshJobs();
 }
