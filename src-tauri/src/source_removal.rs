@@ -11,6 +11,12 @@
 //! buffer may have unsaved edits) and lists what still uses it — `\ref`s and
 //! citations, its proof (removed with it unless the person keeps it), curated
 //! relationships, literal mentions of a Lean name — as one combined decision.
+//! Those reads are bounded: when one of them did not see everything (the
+//! graph's read of the item's relationships, the Lean files searched), the
+//! plan says that its list of uses is incomplete, as one more consequence in
+//! the same decision. The removal stays possible because it is an unsaved
+//! edit the person reviews before saving; the decision never reads as "used
+//! by nothing" when that was not established.
 //! Its fingerprint covers the text it was computed from, so any edit between
 //! plan and apply makes the plan stale and nothing is removed.
 
@@ -57,6 +63,9 @@ struct Removal {
     lines: Option<(usize, usize)>,
     /// Its proofs (path, removal ranges, label), removed unless kept.
     proofs: Vec<(WorkspacePath, Vec<TextRange>, String)>,
+    /// Why the uses listed for it may not be all of them (empty: the reads
+    /// were complete).
+    unseen: Vec<String>,
 }
 
 /// The source side's part of a plan.
@@ -350,6 +359,11 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
         {
             lean.push((out.removals.len(), name.clone()));
         }
+        // The read of its relationships was bounded: what it left out may use it.
+        let mut unseen = Vec::new();
+        if detail.relations_truncated || detail.neighbors_truncated {
+            unseen.push("it has more relationships than this plan reads".to_owned());
+        }
         out.effects.push(OpEffect {
             target: target.clone(),
             description: format!(
@@ -367,11 +381,27 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
             ranges,
             lines,
             proofs,
+            unseen,
         });
     }
 
     if !lean.is_empty() {
         lean_mentions(ws, &mut texts, &mut out, &lean);
+    }
+    for removal in &out.removals {
+        if removal.unseen.is_empty() {
+            continue;
+        }
+        out.impacts.push(OpImpact {
+            kind: ImpactKind::SourceDependents,
+            target: removal.target.clone(),
+            consumers: Vec::new(),
+            message: format!(
+                "Not every use of {} could be checked: {}. Uses not listed here may break too; check the sources before you save.",
+                quoted(&removal.label),
+                removal.unseen.join("; ")
+            ),
+        });
     }
     if proofs_found {
         out.choices.push(OpChoice {
@@ -387,16 +417,39 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
     out
 }
 
-/// `.lean` files of the project (bounded; tool and build folders skipped; links not followed).
-fn lean_files(root: &Path) -> Vec<WorkspacePath> {
+/// The project's `.lean` files as one bounded walk found them, and what the
+/// walk could not see.
+#[derive(Debug, Default)]
+struct LeanWalk {
+    files: Vec<WorkspacePath>,
+    /// More `.lean` files exist than `files` lists (the walk stopped).
+    capped: bool,
+    /// Folders that could not be listed in full (`""`: the project folder).
+    unlisted: Vec<String>,
+}
+
+/// `.lean` files of the project (at most `limit`; tool and build folders
+/// skipped; links not followed).
+fn lean_files(root: &Path, limit: usize) -> LeanWalk {
     const SKIP: &[&str] = &[".lake", ".git", ".exposition", "node_modules", "target", "build", ".elan"];
-    let mut out = Vec::new();
+    let mut walk = LeanWalk::default();
     let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
     while let Some((dir, rel)) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            walk.unlisted.push(rel);
+            continue;
+        };
+        let mut listed = true;
+        for entry in entries {
+            let Ok(entry) = entry else {
+                listed = false;
+                continue;
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
-            let Ok(kind) = entry.file_type() else { continue };
+            let Ok(kind) = entry.file_type() else {
+                listed = false;
+                continue;
+            };
             let child = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
             if kind.is_dir() && !SKIP.contains(&name.as_str()) {
                 stack.push((entry.path(), child));
@@ -404,22 +457,40 @@ fn lean_files(root: &Path) -> Vec<WorkspacePath> {
                 && name.ends_with(".lean")
                 && let Ok(p) = WorkspacePath::parse(&child)
             {
-                out.push(p);
-                if out.len() >= MAX_LEAN_FILES {
-                    return out;
+                if walk.files.len() >= limit {
+                    walk.capped = true;
+                    return walk;
                 }
+                walk.files.push(p);
             }
         }
+        if !listed {
+            walk.unlisted.push(rel);
+        }
     }
-    out.sort();
-    out
+    walk.files.sort();
+    walk
+}
+
+/// `a, b and 2 more`: at most three names, then how many others.
+fn some_of(names: &[String]) -> String {
+    let shown: Vec<&str> = names.iter().take(3).map(String::as_str).collect();
+    match names.len().saturating_sub(shown.len()) {
+        0 => shown.join(", "),
+        more => format!("{} and {more} more", shown.join(", ")),
+    }
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// Literal mentions of removed Lean declarations elsewhere in the project's
 /// Lean text (open buffers as they are now), outside every removed range.
 fn lean_mentions(ws: &WorkspaceService, texts: &mut Texts<'_>, out: &mut SourcePlan, lean: &[(usize, String)]) {
     let Some(root) = ws.open_root() else { return };
-    let mut files: BTreeSet<WorkspacePath> = lean_files(&root).into_iter().collect();
+    let walk = lean_files(&root, MAX_LEAN_FILES);
+    let mut files: BTreeSet<WorkspacePath> = walk.files.iter().cloned().collect();
     for info in ws.documents().list() {
         if let Some(p) = info.path.filter(|p| p.as_str().ends_with(".lean")) {
             files.insert(p);
@@ -429,34 +500,76 @@ fn lean_mentions(ws: &WorkspaceService, texts: &mut Texts<'_>, out: &mut SourceP
     for r in &out.removals {
         exclude.entry(r.path.clone()).or_default().extend(r.ranges.iter().copied());
     }
+    // What the search could not see applies to every name looked for.
+    let mut unseen: Vec<String> = Vec::new();
+    if walk.capped {
+        unseen.push(format!("only the first {MAX_LEAN_FILES} Lean files of the project were searched"));
+    }
+    if !walk.unlisted.is_empty() {
+        let folders: Vec<String> = walk
+            .unlisted
+            .iter()
+            .map(|f| if f.is_empty() { "the project folder".to_owned() } else { f.clone() })
+            .collect();
+        unseen.push(format!(
+            "{} could not be listed ({})",
+            plural(folders.len(), "folder", "folders"),
+            some_of(&folders)
+        ));
+    }
+    let unreadable: Vec<String> =
+        files.iter().filter(|p| texts.get(p).is_err()).map(|p| p.as_str().to_owned()).collect();
+    if !unreadable.is_empty() {
+        unseen.push(format!(
+            "{} could not be read ({})",
+            plural(unreadable.len(), "Lean file", "Lean files"),
+            some_of(&unreadable)
+        ));
+    }
     let removed_names: HashSet<&str> = lean.iter().map(|(_, n)| n.as_str()).collect();
     for (index, name) in lean {
-        let removal = &out.removals[*index];
         let mut consumers: Vec<OpConsumer> = Vec::new();
         let mut places: Vec<String> = Vec::new();
+        // Every distinct place, also those past the ones the decision names.
+        let mut seen: HashSet<String> = HashSet::new();
         let mut count = 0usize;
+        let mut crowded: Vec<String> = Vec::new();
         for path in &files {
             let Ok(text) = texts.get(path) else { continue };
             let skip = exclude.get(path).cloned().unwrap_or_default();
-            for m in sr::lean_mentions(path, text, name, &skip) {
+            let (mentions, more) = sr::lean_mentions_bounded(path, text, name, &skip);
+            if more {
+                crowded.push(path.as_str().to_owned());
+            }
+            for m in mentions {
                 if m.declaration.as_deref().is_some_and(|d| removed_names.contains(d)) {
                     continue;
                 }
                 count += 1;
                 let label = m.declaration.clone().unwrap_or_else(|| format!("line {}", m.line));
                 let id = format!("{path}:{label}");
-                if !consumers.iter().any(|c| c.id == id) && consumers.len() < MAX_CONSUMERS {
+                if seen.insert(id.clone()) && consumers.len() < MAX_CONSUMERS {
                     places.push(format!("{} ({path})", quoted(&label)));
                     consumers.push(OpConsumer { kind: "entity".into(), id, label, path: Some(path.clone()) });
                 }
             }
         }
+        let removal = &mut out.removals[*index];
+        removal.unseen.extend(unseen.iter().cloned());
+        if !crowded.is_empty() {
+            removal.unseen.push(format!(
+                "only the first {} mentions per file were read in {}",
+                sr::MAX_MENTIONS,
+                some_of(&crowded)
+            ));
+        }
+        let removal = &out.removals[*index];
         out.fingerprint.push(format!("srcmention:{}:{count}", removal.target_key()));
         if consumers.is_empty() {
             continue;
         }
         let shown: Vec<&str> = places.iter().take(5).map(String::as_str).collect();
-        let more = places.len().saturating_sub(shown.len());
+        let more = seen.len().saturating_sub(shown.len());
         out.impacts.push(OpImpact {
             kind: ImpactKind::SourceDependents,
             target: removal.target.clone(),
@@ -616,6 +729,22 @@ pub fn apply(ws: &WorkspaceService, plan: &SourcePlan, choices: &BTreeMap<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lean_walk_says_when_it_stopped_at_its_bound() {
+        let root = std::env::temp_dir().join(format!("exposition-lean-walk-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("a/.lake")).unwrap();
+        for name in ["A.lean", "a/B.lean", "a/C.lean", "a/.lake/D.lean", "a/notes.md"] {
+            std::fs::write(root.join(name), "theorem t : True := trivial\n").unwrap();
+        }
+        let exact = lean_files(&root, 3);
+        let capped = lean_files(&root, 2);
+        let _ = std::fs::remove_dir_all(&root);
+        let names: Vec<&str> = exact.files.iter().map(|p| p.as_str()).collect();
+        assert_eq!(names, ["A.lean", "a/B.lean", "a/C.lean"], "tool folders are skipped");
+        assert!(!exact.capped && exact.unlisted.is_empty(), "{exact:?}");
+        assert_eq!((capped.files.len(), capped.capped), (2, true), "{capped:?}");
+    }
 
     #[test]
     fn removal_points_map_into_the_edited_text() {

@@ -1396,3 +1396,87 @@ fn a_lean_declaration_lists_literal_uses_of_its_name_in_other_lean_files() {
     assert_eq!(result.outcomes[0].status, OpStatus::Succeeded);
     assert_eq!(buffer(&fx, "lean/LeanBasic/Basel.lean").text, "namespace LeanBasic\n\nend LeanBasic\n");
 }
+
+/// Delete from Source plans from what the graph read of the item: when that
+/// read left relationships or their items out, the plan says its list of
+/// uses is incomplete and asks for the decision, instead of reading as "used
+/// by nothing" (here a claim depends on the theorem, but the bounded read
+/// of its neighbors did not include the claim).
+#[test]
+fn a_removal_planned_from_an_incomplete_read_of_its_uses_says_so() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    fs::write(fx.file("paper.tex"), PAPER).unwrap();
+    let theorem = entity(EntityKind::Theorem, "Theorem thm:main", Some("thm:main"));
+    let mut claim = entity(EntityKind::Claim, "Claim C", None);
+    claim.origin = Origin::User;
+    let thm_binding = binding(&theorem, "paper.tex", PAPER, "latex.env:theorem", Some("thm:main"));
+    let mut depends = relation(exposition_graph::vocabulary::RelationKind::DependsOn, &claim, &theorem);
+    depends.origin = Origin::User;
+    depends.status = exposition_graph::model::AssertionStatus::Accepted;
+    for (relations_truncated, neighbors_truncated) in [(false, true), (true, false)] {
+        let mut d = detail(theorem.clone(), vec![thm_binding.clone()], vec![depends.clone()], Vec::new());
+        if relations_truncated {
+            // The relation itself was not read.
+            d.incoming.clear();
+        }
+        d.relations_truncated = relations_truncated;
+        d.neighbors_truncated = neighbors_truncated;
+        let data = FakeData { details: vec![d], ..FakeData::default() };
+        let plan = ops.plan(&fx.ws, &data, delete(&[&theorem], false, OpActor::User)).unwrap();
+        let case = format!("relations_truncated {relations_truncated}, neighbors_truncated {neighbors_truncated}");
+        assert_eq!(plan.effects.len(), 1, "{case}: still removable as a reviewed, unsaved edit");
+        assert!(plan.needs_decision, "{case}: an incomplete list of uses is a decision: {:?}", plan.impacts);
+        let incomplete: Vec<&OpImpact> =
+            plan.impacts.iter().filter(|i| i.message.starts_with("Not every use of “Theorem thm:main”")).collect();
+        assert_eq!(incomplete.len(), 1, "{case}: {:?}", plan.impacts);
+        assert_eq!(incomplete[0].kind, ImpactKind::SourceDependents);
+        assert!(incomplete[0].message.contains("more relationships than this plan reads"), "{}", incomplete[0].message);
+    }
+}
+
+/// A Lean declaration whose literal uses are looked for in the project's
+/// Lean files: a file that cannot be read is not silently skipped.
+#[test]
+fn a_lean_file_that_cannot_be_read_makes_the_list_of_mentions_incomplete() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let basel = "namespace LeanBasic\n\ntheorem basel : True := by\n  trivial\n\nend LeanBasic\n";
+    fs::create_dir_all(fx.file("lean/LeanBasic")).unwrap();
+    fs::write(fx.file("lean/LeanBasic/Basel.lean"), basel).unwrap();
+    // Not UTF-8 text: the plan cannot look for mentions in it.
+    fs::write(fx.file("lean/Broken.lean"), [0x74, 0x68, 0xff, 0xfe, 0x00, 0xc3, 0x28]).unwrap();
+    let mut decl = entity(EntityKind::FormalDeclaration, "LeanBasic.basel", Some("LeanBasic.basel"));
+    decl.origin = Origin::Extracted { extractor: "lean/1".into() };
+    let b = binding(&decl, "lean/LeanBasic/Basel.lean", basel, "lean.theorem", Some("LeanBasic.basel"));
+    let data = FakeData { details: vec![detail(decl.clone(), vec![b], Vec::new(), Vec::new())], ..FakeData::default() };
+    let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+    assert!(plan.needs_decision, "{:?}", plan.impacts);
+    let impact = plan.impacts.iter().find(|i| i.message.starts_with("Not every use of “LeanBasic.basel”"));
+    let impact = impact.unwrap_or_else(|| panic!("{:?}", plan.impacts));
+    assert_eq!(impact.kind, ImpactKind::SourceDependents);
+    assert!(impact.message.contains("1 Lean file could not be read (lean/Broken.lean)"), "{}", impact.message);
+}
+
+/// The places that mention a removed Lean name are counted in full: the
+/// decision names 25 of them and says how many more there are.
+#[test]
+fn the_count_of_places_that_mention_a_lean_name_is_complete() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let basel = "namespace LeanBasic\n\ntheorem basel : True := by\n  trivial\n\nend LeanBasic\n";
+    fs::create_dir_all(fx.file("lean/LeanBasic")).unwrap();
+    fs::write(fx.file("lean/LeanBasic/Basel.lean"), basel).unwrap();
+    for i in 0..30 {
+        fs::write(fx.file(&format!("lean/U{i:02}.lean")), format!("theorem u{i} : True := LeanBasic.basel\n")).unwrap();
+    }
+    let mut decl = entity(EntityKind::FormalDeclaration, "LeanBasic.basel", Some("LeanBasic.basel"));
+    decl.origin = Origin::Extracted { extractor: "lean/1".into() };
+    let b = binding(&decl, "lean/LeanBasic/Basel.lean", basel, "lean.theorem", Some("LeanBasic.basel"));
+    let data = FakeData { details: vec![detail(decl.clone(), vec![b], Vec::new(), Vec::new())], ..FakeData::default() };
+    let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+    let impact = plan.impacts.iter().find(|i| i.message.contains("is mentioned by name in")).expect("the mentions");
+    assert_eq!(impact.consumers.len(), 25, "the decision names a bounded number: {impact:?}");
+    assert!(impact.message.contains(" and 25 more."), "5 shown of 30: {}", impact.message);
+    assert!(plan.impacts.iter().all(|i| !i.message.starts_with("Not every use")), "{:?}", plan.impacts);
+}
