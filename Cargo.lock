@@ -1390,7 +1390,6 @@ dependencies = [
  "ts-rs",
  "uuid",
  "winapi-util",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
