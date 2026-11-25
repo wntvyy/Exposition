@@ -1723,3 +1723,220 @@ mod incomplete_uses_review {
         assert!(incomplete(&plan).is_empty(), "every use was read: {:?}", plan.impacts);
     }
 }
+
+// ----- review: Delete from Source and the graph's indexing coverage -------------------------
+
+/// Delete from Source with the real graph service: the plan's data side reads
+/// the entity detail and the coverage exactly as `AppData` does.
+mod coverage_review {
+    use exposition_graph::model::{CoverageSummary, Entity, EntityDetail};
+    use exposition_graph::reconcile::{ReconcileOptions, Scope};
+    use exposition_graph::{GraphConfig, GraphService};
+
+    use super::*;
+
+    const MAIN: &str = "\\documentclass{article}\n\\begin{document}\n\n\\begin{lemma}\\label{lem:a}\nA closed subset is compact.\n\\end{lemma}\n\n\\end{document}\n";
+
+    /// `AppData`'s graph reads, over a graph service of the test's own.
+    struct GraphData(Arc<GraphService>);
+
+    impl DataSide for GraphData {
+        fn impacts_for_paths(&self, _paths: &[WorkspacePath], _kind: &OpKind) -> DataPlan {
+            DataPlan::default()
+        }
+        fn plan_data(&self, request: &OpRequest) -> DataPlan {
+            FakeData::default().plan_data(request)
+        }
+        fn apply_data(&self, _plan: &OpPlan, _choices: &BTreeMap<String, String>) -> Vec<OpOutcome> {
+            Vec::new()
+        }
+        fn prepare_paths(&self, _plan: &OpPlan, _choices: &BTreeMap<String, String>) -> Vec<OpRefusal> {
+            Vec::new()
+        }
+        fn after_paths(&self, _outcomes: &[OpOutcome]) {}
+        fn restore_data(&self, _restore: &OpRestore) -> Option<OpOutcome> {
+            None
+        }
+        fn graph_resource(&self, _path: &WorkspacePath) -> bool {
+            false
+        }
+        fn entity_detail(&self, entity: &str) -> Option<EntityDetail> {
+            let id = exposition_graph::ids::EntityId::parse(entity).ok()?;
+            self.0.entity_detail(&id).ok()
+        }
+        fn coverage(&self) -> CoverageSummary {
+            self.0.status().coverage
+        }
+    }
+
+    struct Real {
+        dir: Temp,
+        ws: Arc<WorkspaceService>,
+        graph: Arc<GraphService>,
+        data: GraphData,
+    }
+
+    impl Real {
+        fn root(&self) -> PathBuf {
+            self.dir.0.join("project")
+        }
+        fn write(&self, path: &str, bytes: &[u8]) {
+            let mut full = self.root();
+            full.extend(path.split('/'));
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, bytes).unwrap();
+        }
+        fn reconcile(&self) {
+            self.graph.reconcile(&ReconcileOptions { scope: Scope::Full, force: false }).unwrap();
+        }
+        fn lemma(&self) -> Entity {
+            let (found, _) =
+                self.graph.with_store(|s| Ok(s.find_entities(Some(&[EntityKind::Lemma]), None, false, 10)?)).unwrap();
+            assert_eq!(found.len(), 1, "{found:?}");
+            found.into_iter().next().unwrap()
+        }
+        fn plan(&self, ops: &ProjectOps) -> OpPlan {
+            ops.plan(&self.ws, &self.data, delete(&[&self.lemma()], false, OpActor::User)).unwrap()
+        }
+        fn ops(&self) -> ProjectOps {
+            ProjectOps::new(&self.dir.0.join("app-data"), Arc::new(FakeTrash::default()))
+        }
+    }
+
+    /// A project with main.tex (one lemma nothing refers to) and `files`,
+    /// opened, attached and fully indexed.
+    fn real(files: &[(&str, &[u8])]) -> Real {
+        let dir = Temp::new();
+        let root = dir.0.join("project");
+        fs::create_dir_all(&root).unwrap();
+        let ws = WorkspaceService::new(Arc::new(DocumentService::new()), dir.0.join("data"));
+        ws.open_workspace(&root).unwrap();
+        let graph = GraphService::new(GraphConfig { data_dir: dir.0.join("graph-data") });
+        let real = Real { dir, ws, graph: Arc::clone(&graph), data: GraphData(graph) };
+        real.write("main.tex", MAIN.as_bytes());
+        for (path, bytes) in files {
+            real.write(path, bytes);
+        }
+        assert!(real.graph.attach(&root).is_usable());
+        real.reconcile();
+        real
+    }
+
+    fn incomplete(plan: &OpPlan) -> Vec<&OpImpact> {
+        plan.impacts.iter().filter(|i| i.message.starts_with("Not every use of")).collect()
+    }
+
+    /// Latin-1 text: not readable as UTF-8, so the graph cannot index it.
+    fn latin1(text: &str) -> Vec<u8> {
+        text.chars().map(|c| c as u32 as u8).collect()
+    }
+
+    /// Baseline: every file indexed, nothing uses the lemma: a routine
+    /// removal, no decision.
+    #[test]
+    fn a_fully_indexed_project_asks_nothing() {
+        let r = real(&[("analysis/run.py", b"x = 1\n")]);
+        let plan = r.plan(&r.ops());
+        assert!(plan.impacts.is_empty() && !plan.needs_decision, "{:?}", plan.impacts);
+    }
+
+    /// Accurate case: a LaTeX file the graph could not index (Latin-1) refers
+    /// to the lemma; its \ref is not in the graph, and the plan says that a
+    /// file could not be indexed.
+    #[test]
+    fn an_unindexed_latex_file_that_refers_to_the_item_is_said() {
+        let r = real(&[("other.tex", &latin1("Caf\u{e9}: see Lemma~\\ref{lem:a}.\n"))]);
+        assert_eq!(r.graph.status().coverage.failed, 1);
+        let plan = r.plan(&r.ops());
+        let found = incomplete(&plan);
+        assert_eq!(found.len(), 1, "{:?}", plan.impacts);
+        assert!(found[0].message.contains("1 file could not be indexed"), "{}", found[0].message);
+        assert!(plan.needs_decision);
+    }
+
+    /// Files in dependency and tool folders are not resources, so their
+    /// failures are not counted.
+    #[test]
+    fn unindexable_files_in_dependency_folders_are_not_counted() {
+        let bad = latin1("# caf\u{e9}\n");
+        let r =
+            real(&[(".venv/lib/legacy.py", &bad), ("node_modules/pkg/README.md", &bad), (".lake/build/X.lean", &bad)]);
+        assert_eq!(r.graph.status().coverage.failed, 0);
+        let plan = r.plan(&r.ops());
+        assert!(incomplete(&plan).is_empty() && !plan.needs_decision, "{:?}", plan.impacts);
+    }
+
+    /// FINDING (medium): any file the graph could not index counts, whatever
+    /// it is: a Python script and a Lean file that cannot be read (Latin-1)
+    /// cannot refer to a LaTeX lemma, yet every Delete from Source of a
+    /// LaTeX, Typst or BibTeX item in this project now asks for a decision
+    /// ("2 files could not be indexed"), for as long as those files stay.
+    #[test]
+    #[ignore = "review finding: unindexable files that cannot refer to the item (.py, .lean) force a decision"]
+    fn files_that_cannot_refer_to_the_item_do_not_make_its_uses_incomplete() {
+        let r = real(&[
+            ("analysis/legacy.py", &latin1("# caf\u{e9}\nx = 1\n")),
+            ("formal/Basic.lean", &latin1("theorem t : True := trivial -- caf\u{e9}\n")),
+        ]);
+        assert_eq!(r.graph.status().coverage.failed, 2);
+        let plan = r.plan(&r.ops());
+        assert!(incomplete(&plan).is_empty(), "nothing that could refer to the lemma is unindexed: {:?}", plan.impacts);
+        assert!(!plan.needs_decision);
+    }
+
+    /// FINDING (low): a pending file counts whatever it is: a Python script
+    /// saved a moment ago makes the removal of a LaTeX lemma ask for a
+    /// decision until the graph has read it again.
+    #[test]
+    #[ignore = "review finding: a pending file that cannot refer to the item (.py) forces a decision"]
+    fn a_pending_file_that_cannot_refer_to_the_item_does_not_make_its_uses_incomplete() {
+        let r = real(&[("analysis/run.py", b"x = 1\n")]);
+        r.graph.mark_pending(&[wp("analysis/run.py")]).unwrap();
+        assert_eq!(r.graph.status().coverage.pending, 1);
+        let plan = r.plan(&r.ops());
+        assert!(incomplete(&plan).is_empty(), "{:?}", plan.impacts);
+    }
+
+    /// A plan made while a file is pending says so; once the graph has read
+    /// the file, the plan is stale (the interface plans again and shows the
+    /// decision a second time).
+    #[test]
+    fn a_plan_made_while_a_file_is_pending_goes_stale_when_it_is_indexed() {
+        let r = real(&[]);
+        let ops = r.ops();
+        r.graph.mark_pending(&[wp("main.tex")]).unwrap();
+        let plan = r.plan(&ops);
+        let found = incomplete(&plan);
+        assert_eq!(found.len(), 1, "{:?}", plan.impacts);
+        assert!(found[0].message.contains("1 file is not indexed yet"), "{}", found[0].message);
+        r.graph.reconcile(&ReconcileOptions { scope: Scope::Paths(vec![wp("main.tex")]), force: false }).unwrap();
+        let applied = ops.apply(
+            &r.ws,
+            &r.data,
+            OpApply { plan: plan.plan.clone(), plan_hash: plan.plan_hash.clone(), choices: BTreeMap::new() },
+        );
+        assert_eq!(applied.unwrap_err().code, "ops.planStale");
+    }
+
+    /// FINDING (medium, under-warning): a file changed on disk that the
+    /// graph has not read yet but has not marked pending either — the state
+    /// of every file changed while the app was closed, until the full pass
+    /// that follows opening the project reaches it (the driver schedules
+    /// that pass without marking files pending; only the freshness says
+    /// Pending/Reconciling) — is not counted: here a new LaTeX file refers
+    /// to the lemma, and the plan lists no use and says nothing.
+    #[test]
+    #[ignore = "review finding: files not yet read after opening the project are neither listed nor counted"]
+    fn a_file_the_graph_has_not_read_since_opening_is_said() {
+        let r = real(&[]);
+        r.write("other.tex", b"See Lemma~\\ref{lem:a}.\n");
+        let plan = r.plan(&r.ops());
+        let listed =
+            plan.impacts.iter().any(|i| i.message.contains("refers to it") || i.message.contains("references it"));
+        assert!(
+            listed || !incomplete(&plan).is_empty(),
+            "the \\ref in other.tex is unknown and unsaid: {:?}",
+            plan.impacts
+        );
+    }
+}

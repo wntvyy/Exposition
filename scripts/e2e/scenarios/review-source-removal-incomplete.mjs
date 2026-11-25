@@ -7,6 +7,9 @@
 //     from the buffer as an unsaved edit, nothing written to disk.
 //  2. With that file gone, a declaration nothing uses is removed without a
 //     decision (a complete read raises no alarm).
+//  3. A LaTeX lemma referred to from a LaTeX file the graph could not index
+//     (Latin-1): the decision says that a file could not be indexed (its
+//     reference is not in the graph); Cancel changes nothing.
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +21,17 @@ import { invoke, waitFor } from "../workspace-helpers.mjs";
 const BASEL = "namespace LeanBasic\n\ntheorem basel : True := by\n  trivial\n\nend LeanBasic\n";
 const KEEP = "namespace LeanBasic\n\ntheorem keep : True := trivial\n\nend LeanBasic\n";
 const BROKEN = Buffer.from([0x74, 0x68, 0xff, 0xfe, 0x00, 0xc3, 0x28]);
+const MAIN_TEX = String.raw`\documentclass{article}
+\begin{document}
+
+\begin{lemma}\label{lem:a}
+A closed subset is compact.
+\end{lemma}
+
+\end{document}
+`;
+// Latin-1 (é as one byte): not UTF-8, so the graph cannot index it.
+const OTHER_TEX = Buffer.from(String.raw`Café: see Lemma~\ref{lem:a}.` + "\n", "latin1");
 
 async function entities(page) {
   return (await invoke(page, "graph_snapshot", { query: { kinds: null, text: null, around: null, includeInactive: true, limit: 500 } })).entities;
@@ -44,6 +58,8 @@ export default async function reviewSourceRemovalIncomplete({ launchApp, assert 
   await writeFile(join(root, "lean", "LeanBasic", "Basel.lean"), BASEL);
   await writeFile(join(root, "lean", "LeanBasic", "Keep.lean"), KEEP);
   await writeFile(join(root, "lean", "Broken.lean"), BROKEN);
+  await writeFile(join(root, "main.tex"), MAIN_TEX);
+  await writeFile(join(root, "other.tex"), OTHER_TEX);
   await mkdir(dataDir, { recursive: true });
 
   const app = await launchApp({ dataDir });
@@ -55,13 +71,14 @@ export default async function reviewSourceRemovalIncomplete({ launchApp, assert 
     await waitFor(
       async () => {
         const all = await entities(page);
-        return all.some((e) => e.key === "LeanBasic.basel") && all.some((e) => e.key === "LeanBasic.keep");
+        return all.some((e) => e.key === "LeanBasic.basel") && all.some((e) => e.key === "LeanBasic.keep") && all.some((e) => e.kind === "lemma");
       },
-      { timeout: 30_000, message: "both Lean declarations extracted" },
+      { timeout: 30_000, message: "both Lean declarations and the lemma extracted" },
     );
     const all = await entities(page);
     const basel = all.find((e) => e.key === "LeanBasic.basel");
     const keep = all.find((e) => e.key === "LeanBasic.keep");
+    const lemma = all.find((e) => e.kind === "lemma");
     const deleteFromSource = async (entity) => {
       await runCommand(page, "Show Mathematics", /Graph: Show Mathematics/);
       const item = page.locator(`[data-entity-id="${entity.id}"], .react-flow__node[data-id="${entity.id}"]`).first();
@@ -99,6 +116,18 @@ export default async function reviewSourceRemovalIncomplete({ launchApp, assert 
     const kept = await buffer(page, "lean/LeanBasic/Keep.lean");
     assert.ok(kept.dirty && !kept.text.includes("theorem keep"), kept.text);
     assert.equal(await readFile(join(root, "lean", "LeanBasic", "Keep.lean"), "utf8"), KEEP, "nothing written to disk");
+    await dismissNotifications(page);
+
+    // 3. A LaTeX file the graph could not index refers to the lemma: said.
+    assert.equal((await invoke(page, "graph_status")).coverage.failed, 1, "other.tex could not be indexed");
+    await deleteFromSource(lemma);
+    await decision(page).waitFor({ timeout: 15_000 });
+    const latex = await decision(page).locator('[data-testid="op-impact"][data-kind="sourceDependents"]').allTextContents();
+    assert.equal(latex.length, 1, JSON.stringify(latex));
+    assert.match(latex[0], /^Not every use of “.+” could be checked: 1 file could not be indexed\. Uses not listed here may break too; check the sources before you save\.$/);
+    await decision(page).getByRole("button", { name: "Cancel" }).click();
+    await decision(page).waitFor({ state: "detached", timeout: 10_000 });
+    assert.equal(await buffer(page, "main.tex"), null, "Cancel changes nothing");
 
     assert.deepEqual(consoleErrors(app), [], "no console errors");
   } finally {

@@ -3322,4 +3322,94 @@ mod query_bounds_review {
         assert_eq!(content["attributes"].as_object().map_or(0, |a| a.len()), 16, "{content}");
         assert_eq!(content["attributesTruncated"], json!(true), "{content}");
     }
+
+    /// The entity summary's flags are additive: absent while everything is
+    /// listed, exactly at the bounds (5 evidence records, 16 attributes),
+    /// and `true` one past them.
+    #[test]
+    fn summary_flags_are_absent_at_the_bound_and_true_past_it() {
+        for (n, flagged) in [(5u64, false), (6, true)] {
+            let f = fixture();
+            let (_, declaration, first) = lean_declaration_with_evidence(&f);
+            let t = template(&f, &first);
+            records(&f, &t, &declaration, EvidenceKind::Review, 2..n + 1);
+            let (result, _) = ask(&f, TaskScope::Workspace, &input("search", "", &["formalDeclaration"], ""));
+            let e = result["entities"].as_array().unwrap().iter().find(|e| e["id"] == json!(declaration)).unwrap();
+            assert_eq!(len(&e["evidence"]), 5, "{e}");
+            assert_eq!(e.get("evidenceTruncated").cloned(), flagged.then_some(json!(true)), "{n} records: {e}");
+        }
+        for (n, flagged) in [(16usize, false), (17, true)] {
+            let f = fixture();
+            let attributes: BTreeMap<String, String> = (0..n).map(|i| (format!("a{i:02}"), "x".to_owned())).collect();
+            let claim = apply_ops(
+                &f,
+                vec![GraphOperation::CreateEntity {
+                    temp_id: "attrs".into(),
+                    kind: EntityKind::Claim,
+                    roles: vec![],
+                    label: "Attributed claim".into(),
+                    key: None,
+                    attributes,
+                    binding: None,
+                }],
+            )["attrs"]
+                .clone();
+            let (result, _) = ask(&f, TaskScope::Workspace, &input("search", "Attributed", &["claim"], ""));
+            let e = result["entities"].as_array().unwrap().iter().find(|e| e["id"] == json!(claim)).unwrap();
+            assert_eq!(e["attributes"].as_object().map_or(0, |a| a.len()), 16, "{e}");
+            assert_eq!(e.get("attributesTruncated").cloned(), flagged.then_some(json!(true)), "{n} attributes: {e}");
+        }
+    }
+
+    /// The size bound with every large list at once: 20 own formal-check
+    /// records and 10 associated declarations with 5 each, all with
+    /// 2,000-character statements (about 160 KB before trimming). The
+    /// result is within 64 KiB, parses as JSON, and every list shorter than
+    /// what exists says so.
+    #[test]
+    fn the_size_bound_holds_with_large_own_and_formal_evidence_and_flags_every_cut() {
+        let f = fixture();
+        let (file, declaration, first) = lean_declaration_with_evidence(&f);
+        let mut t = template(&f, &first);
+        if let Some(formal) = t.formal.as_mut() {
+            formal.statement = "s".repeat(2000);
+        }
+        records(&f, &t, &f.ids.lemma, EvidenceKind::FormalCheck, 100..120);
+        let mut declarations = formalizing_declarations(&f, &file, 9);
+        apply_ops(&f, vec![relation(RelationKind::Formalizes, existing(&declaration), existing(&f.ids.lemma))]);
+        declarations.push(declaration);
+        for d in &declarations {
+            records(&f, &t, d, EvidenceKind::FormalCheck, 10..15);
+        }
+        let out = match gq::run(
+            GraphEnv { service: &f.graph, project: None },
+            &f.root,
+            &spec(&f, TaskScope::Workspace),
+            &input("entity", "", &[], f.ids.lemma.as_str()),
+        ) {
+            Ok(out) => out,
+            Err(out) => panic!("{}", out.content),
+        };
+        let text = serde_json::to_string(&out.content).unwrap();
+        let result: Value = serde_json::from_str(&text).expect("valid JSON");
+        let relations_total = f
+            .graph
+            .with_store(|s| Ok(s.relations_from(&f.ids.lemma)?.len() + s.relations_to(&f.ids.lemma)?.len()))
+            .unwrap();
+        let (formal, own, relations) =
+            (len(&result["formalEvidence"]), len(&result["evidence"]), len(&result["relations"]));
+        println!(
+            "{} bytes; formalEvidence {formal}/10, evidence {own}/20, relations {relations}/{relations_total}",
+            text.len()
+        );
+        assert!(text.len() <= RESULT_BYTES, "{} bytes", text.len());
+        assert_eq!(result["truncated"], json!(true));
+        assert_eq!(result["formalEvidenceTruncated"], json!(formal < 10), "{formal} of 10 listed");
+        assert_eq!(result["evidenceTruncated"], json!(own < 20), "{own} of 20 listed");
+        assert_eq!(
+            result["relationsTruncated"],
+            json!(relations < relations_total),
+            "{relations} of {relations_total}"
+        );
+    }
 }
