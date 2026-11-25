@@ -1220,10 +1220,6 @@ fn listed_ids(pages: &[RunHistoryPage]) -> BTreeSet<String> {
 /// fresh service lists it. This is the repair the earlier review named ("a
 /// copy back from a backup with times preserved").
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "review finding: on Windows a record repaired by copying a backup over it (CopyFile, as copy, Copy-Item, robocopy and Explorer do) keeps its stamp and stays unlisted until the project is opened again"
-)]
 fn review_a_damaged_record_repaired_by_copying_a_backup_over_it_is_listed_again() {
     for damage_by_replacing in [false, true] {
         let f = fixture();
