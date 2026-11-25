@@ -47,6 +47,8 @@ pub const CHOICE_PROOFS: &str = "proofs";
 const MAX_LEAN_FILES: usize = 2000;
 /// Consumers named per impact.
 const MAX_CONSUMERS: usize = 25;
+/// Relationships to an item the graph's detail read returns at most.
+const MAX_RELATIONS_READ: usize = exposition_graph::store::MAX_ROWS;
 
 fn quoted(s: &str) -> String {
     format!("“{s}”")
@@ -208,6 +210,8 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
         })
         .collect();
     let mut texts = Texts::new(ws);
+    // How far the graph has indexed the project (read once, when needed).
+    let mut coverage: Option<exposition_graph::model::CoverageSummary> = None;
     // Lean declarations whose name mentions are looked up after every removal is known.
     let mut lean: Vec<(usize, String)> = Vec::new();
     let mut proofs_found = false;
@@ -270,12 +274,23 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
         let mut users: Vec<(OpConsumer, String)> = Vec::new();
         let neighbors: HashMap<&str, &exposition_graph::model::Entity> =
             detail.neighbors.iter().map(|n| (n.id.as_str(), n)).collect();
+        // What the read of the relationships TO it may have left out: more
+        // of them than it reads (it stopped at its bound), or an item that
+        // uses it beyond the neighbors it lists. Items it uses itself
+        // (outgoing) never use it.
+        let mut unread_users = detail.relations_truncated && detail.incoming.len() >= MAX_RELATIONS_READ;
         for r in &detail.incoming {
             let from = r.from.as_str();
             if r.status == AssertionStatus::Rejected || selected.contains(from) {
                 continue;
             }
-            let Some(n) = neighbors.get(from).filter(|n| n.lifecycle == Lifecycle::Active) else { continue };
+            let Some(n) = neighbors.get(from) else {
+                unread_users |= detail.neighbors_truncated && (r.kind == RelationKind::ProofOf || uses_target(r.kind));
+                continue;
+            };
+            if n.lifecycle != Lifecycle::Active {
+                continue;
+            }
             if r.kind == RelationKind::ProofOf {
                 let located = data.entity_detail(from).and_then(|pd| {
                     let b = declaration_binding(&pd).ok()?.clone();
@@ -359,10 +374,22 @@ pub fn plan(ws: &WorkspaceService, data: &dyn DataSide, request: &OpRequest, del
         {
             lean.push((out.removals.len(), name.clone()));
         }
-        // The read of its relationships was bounded: what it left out may use it.
         let mut unseen = Vec::new();
-        if detail.relations_truncated || detail.neighbors_truncated {
+        if unread_users {
             unseen.push("it has more relationships than this plan reads".to_owned());
+        }
+        // Its uses come from the files the graph has indexed; a Lean
+        // declaration's are searched in the Lean files themselves (below).
+        let lean_item =
+            matches!(&binding.selector, SourceSelector::Declaration { syntax, .. } if syntax.starts_with("lean."));
+        if !lean_item {
+            let coverage = coverage.get_or_insert_with(|| data.coverage());
+            if coverage.pending > 0 {
+                unseen.push(format!("{} not indexed yet", plural_is(coverage.pending, "file", "files")));
+            }
+            if coverage.failed > 0 {
+                unseen.push(format!("{} could not be indexed", plural(coverage.failed as usize, "file", "files")));
+            }
         }
         out.effects.push(OpEffect {
             target: target.clone(),
@@ -483,6 +510,11 @@ fn some_of(names: &[String]) -> String {
 
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// `1 file is` / `2 files are`.
+fn plural_is(n: u32, one: &str, many: &str) -> String {
+    if n == 1 { format!("1 {one} is") } else { format!("{n} {many} are") }
 }
 
 /// Literal mentions of removed Lean declarations elsewhere in the project's

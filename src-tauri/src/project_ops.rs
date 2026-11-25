@@ -79,6 +79,10 @@ pub trait DataSide {
     /// A graph entity with its bindings and relations (`None`: unknown, or no
     /// graph). The source side uses it for items declared in a source.
     fn entity_detail(&self, entity: &str) -> Option<EntityDetail>;
+    /// How far the graph has indexed the project's files (pending: waiting
+    /// to be read; failed: could not be read). The source side says that
+    /// uses in such files are not known.
+    fn coverage(&self) -> exposition_graph::model::CoverageSummary;
 }
 
 /// The application's data side.
@@ -109,6 +113,9 @@ impl DataSide for AppData<'_> {
     fn entity_detail(&self, entity: &str) -> Option<EntityDetail> {
         let id = exposition_graph::ids::EntityId::parse(entity).ok()?;
         self.0.graph.entity_detail(&id).ok()
+    }
+    fn coverage(&self) -> exposition_graph::model::CoverageSummary {
+        self.0.graph.status().coverage
     }
 }
 

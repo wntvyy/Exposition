@@ -64,6 +64,8 @@ struct FakeData {
     data_restores: Mutex<Vec<String>>,
     /// Graph entities the source side asks about.
     details: Vec<exposition_graph::model::EntityDetail>,
+    /// Extraction coverage of the project's files (what the graph has indexed).
+    coverage: exposition_graph::model::CoverageSummary,
 }
 
 fn wp(s: &str) -> WorkspacePath {
@@ -146,6 +148,9 @@ impl DataSide for FakeData {
     }
     fn entity_detail(&self, entity: &str) -> Option<exposition_graph::model::EntityDetail> {
         self.details.iter().find(|d| d.entity.id.as_str() == entity).cloned()
+    }
+    fn coverage(&self) -> exposition_graph::model::CoverageSummary {
+        self.coverage.clone()
     }
     fn after_paths(&self, outcomes: &[OpOutcome]) {
         self.after.lock().unwrap().push(outcomes.to_vec());
@@ -1417,8 +1422,9 @@ fn a_removal_planned_from_an_incomplete_read_of_its_uses_says_so() {
     for (relations_truncated, neighbors_truncated) in [(false, true), (true, false)] {
         let mut d = detail(theorem.clone(), vec![thm_binding.clone()], vec![depends.clone()], Vec::new());
         if relations_truncated {
-            // The relation itself was not read.
-            d.incoming.clear();
+            // The read of the relationships TO it stopped at its bound: more
+            // may exist than were read.
+            d.incoming = vec![depends.clone(); exposition_graph::store::MAX_ROWS];
         }
         d.relations_truncated = relations_truncated;
         d.neighbors_truncated = neighbors_truncated;
@@ -1432,6 +1438,43 @@ fn a_removal_planned_from_an_incomplete_read_of_its_uses_says_so() {
         assert_eq!(incomplete.len(), 1, "{case}: {:?}", plan.impacts);
         assert_eq!(incomplete[0].kind, ImpactKind::SourceDependents);
         assert!(incomplete[0].message.contains("more relationships than this plan reads"), "{}", incomplete[0].message);
+    }
+}
+
+/// The uses of an item come from the graph's relations as of the files it
+/// has indexed: files it has not indexed yet (pending) or could not index
+/// (failed) may use the item too, so the plan says so; with every file
+/// indexed it does not.
+#[test]
+fn files_the_graph_has_not_indexed_make_the_list_of_uses_incomplete() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let p = paper(&fx);
+    let complete = ops.plan(&fx.ws, &p.data, delete(&[&p.theorem], false, OpActor::User)).unwrap();
+    assert!(
+        complete.impacts.iter().all(|i| !i.message.starts_with("Not every use of")),
+        "every file indexed: {:?}",
+        complete.impacts
+    );
+    for (pending, failed, reason) in [
+        (2, 0, "2 files are not indexed yet"),
+        (0, 1, "1 file could not be indexed"),
+        (1, 3, "1 file is not indexed yet; 3 files could not be indexed"),
+    ] {
+        let mut data = FakeData { details: p.data.details.clone(), ..FakeData::default() };
+        data.coverage = exposition_graph::model::CoverageSummary { pending, failed, ..Default::default() };
+        let plan = ops.plan(&fx.ws, &data, delete(&[&p.theorem], false, OpActor::User)).unwrap();
+        let incomplete: Vec<&OpImpact> =
+            plan.impacts.iter().filter(|i| i.message.starts_with("Not every use of “Theorem thm:main”")).collect();
+        assert_eq!(incomplete.len(), 1, "{reason}: {:?}", plan.impacts);
+        assert_eq!(
+            incomplete[0].message,
+            format!(
+                "Not every use of “Theorem thm:main” could be checked: {reason}. Uses not listed here may break \
+                 too; check the sources before you save."
+            )
+        );
+        assert!(plan.needs_decision);
     }
 }
 
@@ -1655,7 +1698,6 @@ mod incomplete_uses_review {
     /// when those were only items the removed item itself uses (outgoing):
     /// every relationship TO it was read and its item is known.
     #[test]
-    #[ignore = "review finding: neighbors_truncated from outgoing relations alone makes a complete plan read as incomplete"]
     fn neighbors_left_out_only_on_the_outgoing_side_do_not_make_the_uses_incomplete() {
         use exposition_graph::model::AssertionStatus;
         use exposition_graph::vocabulary::RelationKind;
