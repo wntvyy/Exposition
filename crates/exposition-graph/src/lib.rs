@@ -67,7 +67,7 @@ pub use model::*;
 pub use ops::*;
 pub use outline::{DocumentOutline, OutlineItem, OutlineItemKind, document_outline};
 pub use query::*;
-pub use service::{GraphConfig, GraphError, GraphResult, GraphService, is_graph_storage};
+pub use service::{GraphConfig, GraphError, GraphResult, GraphService, SessionIndexCheck, is_graph_storage};
 pub use validate::{BatchOutcome, BatchRef, EntityUpsert, RelationUpsert, ServiceBatch};
 pub use vocabulary::{
     EntityFamily, EntityKind, EvidenceKind, RelationFamily, RelationKind, ResourceRole, Vocabulary, vocabulary,

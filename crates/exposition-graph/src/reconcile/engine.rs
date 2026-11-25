@@ -231,7 +231,11 @@ impl ProjectIndex {
         out
     }
 
-    pub(crate) fn load(&mut self, store: &GraphStore) -> StoreResult<()> {
+    /// The index as the store holds it (one read of every stored index
+    /// record and awaited-target list). Marked loaded only when both reads
+    /// succeeded: a failed read leaves nothing that could pass for an index
+    /// with no labels.
+    pub(crate) fn read(store: &GraphStore) -> StoreResult<ProjectIndex> {
         #[derive(Deserialize)]
         struct Labels {
             extraction: LabelsOnly,
@@ -243,16 +247,17 @@ impl ProjectIndex {
             #[serde(default)]
             labels: Vec<String>,
         }
-        *self = ProjectIndex { loaded: true, ..Default::default() };
+        let mut index = ProjectIndex::default();
         for record in store.all_source_index()? {
             if let Ok(body) = serde_json::from_str::<Labels>(&record.body) {
-                self.set(&record.path, &body.extraction.labels, body.latex_main);
+                index.set(&record.path, &body.extraction.labels, body.latex_main);
             }
         }
         for (path, wanted) in store.index_wanted()? {
-            self.set_wanted(&path, &wanted);
+            index.set_wanted(&path, &wanted);
         }
-        Ok(())
+        index.loaded = true;
+        Ok(index)
     }
 }
 
@@ -269,14 +274,15 @@ pub(crate) struct ReconcileState {
 impl ReconcileState {
     /// The session's index of `root`, read from the store the first time
     /// anything in this session needs it (a pass or an overlay), so that
-    /// every reader sees the labels and main files a fresh index has.
+    /// every reader sees the labels and main files a fresh index has. A read
+    /// that fails leaves it unread: the next reader reads it again.
     pub(crate) fn index_of(&mut self, root: &Path, store: &GraphStore) -> StoreResult<&ProjectIndex> {
         if self.root.as_deref() != Some(root) {
             self.root = Some(root.to_path_buf());
             self.index = ProjectIndex::default();
         }
         if !self.index.loaded {
-            self.index.load(store)?;
+            self.index = ProjectIndex::read(store)?;
         }
         Ok(&self.index)
     }
@@ -461,6 +467,9 @@ pub(crate) fn run_locked(
     report.extracted = fresh.values().filter(|f| f.extraction.is_some()).count() as u32;
     report.truncated = scan_out.truncated.clone();
     report.duration_ms = started.elapsed().as_millis() as u64;
+    // Counted before any event of the pass: the driver computes the overlays
+    // of open buffers again after passes it did not run.
+    graph.count_pass_written();
     if !plan.delta.is_empty() {
         graph.emit_event(GraphEvent::Changed {
             delta: plan.delta.clone(),
@@ -2190,9 +2199,12 @@ impl<'a> Planner<'a> {
         let mut index_updates = Vec::new();
         for (path, body) in &self.index_records {
             let (hash, extractor) = self.index_hashes.get(path).cloned().unwrap_or_default();
-            if let Some(json) = bounded_index_json(body) {
-                index.push(IndexRecord { path: path.clone(), content_hash: hash, extractor, body: json });
-                index_updates.push((path.clone(), Some((body.extraction.labels.clone(), body.latex_main))));
+            if let Some(stored) = bounded_index_json(body) {
+                index.push(IndexRecord { path: path.clone(), content_hash: hash, extractor, body: stored.json });
+                // The session's index holds what the stored record holds (a
+                // fresh index is read from it): no label it dropped.
+                let labels = if stored.labels { body.extraction.labels.clone() } else { Vec::new() };
+                index_updates.push((path.clone(), Some((labels, body.latex_main))));
             }
         }
         for p in &self.remove_index {
@@ -2224,10 +2236,17 @@ impl<'a> Planner<'a> {
     }
 }
 
+/// A file's index as it is stored.
+struct BoundedIndex {
+    json: String,
+    /// The stored record keeps the file's labels.
+    labels: bool,
+}
+
 /// A file's stored index, kept within the bound the validated open enforces:
 /// a huge extraction keeps its declarations and drops what can be rebuilt
 /// by re-reading the file (links, then labels).
-fn bounded_index_json(body: &IndexBody) -> Option<String> {
+fn bounded_index_json(body: &IndexBody) -> Option<BoundedIndex> {
     // Headings are outline navigation only: never stored with the graph's
     // index, so they can never crowd out links or labels within the bound.
     let mut reduced = body.clone();
@@ -2235,16 +2254,16 @@ fn bounded_index_json(body: &IndexBody) -> Option<String> {
     reduced.extraction.heading_partial.clear();
     let json = serde_json::to_string(&reduced).ok()?;
     if json.len() <= crate::store::MAX_INDEX_BODY {
-        return Some(json);
+        return Some(BoundedIndex { json, labels: true });
     }
     reduced.extraction.links.clear();
     let json = serde_json::to_string(&reduced).ok()?;
     if json.len() <= crate::store::MAX_INDEX_BODY {
-        return Some(json);
+        return Some(BoundedIndex { json, labels: true });
     }
     reduced.extraction.labels.clear();
     let json = serde_json::to_string(&reduced).ok()?;
-    (json.len() <= crate::store::MAX_INDEX_BODY).then_some(json)
+    (json.len() <= crate::store::MAX_INDEX_BODY).then_some(BoundedIndex { json, labels: false })
 }
 
 /// The key under which a file waits for a link target (see `wanted`).
@@ -2488,7 +2507,7 @@ mod tests {
         let extraction = extract::extract(&path, text).unwrap();
         assert!(!extraction.headings.is_empty(), "the extractor saw the headings");
         let body = IndexBody { extraction, ids: vec![], latex_main: false };
-        let json = bounded_index_json(&body).unwrap();
+        let json = bounded_index_json(&body).unwrap().json;
         assert!(!json.contains("\"headings\""), "{json}");
         let stored: IndexBody = serde_json::from_str(&json).unwrap();
         assert!(stored.extraction.headings.is_empty());

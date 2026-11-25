@@ -13,7 +13,14 @@
 //! record, and the overlay of every unsaved buffer. The status counts are
 //! compared with the tables at every step, and the session's index of
 //! labels, LaTeX main files and awaited targets (a cache of the stored
-//! index that passes and overlays read) with a fresh read of the store.
+//! index that passes and overlays read) with a fresh read of the store (a
+//! comparison not made while the session has read that index is a finding).
+//! A second random stream, which leaves the operation sequence of a seed as
+//! it is, reattaches the project now and then and sometimes runs a step's
+//! pass the way a pass started elsewhere runs (`reconcile_after`, from
+//! another thread's point of view) while the overlays of the unsaved buffers
+//! are asked for: they are deferred, asked for again as the driver does, and
+//! must equal the overlays computed right after the pass.
 //!
 //! Environment (all optional; the defaults are the fast fixed run):
 //! - `EXPOSITION_DIFF_SEEDS`: `a..b` or a comma list of seeds.
@@ -38,6 +45,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use exposition_core::path::WorkspacePath;
 use exposition_graph::reconcile::{ReconcileOptions, Scope, overlay};
@@ -573,11 +581,25 @@ fn overlay_text(entry: &overlay::OverlayEntry) -> String {
     format!("O {v}")
 }
 
+/// The line of an unsaved buffer's overlay (or of its absence).
+fn overlay_line(path: &str, entry: Option<&overlay::OverlayEntry>) -> String {
+    match entry {
+        Some(entry) => overlay_text(entry),
+        None => format!("O {{\"overlay\":\"{path}\",\"none\":true}}"),
+    }
+}
+
 // ----- the run -----
 
 struct Run {
     seed: u64,
     rng: Rng,
+    /// Decisions this test adds to a seed's sequence (reattaching, a pass
+    /// held while overlays are asked for), drawn apart so the operations of
+    /// a seed stay what they were.
+    side: Rng,
+    /// Something read the session's index since the project was attached.
+    index_read: bool,
     a: Project,
     /// Files on disk (workspace-relative).
     files: BTreeSet<String>,
@@ -774,6 +796,79 @@ impl Run {
         vec![]
     }
 
+    /// Close and reopen the project (a new connection and session index).
+    fn reattach(&mut self) {
+        self.a.svc.detach();
+        let status = self.a.svc.attach(&self.a.root);
+        assert!(matches!(status.state, GraphState::Attached), "{status:?}");
+        self.index_read = false;
+        self.count("reattach");
+    }
+
+    /// One pass run the way a pass started elsewhere runs (`reconcile_after`
+    /// on this thread) while another thread asks for the overlay of every
+    /// unsaved buffer, as the driver does: deferred while the pass holds the
+    /// session's index, asked for again until it is over. Those overlays must
+    /// be the ones computed right after the pass.
+    fn pass_while_overlays_wait(&mut self, step: usize, scope: Scope) {
+        let svc = self.a.svc.clone();
+        let buffers = self.overlays.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let ((waited, deferred), report) = std::thread::scope(|s| {
+            let (handle, report) = svc.reconcile_after(|| {
+                let handle = s.spawn(|| {
+                    let mut first = Some(tx);
+                    let mut deferred = 0u32;
+                    let mut lines = Vec::new();
+                    for (path, (revision, text)) in &buffers {
+                        let deadline = Instant::now() + Duration::from_secs(300);
+                        let entry = loop {
+                            match overlay::compute(&svc, &wp(path), *revision, text) {
+                                Err(e) if overlay::is_deferred(&e) => {
+                                    deferred += 1;
+                                    if let Some(tx) = first.take() {
+                                        let _ = tx.send(());
+                                    }
+                                    assert!(Instant::now() < deadline, "the overlay of {path} stays deferred");
+                                    std::thread::sleep(Duration::from_millis(1));
+                                }
+                                other => break other.unwrap(),
+                            }
+                        };
+                        lines.push(overlay_line(path, entry.as_ref()));
+                    }
+                    (lines, deferred)
+                });
+                // Held until the first overlay was deferred.
+                let _ = rx.recv();
+                (handle, Some(ReconcileOptions { scope, force: false }))
+            });
+            (handle.join().unwrap(), report)
+        });
+        report.expect("a pass ran").unwrap();
+        self.count("overlay-during-pass");
+        if deferred == 0 {
+            self.finding(step, "an overlay asked for while a pass held the session's index was not deferred".into());
+        }
+        let after: Vec<String> = buffers
+            .iter()
+            .map(|(path, (revision, text))| {
+                overlay_line(path, overlay::compute(&svc, &wp(path), *revision, text).unwrap().as_ref())
+            })
+            .collect();
+        if waited != after {
+            let mut text = String::from(
+                "an overlay asked for during a pass started elsewhere differs from the overlay after it\n",
+            );
+            for (x, y) in waited.iter().zip(&after) {
+                if x != y {
+                    text.push_str(&format!("  waited: {}\n  after:  {}\n", clip(x), clip(y)));
+                }
+            }
+            self.finding(step, text);
+        }
+    }
+
     /// Save or discard an unsaved buffer.
     fn settle_overlay(&mut self, touched: &mut BTreeSet<String>) -> Vec<String> {
         let Some(path) = self.overlays.keys().next().cloned() else { return vec![] };
@@ -937,7 +1032,12 @@ impl Run {
                 self.count(if wps.len() > 16 { "pass-many-paths" } else { "pass-scoped" });
                 Scope::Paths(wps)
             };
-            svc.reconcile(&ReconcileOptions { scope, force: false }).unwrap();
+            if !self.overlays.is_empty() && self.side.chance(25) {
+                self.pass_while_overlays_wait(step, scope);
+            } else {
+                svc.reconcile(&ReconcileOptions { scope, force: false }).unwrap();
+            }
+            self.index_read = true;
             self.check_status(step, "after the pass");
         }
     }
@@ -969,7 +1069,9 @@ impl Run {
     /// Compare with a copy of the database after a forced full reindex.
     fn check_against_full(&mut self, step: usize) {
         let svc = self.a.svc.clone();
-        // Unsaved buffers, recomputed as the driver does after a pass.
+        // Unsaved buffers, recomputed as the driver does after a pass (each
+        // computation reads the session's index if nothing has yet).
+        self.index_read |= !self.overlays.is_empty();
         let mut overlays_a: Vec<String> = Vec::new();
         for (path, (revision, text)) in &self.overlays {
             match overlay::compute(&svc, &wp(path), *revision, text).unwrap() {
@@ -983,11 +1085,20 @@ impl Run {
                 }
             }
         }
-        // The session's index (a cache of the stored one) against a fresh read.
-        if let Some(drift) = svc.session_index_drift().unwrap()
-            && !drift.is_empty()
-        {
-            self.finding(step, format!("the session's index differs from the stored index\n  {}", drift.join("\n  ")));
+        // The session's index (a cache of the stored one) against a fresh
+        // read; not compared only when nothing has read it in this session.
+        match svc.session_index_drift().unwrap() {
+            SessionIndexCheck::Compared(drift) => {
+                self.count("index-compared");
+                if !drift.is_empty() {
+                    let text = format!("the session's index differs from the stored index\n  {}", drift.join("\n  "));
+                    self.finding(step, text);
+                }
+            }
+            SessionIndexCheck::NotRead if !self.index_read => self.count("index-not-read"),
+            other => {
+                self.finding(step, format!("the session's index was not compared ({other:?}) although it was read"));
+            }
         }
         let incremental = records(&svc, false);
         let pending: Vec<&String> =
@@ -1046,7 +1157,7 @@ fn clip(line: &str) -> String {
 }
 
 impl Run {
-    fn run(seed: u64, steps: usize) -> Vec<String> {
+    fn run(seed: u64, steps: usize) -> (Vec<String>, BTreeMap<&'static str, u32>) {
         let soft = std::env::var_os("EXPOSITION_DIFF_SOFT").is_some();
         let out_dir = std::env::var_os("EXPOSITION_DIFF_OUT").map(PathBuf::from);
         let full_at: Option<(u64, usize)> = std::env::var("EXPOSITION_DIFF_FULL").ok().and_then(|v| {
@@ -1056,6 +1167,8 @@ impl Run {
         let mut run = Run {
             seed,
             rng: Rng::new(seed),
+            side: Rng::new(seed ^ 0xA5A5_5A5A_0F0F_F0F0),
+            index_read: false,
             a: open(None),
             files: BTreeSet::new(),
             counter: 0,
@@ -1078,6 +1191,7 @@ impl Run {
             run.write(&path, &text);
         }
         run.a.svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: false }).unwrap();
+        run.index_read = true;
         for step in 0..steps {
             let before_resources = resources(&run.a.svc);
             let before_bound = bound(&run.a.svc);
@@ -1100,19 +1214,19 @@ impl Run {
                 events.extend(run.settle_overlay(&mut touched));
             }
             match roll {
-                93..=94 => {
-                    // Close and reopen the project (a new connection and session index).
-                    run.a.svc.detach();
-                    let status = run.a.svc.attach(&run.a.root);
-                    assert!(matches!(status.state, GraphState::Attached), "{status:?}");
-                    run.count("reattach");
-                }
+                93..=94 => run.reattach(),
                 95..=96 => {
                     run.a.svc.reconcile(&ReconcileOptions { scope: Scope::Full, force: false }).unwrap();
+                    run.index_read = true;
                     run.count("full-pass");
                 }
                 97..=99 => run.curate(),
                 _ => {}
+            }
+            if run.side.chance(4) {
+                // A new session: its first reader may be an overlay asked
+                // for while the step's pass holds its index.
+                run.reattach();
             }
             if std::env::var_os("EXPOSITION_DIFF_TRACE").is_some() {
                 eprintln!("TRACE seed {seed} step {step}: events {events:?}; touched {touched:?}");
@@ -1197,7 +1311,7 @@ impl Run {
             run.stats
         );
         run.a.svc.detach();
-        std::mem::take(&mut run.findings)
+        (std::mem::take(&mut run.findings), std::mem::take(&mut run.stats))
     }
 }
 
@@ -1218,8 +1332,25 @@ fn steps() -> usize {
 #[test]
 fn incremental_passes_leave_the_graph_a_forced_full_reindex_leaves() {
     let mut findings = Vec::new();
+    let mut totals: BTreeMap<&'static str, u32> = BTreeMap::new();
+    let mut steps_run = 0;
     for seed in seeds() {
-        findings.extend(Run::run(seed, steps()));
+        let (found, stats) = Run::run(seed, steps());
+        findings.extend(found);
+        for (what, n) in stats {
+            *totals.entry(what).or_default() += n;
+        }
+        steps_run += steps();
     }
     assert!(findings.is_empty(), "{} findings:\n{}", findings.len(), findings.join("\n"));
+    // The checks were made, and the sequences reached the cases they exist for.
+    assert!(
+        totals.get("index-compared").copied().unwrap_or(0) > 0,
+        "the session's index was never compared: {totals:?}"
+    );
+    if steps_run >= 100 {
+        for what in ["reattach", "overlay-during-pass"] {
+            assert!(totals.get(what).copied().unwrap_or(0) > 0, "no {what} in {steps_run} steps: {totals:?}");
+        }
+    }
 }

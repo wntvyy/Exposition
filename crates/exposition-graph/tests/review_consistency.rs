@@ -184,9 +184,12 @@ impl Project {
         let overlays_b = self.overlays(&b.svc);
         b.svc.detach();
         let mut out = Vec::new();
-        // The session's index (a cache of the stored one) against a fresh read.
-        for d in self.svc.session_index_drift().unwrap().unwrap_or_default() {
-            out.push(format!("session index: {d}"));
+        // The session's index (a cache of the stored one) against a fresh
+        // read. Every check here follows a pass or an overlay, so the session
+        // has read it: a comparison not made is a difference too.
+        match self.svc.session_index_drift().unwrap() {
+            SessionIndexCheck::Compared(drift) => out.extend(drift.iter().map(|d| format!("session index: {d}"))),
+            other => out.push(format!("session index not compared: {other:?}")),
         }
         let a: BTreeSet<&String> = incremental.iter().collect();
         let f: BTreeSet<&String> = full.iter().collect();

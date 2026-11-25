@@ -6,20 +6,24 @@
 //!
 //! A pass "started elsewhere" is simulated deterministically: this thread
 //! holds the reconciliation state through `reconcile_after` (as a rename
-//! from an IPC thread does) while another thread computes the overlay.
+//! from an IPC thread does) while another thread asks for the overlay. An
+//! overlay asked for meanwhile is deferred (`overlay::DEFERRED`) and asked
+//! for again until the pass is over, as the driver does (`requeued`); the
+//! tests compare what it then resolves to.
 //!
-//! Tests that fail on the reviewed change are `#[ignore = "review finding:
-//! ..."]`.
+//! Every finding is fixed and every test but the benchmark is enabled.
 
 #![allow(unsafe_code)]
 
 mod support;
 
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use exposition_core::path::WorkspacePath;
-use exposition_graph::reconcile::{ReconcileOptions, Scope, overlay};
+use exposition_graph::reconcile::{ReconcileOptions, ReconcileReport, Scope, overlay};
 use exposition_graph::*;
 use support::{EDITED_FILE, Scale, SqlWork, count_sql, generate, take};
 
@@ -68,11 +72,43 @@ fn reattach(svc: &GraphService, root: &Path) {
     attach(svc, root);
 }
 
+thread_local! {
+    /// Told when an overlay asked for on this thread is first deferred (see
+    /// `during_a_pass_with`).
+    static ON_DEFERRAL: RefCell<Option<std::sync::mpsc::Sender<()>>> = const { RefCell::new(None) };
+    /// Overlays deferred on this thread.
+    static DEFERRALS: Cell<u32> = const { Cell::new(0) };
+    /// Time spent in `overlay::compute` on this thread (not waiting).
+    static COMPUTING: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+}
+
+/// The overlay as the driver gets it: computed now or, while a pass holds
+/// the session's index, deferred and asked for again until the pass is over.
+fn requeued(svc: &GraphService, path: &str, revision: u64, text: &str) -> Option<overlay::OverlayEntry> {
+    let deadline = Instant::now() + Duration::from_secs(300);
+    loop {
+        let started = Instant::now();
+        let result = overlay::compute(svc, &wp(path), revision, text);
+        COMPUTING.with(|c| c.set(c.get() + started.elapsed()));
+        match result {
+            Err(e) if overlay::is_deferred(&e) => {
+                DEFERRALS.with(|d| d.set(d.get() + 1));
+                if let Some(tx) = ON_DEFERRAL.with(|slot| slot.borrow_mut().take()) {
+                    let _ = tx.send(());
+                }
+                assert!(Instant::now() < deadline, "the overlay of {path} stays deferred");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            other => return other.unwrap(),
+        }
+    }
+}
+
 /// What an overlay says about the buffer's links: the coverage (unresolved
 /// count and the plain-words detail) and the relations it adds, by kind and
 /// target id (the ids of one database are stable across its sessions).
 fn summary(svc: &GraphService, path: &str, text: &str) -> String {
-    let entry = overlay::compute(svc, &wp(path), 7, text).unwrap().expect("a known resource");
+    let entry = requeued(svc, path, 7, text).expect("a known resource");
     summarize(&entry)
 }
 
@@ -84,9 +120,41 @@ fn summarize(entry: &overlay::OverlayEntry) -> String {
 }
 
 /// Run `f` on another thread while this thread holds the reconciliation
-/// state, as a pass started elsewhere (a rename, an applied proposal) does.
+/// state, as a pass started elsewhere (a rename, an applied proposal) does:
+/// `change` runs first under the hold, then `f` starts; the hold ends (with
+/// the pass `options`, if any) once an overlay `f` asked for was deferred.
+/// `f` gets its overlays as the driver does (`requeued`): computed once the
+/// pass is over. Returns what `f` returned and the report of the pass.
+fn during_a_pass_with<T: Send>(
+    svc: &GraphService,
+    change: impl FnOnce(),
+    options: Option<ReconcileOptions>,
+    f: impl FnOnce() -> T + Send,
+) -> (T, Option<GraphResult<ReconcileReport>>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|s| {
+        let (handle, report) = svc.reconcile_after(|| {
+            change();
+            let handle = s.spawn(move || {
+                ON_DEFERRAL.with(|slot| *slot.borrow_mut() = Some(tx));
+                let before = DEFERRALS.with(Cell::get);
+                let out = f();
+                ON_DEFERRAL.with(|slot| slot.borrow_mut().take());
+                (out, DEFERRALS.with(Cell::get) - before)
+            });
+            // Held until the thread's first overlay was deferred (or the
+            // thread ended without one).
+            let _ = rx.recv();
+            (handle, options)
+        });
+        let (out, deferred) = handle.join().unwrap();
+        assert!(deferred > 0, "an overlay asked for while a pass holds the session's index is deferred");
+        (out, report)
+    })
+}
+
 fn during_a_pass<T: Send>(svc: &GraphService, f: impl FnOnce() -> T + Send) -> T {
-    let (out, report) = svc.reconcile_after(|| (std::thread::scope(|s| s.spawn(f).join().unwrap()), None));
+    let (out, report) = during_a_pass_with(svc, || {}, None, f);
     assert!(report.is_none());
     out
 }
@@ -122,10 +190,10 @@ fn both(svc: &GraphService) -> (String, String) {
 
 // ----- correctness: the paths the change adds -----
 
-/// While a pass started elsewhere holds the session's index, an overlay
-/// reads its own copy: the same result as in the session that indexed the
-/// project, in that session and in a new one. (Passes on the change; on the
-/// base the overlay resolved against an empty index.)
+/// While a pass started elsewhere holds the session's index, an overlay is
+/// deferred, then computed once the pass is over: the same result as in the
+/// session that indexed the project, in that session and in a new one. (On
+/// the base the overlay resolved against an empty index.)
 #[test]
 fn an_overlay_during_a_pass_started_elsewhere_resolves_as_a_fresh_index_does() {
     let p = labelled_project("project");
@@ -183,11 +251,12 @@ fn an_overlay_after_a_project_switch_sees_none_of_the_previous_projects_labels()
     attach(&svc, &a.root);
     full(&svc);
     // The switch happens while this thread holds A's reconciliation state.
-    let (held, report) = svc.reconcile_after(|| {
-        attach(&svc, &b.root);
-        let held = std::thread::scope(|s| s.spawn(|| in_b(&svc)).join().unwrap());
-        (held, Some(ReconcileOptions { scope: Scope::Paths(vec![wp("notes/b.tex")]), force: true }))
-    });
+    let (held, report) = during_a_pass_with(
+        &svc,
+        || attach(&svc, &b.root),
+        Some(ReconcileOptions { scope: Scope::Paths(vec![wp("notes/b.tex")]), force: true }),
+        || in_b(&svc),
+    );
     assert_eq!(held, expected, "switched while a pass of A's session held the state");
     report.expect("a pass ran").expect("the pass started in A's session runs on B");
     assert_eq!(in_b(&svc), expected, "after that pass");
@@ -195,18 +264,16 @@ fn an_overlay_after_a_project_switch_sees_none_of_the_previous_projects_labels()
 
 // ----- correctness: the session's index as a cache of the stored one -----
 
-/// A read of the stored index that fails leaves the session's index marked
-/// as read and empty: every later overlay and pass of the session resolves
-/// against no labels, although a fresh index (after the store reads again)
-/// has them; on the change the pass right after the failed overlay succeeds
-/// and stores `sec:intro` as unresolved. Rule 5 of docs/performance.md:
-/// "not loaded" must never read as "none". The read failure is injected by
+/// A read of the stored index that fails must not leave the session's index
+/// marked as read and empty (every later overlay and pass of the session
+/// would resolve against no labels, although a fresh index, after the store
+/// reads again, has them; the pass right after the failed overlay would
+/// store `sec:intro` as unresolved). Rule 5 of docs/performance.md: "not
+/// loaded" must never read as "none". The read failure is injected by
 /// damaging one stored index row and repairing it (a transient store error
-/// has the same effect). Pre-existing for passes (`ProjectIndex::load` sets
-/// `loaded` before it reads); the change makes an overlay a reader that can
-/// fail first.
+/// has the same effect). The index is marked read only after both reads
+/// succeeded.
 #[test]
-#[ignore = "review finding: a failed read of the stored index is kept as an empty session index"]
 fn a_failed_read_of_the_index_is_not_kept_as_the_sessions_index() {
     let p = labelled_project("project");
     let (_data, svc) = service();
@@ -234,15 +301,12 @@ fn a_failed_read_of_the_index_is_not_kept_as_the_sessions_index() {
 }
 
 /// A file whose stored index record is too large keeps its declarations and
-/// drops its labels from the store (`bounded_index_json`), but a pass puts
-/// the labels it extracted into the session's index. The session's index is
-/// then not a cache of the stored one: an overlay resolves a reference to
-/// such a label in the session that indexed the file and not after the
-/// project is attached again, nor while a pass holds the index. Pre-existing
-/// (the session update ignores what the store kept); it contradicts the
-/// change's statement that overlays resolve against what a fresh index has.
+/// drops its labels from the store (`bounded_index_json`). The session's
+/// index takes a file's labels from the record written, so it stays a cache
+/// of the stored one: an overlay resolves a reference to such a label the
+/// same way in the session that indexed the file, after the project is
+/// attached again, and once a pass that held the index is over.
 #[test]
-#[ignore = "review finding: the session index keeps labels the stored index dropped"]
 fn the_session_keeps_no_label_the_stored_index_dropped() {
     let p = folder("project");
     // 19,500 labels of 230 characters: about 4.5 MB of labels, over the
@@ -279,20 +343,21 @@ fn the_session_keeps_no_label_the_stored_index_dropped() {
 // ----- cost -----
 
 /// The SQL work of one overlay of `EDITED_FILE` (after a warm-up), computed
-/// directly and while a pass started elsewhere holds the session's index
-/// (counted on the computing thread).
+/// directly and asked for while a pass started elsewhere holds the session's
+/// index (deferred, then computed once the pass is over; the work of both
+/// counted on the asking thread).
 fn overlay_work(svc: &GraphService, root: &Path) -> (SqlWork, SqlWork) {
     let original = std::fs::read_to_string(root.join(EDITED_FILE)).unwrap();
     let typed = |i: u64| {
         let text = format!("{original}\n% typing {i}\n");
-        overlay::compute(svc, &wp(EDITED_FILE), 100 + i, &text).unwrap().expect("a known resource");
+        requeued(svc, EDITED_FILE, 100 + i, &text).expect("a known resource");
     };
     typed(0);
     take();
     typed(1);
     let direct = take();
+    during_a_pass(svc, || typed(2));
     let held = during_a_pass(svc, || {
-        typed(2);
         take();
         typed(3);
         take()
@@ -325,16 +390,14 @@ fn index_size(svc: &GraphService) -> (i64, i64, i64) {
 }
 
 /// docs/performance.md: an overlay is "scoped to the document", and
-/// `cost_bounds` asserts that it costs the same in a larger project. While
-/// a pass started elsewhere holds the session's index, the reviewed change
-/// reads every stored index record (and every awaited-target list) for each
-/// overlay, under the store lock the pass and every graph read also need
-/// (at the `large` perf scale: 35,099 rows and 248,460 VM steps instead of
-/// 64 and 2,111; see `perf_overlay_during_a_pass`). Same sizes and slack as
-/// `cost_bounds`. Passes on the base, where the overlay resolved against an
-/// empty index instead.
+/// `cost_bounds` asserts that it costs the same in a larger project. That
+/// holds for an overlay asked for while a pass started elsewhere holds the
+/// session's index too: it reads nothing until the pass is over (the
+/// reviewed change read every stored index record and awaited-target list
+/// for it instead, under the store lock: at the `large` perf scale 35,099
+/// rows and 248,460 VM steps instead of 64 and 2,111; see
+/// `perf_overlay_during_a_pass`). Same sizes and slack as `cost_bounds`.
 #[test]
-#[ignore = "review finding: an overlay during a pass reads every stored index record"]
 fn an_overlay_during_a_pass_costs_the_document_not_the_project() {
     let (sp, _sd, small) = generated(320, 20);
     let (lp, _ld, large) = generated(960, 200);
@@ -360,8 +423,11 @@ fn an_overlay_during_a_pass_costs_the_document_not_the_project() {
 }
 
 /// Benchmark (counters and, as evidence only, times) of the overlay of a
-/// small file at `EXPOSITION_PERF_SCALE`, directly and while a pass started
-/// elsewhere holds the session's index.
+/// small file at `EXPOSITION_PERF_SCALE`, directly and asked for while a
+/// pass started elsewhere holds the session's index. The SQL work is that
+/// of the whole request (the deferred attempts and the computation once the
+/// pass is over); the times are those spent in `overlay::compute`, not the
+/// wait for the pass.
 #[test]
 #[ignore = "perf"]
 fn perf_overlay_during_a_pass() {
@@ -371,29 +437,30 @@ fn perf_overlay_during_a_pass() {
     let original = std::fs::read_to_string(p.root.join(EDITED_FILE)).unwrap();
     let typed = |i: u64| {
         let text = format!("{original}\n% typing {i}\n");
-        overlay::compute(&svc, &wp(EDITED_FILE), 100 + i, &text).unwrap().expect("a known resource");
+        take();
+        COMPUTING.with(|c| c.set(Duration::ZERO));
+        let deferred = DEFERRALS.with(Cell::get);
+        requeued(&svc, EDITED_FILE, 100 + i, &text).expect("a known resource");
+        (COMPUTING.with(Cell::get).as_secs_f64() * 1000.0, take(), DEFERRALS.with(Cell::get) - deferred)
     };
     for (bench, held) in [("review.overlay_direct", false), ("review.overlay_during_pass", true)] {
-        let run = || {
-            let mut samples = Vec::new();
-            let mut work = SqlWork::default();
-            typed(0);
-            for i in 1..=5u64 {
-                take();
-                let t = std::time::Instant::now();
-                typed(i);
-                samples.push(t.elapsed().as_secs_f64() * 1000.0);
-                work = take();
-            }
-            (samples, work)
-        };
-        let (samples, work) = if held { during_a_pass(&svc, run) } else { run() };
+        let one = |i: u64| if held { during_a_pass(&svc, || typed(i)) } else { typed(i) };
+        one(0);
+        let mut samples = Vec::new();
+        let mut work = SqlWork::default();
+        let mut deferred = 0;
+        for i in 1..=5u64 {
+            let (ms, w, d) = one(i);
+            samples.push(ms);
+            work = w;
+            deferred = d;
+        }
         support::report(
             bench,
             &scale,
             &samples,
             &format!(
-                "{{\"sql\":{},\"indexRows\":{rows},\"indexBodyBytes\":{body_bytes},\"wantedBytes\":{wanted_bytes}}}",
+                "{{\"sql\":{},\"deferred\":{deferred},\"indexRows\":{rows},\"indexBodyBytes\":{body_bytes},\"wantedBytes\":{wanted_bytes}}}",
                 work.json()
             ),
         );

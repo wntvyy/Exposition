@@ -54,14 +54,41 @@ fn hex(bytes: &[u8], n: usize) -> String {
     bytes.iter().take(n).map(|b| format!("{b:02x}")).collect()
 }
 
+/// Code of the error [`compute`] returns while a pass holds the session's
+/// index of labels and LaTeX main files: nothing was computed or read; ask
+/// again once the pass is over (the driver does).
+pub const DEFERRED: &str = "graph.overlayDeferred";
+
+/// Whether `error` is [`DEFERRED`].
+pub fn is_deferred(error: &GraphError) -> bool {
+    error.code == DEFERRED
+}
+
+fn deferred() -> GraphError {
+    GraphError::new(DEFERRED, "A pass holds the project's index; the overlay is computed when it is over.")
+}
+
 /// Compute the overlay of `text` (revision `revision`) for the file `path`.
 /// `None` when the file is not a known resource (nothing to overlay).
+///
+/// The buffer's links resolve against the session's index of labels and
+/// LaTeX main files, as a pass resolves them (read from the store when
+/// nothing in this session has read it yet). While a pass holds that index
+/// the overlay is not computed (error [`DEFERRED`]): resolved against less,
+/// it would report links as unresolved that are not; resolved against a
+/// copy of the stored index, it would cost every index record of the project
+/// instead of the document.
 pub fn compute(
     graph: &GraphService,
     path: &WorkspacePath,
     revision: u64,
     text: &str,
 ) -> GraphResult<Option<OverlayEntry>> {
+    // Nothing is read or extracted for an overlay that would be deferred
+    // anyway (not even the attached project, under the lock a pass writes in).
+    if graph.reconcile_busy() {
+        return Err(deferred());
+    }
     let root: PathBuf =
         graph.attached_root().ok_or_else(|| GraphError::new("graph.noProject", "No project graph is attached."))?;
     if text.len() > extract::MAX_EXTRACT_BYTES {
@@ -81,23 +108,11 @@ pub fn compute(
     };
     // Labels and LaTeX main files are looked up in the session's index, as a
     // pass looks them up; a session that has not read it yet (no pass since
-    // the project was attached) reads it now. While a pass holds it, this
-    // computation reads its own copy from the store, which the pass has not
-    // written yet. Either way the buffer is resolved against what a fresh
-    // index has.
-    let mut state = graph.try_reconcile_state();
+    // the project was attached) reads it now.
+    let Some(mut state) = graph.try_reconcile_state() else { return Err(deferred()) };
     let now = now_ms();
     graph.with_store_for(&root, |store| {
-        let own;
-        let index: &ProjectIndex = match state.as_deref_mut() {
-            Some(session) => session.index_of(&root, store)?,
-            None => {
-                let mut read = ProjectIndex::default();
-                read.load(store)?;
-                own = read;
-                &own
-            }
-        };
+        let index: &ProjectIndex = state.index_of(&root, store)?;
         let Some(resource) = store
             .entities_by_key(EntityKind::Resource, path.as_str())?
             .into_iter()
