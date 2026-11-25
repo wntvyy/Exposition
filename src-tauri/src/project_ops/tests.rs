@@ -1480,3 +1480,204 @@ fn the_count_of_places_that_mention_a_lean_name_is_complete() {
     assert!(impact.message.contains(" and 25 more."), "5 shown of 30: {}", impact.message);
     assert!(plan.impacts.iter().all(|i| !i.message.starts_with("Not every use")), "{:?}", plan.impacts);
 }
+
+// ----- review: Delete from Source with an incomplete list of uses --------------------------
+
+mod incomplete_uses_review {
+    use super::*;
+
+    const BASEL: &str = "namespace LeanBasic\n\ntheorem basel : True := by\n  trivial\n\nend LeanBasic\n";
+
+    /// lean/LeanBasic/Basel.lean and the FakeData detail of its declaration.
+    fn basel(fx: &Fixture) -> (FakeData, exposition_graph::model::Entity) {
+        fs::create_dir_all(fx.file("lean/LeanBasic")).unwrap();
+        fs::write(fx.file("lean/LeanBasic/Basel.lean"), BASEL).unwrap();
+        let mut decl = entity(EntityKind::FormalDeclaration, "LeanBasic.basel", Some("LeanBasic.basel"));
+        decl.origin = Origin::Extracted { extractor: "lean/1".into() };
+        let b = binding(&decl, "lean/LeanBasic/Basel.lean", BASEL, "lean.theorem", Some("LeanBasic.basel"));
+        (FakeData { details: vec![detail(decl.clone(), vec![b], Vec::new(), Vec::new())], ..FakeData::default() }, decl)
+    }
+
+    fn incomplete(plan: &OpPlan) -> Vec<&OpImpact> {
+        plan.impacts.iter().filter(|i| i.message.starts_with("Not every use of")).collect()
+    }
+
+    /// Not UTF-8: the plan cannot look for mentions in it.
+    const BROKEN: [u8; 7] = [0x74, 0x68, 0xff, 0xfe, 0x00, 0xc3, 0x28];
+
+    /// The Lean walk through the whole plan: 2,000 Lean files (its bound)
+    /// are all searched and the plan is complete (no decision: nothing
+    /// mentions the name); 2,001 are not, and the plan says so.
+    #[test]
+    fn the_lean_file_bound_is_said_exactly_past_it() {
+        for (total, capped) in [(2000usize, false), (2001, true)] {
+            let fx = fixture();
+            let ops = fx.ops(FakeTrash::default());
+            let (data, decl) = basel(&fx);
+            fs::create_dir_all(fx.file("lean/many")).unwrap();
+            for i in 1..total {
+                fs::write(fx.file(&format!("lean/many/F{i:04}.lean")), "theorem f : True := trivial\n").unwrap();
+            }
+            let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+            let found = incomplete(&plan);
+            let case = format!("{total} Lean files: {:?}", plan.impacts);
+            if capped {
+                assert_eq!(found.len(), 1, "{case}");
+                assert!(
+                    found[0].message.contains("only the first 2000 Lean files of the project were searched"),
+                    "{case}"
+                );
+                assert!(plan.needs_decision, "{case}");
+            } else {
+                assert!(found.is_empty(), "{case}");
+                assert!(!plan.needs_decision, "{case}");
+            }
+        }
+    }
+
+    /// The incompleteness is part of what the decision rests on: when a Lean
+    /// file becomes unreadable after planning, or readable again, the plan
+    /// is stale and nothing is removed.
+    #[test]
+    fn a_change_in_what_could_be_read_makes_the_plan_stale() {
+        let fx = fixture();
+        let ops = fx.ops(FakeTrash::default());
+        let (data, decl) = basel(&fx);
+        // Complete when planned; a file that cannot be read appears before apply.
+        let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+        assert!(incomplete(&plan).is_empty() && !plan.needs_decision, "{:?}", plan.impacts);
+        fs::write(fx.file("lean/Broken.lean"), BROKEN).unwrap();
+        assert_eq!(apply_plan(&ops, &fx, &data, &plan).unwrap_err().code, "ops.planStale");
+        assert!(fx.ws.documents().find_by_path(&wp("lean/LeanBasic/Basel.lean")).is_none(), "nothing edited");
+        // Incomplete when planned; the file becomes readable before apply.
+        let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+        assert_eq!(incomplete(&plan).len(), 1, "{:?}", plan.impacts);
+        fs::write(fx.file("lean/Broken.lean"), "theorem b : True := trivial\n").unwrap();
+        assert_eq!(apply_plan(&ops, &fx, &data, &plan).unwrap_err().code, "ops.planStale");
+        assert!(fx.ws.documents().find_by_path(&wp("lean/LeanBasic/Basel.lean")).is_none(), "nothing edited");
+    }
+
+    /// Warn, don't block: a plan whose list of uses is incomplete applies
+    /// (after the decision) as one unsaved edit in the shared undo history;
+    /// no file on disk changes, the unreadable file included.
+    #[test]
+    fn an_incomplete_plan_applies_only_as_an_unsaved_undoable_edit() {
+        let fx = fixture();
+        let ops = fx.ops(FakeTrash::default());
+        let (data, decl) = basel(&fx);
+        fs::write(fx.file("lean/Broken.lean"), BROKEN).unwrap();
+        let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+        assert!(plan.needs_decision);
+        assert_eq!(plan.effects.len(), 1);
+        let result = apply_plan(&ops, &fx, &data, &plan).unwrap();
+        assert_eq!(result.outcomes[0].status, OpStatus::Succeeded, "{:?}", result.outcomes);
+        let state = buffer(&fx, "lean/LeanBasic/Basel.lean");
+        assert_eq!(state.text, "namespace LeanBasic\n\nend LeanBasic\n");
+        assert_ne!(state.info.saved_revision, Some(state.info.revision), "unsaved");
+        assert_eq!(fs::read_to_string(fx.file("lean/LeanBasic/Basel.lean")).unwrap(), BASEL, "nothing on disk");
+        assert_eq!(fs::read(fx.file("lean/Broken.lean")).unwrap(), BROKEN);
+        fx.ws.documents().undo(&state.info.id, EditOrigin::Source).unwrap();
+        assert_eq!(buffer(&fx, "lean/LeanBasic/Basel.lean").text, BASEL, "Undo brings it back");
+    }
+
+    /// An agent is refused Delete from Source whatever the plan could read;
+    /// the refused item's consequences are not listed.
+    #[test]
+    fn an_agent_is_refused_even_when_the_read_was_incomplete() {
+        let fx = fixture();
+        let ops = fx.ops(FakeTrash::default());
+        let (data, decl) = basel(&fx);
+        fs::write(fx.file("lean/Broken.lean"), BROKEN).unwrap();
+        let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::Agent { task: "t-1".into() })).unwrap();
+        assert_eq!(plan.refusals.len(), 1);
+        assert_eq!(plan.refusals[0].code, "ops.agentScope");
+        assert!(plan.effects.is_empty() && plan.impacts.is_empty() && !plan.needs_decision, "{plan:?}");
+    }
+
+    /// The wording: counts, plurals, "and N more", the per-file mention cap,
+    /// and project-relative paths only.
+    #[test]
+    fn the_incompleteness_message_counts_and_names_project_paths() {
+        let fx = fixture();
+        let ops = fx.ops(FakeTrash::default());
+        let (data, decl) = basel(&fx);
+        for i in 0..4 {
+            fs::write(fx.file(&format!("lean/B{i}.lean")), BROKEN).unwrap();
+        }
+        let crowded: String = (0..51).map(|i| format!("theorem u{i} : True := LeanBasic.basel\n")).collect();
+        fs::write(fx.file("lean/Crowded.lean"), crowded).unwrap();
+        let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+        let found = incomplete(&plan);
+        assert_eq!(found.len(), 1, "{:?}", plan.impacts);
+        assert_eq!(
+            found[0].message,
+            "Not every use of “LeanBasic.basel” could be checked: 4 Lean files could not be read (lean/B0.lean, \
+             lean/B1.lean, lean/B2.lean and 1 more); only the first 50 mentions per file were read in \
+             lean/Crowded.lean. Uses not listed here may break too; check the sources before you save."
+        );
+        let mentions = plan.impacts.iter().find(|i| i.message.contains("is mentioned by name in")).unwrap();
+        assert!(mentions.message.contains(" and 45 more."), "50 places read, 5 named: {}", mentions.message);
+        let root = fx.project().display().to_string();
+        assert!(plan.impacts.iter().all(|i| !i.message.contains(&root)), "{:?}", plan.impacts);
+    }
+
+    /// A folder that cannot be listed (here: listing denied to everyone) is
+    /// named by its project path.
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_that_cannot_be_listed_is_named_by_its_project_path() {
+        struct Denied(PathBuf);
+        impl Drop for Denied {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("icacls").arg(&self.0).args(["/remove:d", "*S-1-1-0"]).output();
+            }
+        }
+        let fx = fixture();
+        let ops = fx.ops(FakeTrash::default());
+        let (data, decl) = basel(&fx);
+        fs::create_dir_all(fx.file("lean/Locked")).unwrap();
+        fs::write(fx.file("lean/Locked/Hidden.lean"), "theorem h : True := LeanBasic.basel\n").unwrap();
+        let locked = Denied(fx.file("lean/Locked"));
+        let out =
+            std::process::Command::new("icacls").arg(&locked.0).args(["/deny", "*S-1-1-0:(RD)"]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+        assert!(fs::read_dir(&locked.0).is_err(), "the folder cannot be listed");
+        let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+        drop(locked);
+        let found = incomplete(&plan);
+        assert_eq!(found.len(), 1, "{:?}", plan.impacts);
+        assert!(found[0].message.contains("1 folder could not be listed (lean/Locked)"), "{}", found[0].message);
+        assert!(plan.needs_decision);
+    }
+
+    /// FINDING (low): the plan reads "it has more relationships than this
+    /// plan reads" whenever the graph's detail read left neighbors out, also
+    /// when those were only items the removed item itself uses (outgoing):
+    /// every relationship TO it was read and its item is known.
+    #[test]
+    #[ignore = "review finding: neighbors_truncated from outgoing relations alone makes a complete plan read as incomplete"]
+    fn neighbors_left_out_only_on_the_outgoing_side_do_not_make_the_uses_incomplete() {
+        use exposition_graph::model::AssertionStatus;
+        use exposition_graph::vocabulary::RelationKind;
+        let fx = fixture();
+        let ops = fx.ops(FakeTrash::default());
+        fs::write(fx.file("paper.tex"), PAPER).unwrap();
+        let theorem = entity(EntityKind::Theorem, "Theorem thm:main", Some("thm:main"));
+        let mut claim = entity(EntityKind::Claim, "Claim C", None);
+        claim.origin = Origin::User;
+        let thm_binding = binding(&theorem, "paper.tex", PAPER, "latex.env:theorem", Some("thm:main"));
+        let mut depends = relation(RelationKind::DependsOn, &claim, &theorem);
+        depends.origin = Origin::User;
+        depends.status = AssertionStatus::Accepted;
+        // The theorem cites 501 sources: its detail lists 500 neighbors (the claim among them).
+        let cited: Vec<_> = (0..501).map(|i| entity(EntityKind::Reference, &format!("Ref {i}"), None)).collect();
+        let mut d = detail(theorem.clone(), vec![thm_binding], vec![depends], vec![claim.clone()]);
+        d.outgoing = cited.iter().map(|c| relation(RelationKind::References, &theorem, c)).collect();
+        d.neighbors.extend(cited.iter().take(499).cloned());
+        d.neighbors_truncated = true;
+        let data = FakeData { details: vec![d], ..FakeData::default() };
+        let plan = ops.plan(&fx.ws, &data, delete(&[&theorem], false, OpActor::User)).unwrap();
+        assert!(plan.impacts.iter().any(|i| i.message.contains("“Claim C” depends on it")), "{:?}", plan.impacts);
+        assert!(incomplete(&plan).is_empty(), "every use was read: {:?}", plan.impacts);
+    }
+}
