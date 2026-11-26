@@ -618,6 +618,119 @@ async fn graph_queries_are_scoped_and_consent_filtered() {
     }
 }
 
+/// Apply `ops` as the user and return the ids of the entities created, by temporary id.
+fn apply_ops(f: &Fixture, ops: Vec<GraphOperation>) -> BTreeMap<String, EntityId> {
+    let base_revision = f.graph.status().revision;
+    let (_, outcome) = f
+        .graph
+        .propose_and_apply(Origin::User, &ChangeRequest { base_revision, operations: ops, summary: None })
+        .unwrap();
+    match outcome {
+        exposition_graph::ApplyOutcome::Applied { created, .. } => {
+            created.into_iter().map(|c| (c.temp_id, c.id)).collect()
+        }
+        other => panic!("not applied: {other:?}"),
+    }
+}
+
+fn unbound_claim(temp_id: String, label: String) -> GraphOperation {
+    GraphOperation::CreateEntity {
+        temp_id,
+        kind: EntityKind::Claim,
+        roles: vec![],
+        label,
+        key: None,
+        attributes: BTreeMap::new(),
+        binding: None,
+    }
+}
+
+/// Fewer relations listed than exist among the listed entities is said in
+/// the result (`relationsTruncated`, and `truncated`), also when the result
+/// is far below its size bound: 13 claims that depend on and refer to each
+/// other (312 relations) are listed with 300 of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_queries_say_when_relations_are_left_out() {
+    let f = fixture();
+    const N: usize = 13;
+    let mut ops: Vec<GraphOperation> =
+        (0..N).map(|i| unbound_claim(format!("d{i}"), format!("Dense {i:02}"))).collect();
+    for i in 0..N {
+        for j in 0..N {
+            if i == j {
+                continue;
+            }
+            for kind in [RelationKind::DependsOn, RelationKind::References] {
+                ops.push(GraphOperation::AddRelation {
+                    kind,
+                    from: EntityRef::Temp { temp_id: format!("d{i}") },
+                    to: EntityRef::Temp { temp_id: format!("d{j}") },
+                    evidence_kind: None,
+                    evidence: vec![],
+                    note: None,
+                });
+            }
+        }
+    }
+    let created = apply_ops(&f, ops);
+    let among = N * (N - 1) * 2;
+    let first = created["d0"].as_str().to_owned();
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let queries = vec![query("search", "search", "Dense", "", "", 1), query("near", "neighborhood", "", &first, "", 1)];
+    let (id, _) = run(&mut h, req, queries, true).await;
+    for tool_use_id in ["search", "near"] {
+        let (_, err, text) = call(&h, &id, tool_use_id);
+        assert!(!err, "{tool_use_id}: {text}");
+        let result: Value = serde_json::from_str(&text).unwrap();
+        let entities = result["entities"].as_array().unwrap().len();
+        let relations = result["relations"].as_array().unwrap().len();
+        println!("{tool_use_id}: {entities} entities, {relations} of {among} relations, {} bytes", text.len());
+        assert_eq!(entities, N, "{tool_use_id}: every dense claim is listed");
+        assert!(relations < among, "{tool_use_id}: the relation bound applies ({relations})");
+        assert_eq!(result["relationsTruncated"], json!(true), "{tool_use_id}: left-out relations are said");
+        assert_eq!(result["truncated"], json!(true), "{tool_use_id}: the result is incomplete");
+    }
+    // A complete result says so too.
+    let lemma = f.ids.lemma.as_str().to_owned();
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let (id, _) = run(&mut h, req, vec![query("near", "neighborhood", "", &lemma, "", 1)], true).await;
+    let (_, _, text) = call(&h, &id, "near");
+    let result: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        (result["relationsTruncated"].clone(), result["truncated"].clone()),
+        (json!(false), json!(false)),
+        "{text}"
+    );
+}
+
+/// A search scans a bounded number of matches before the scope filter: when
+/// more matches exist than were scanned, an empty or short result is not
+/// presented as complete. 2,000 claims outside a narrow scope sort before
+/// the one claim inside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_search_says_when_matches_past_its_scan_were_not_looked_at() {
+    let f = fixture();
+    for batch in 0..4 {
+        let ops = (0..500).map(|i| unbound_claim(format!("a{i}"), format!("Aaa {batch}-{i:03}"))).collect();
+        apply_ops(&f, ops);
+    }
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let req = request(&f.root, files_scope(), PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let search = tool(
+        "claims",
+        tools::GRAPH_QUERY,
+        json!({"query": "search", "text": "", "kinds": ["claim"], "entity": "", "path": "", "depth": 1, "limit": 100}),
+    );
+    let (id, _) = run(&mut h, req, vec![search], true).await;
+    let (_, err, text) = call(&h, &id, "claims");
+    assert!(!err, "{text}");
+    let result: Value = serde_json::from_str(&text).unwrap();
+    println!("claims in scope listed: {}", result["entities"]);
+    assert!(!text.contains("Aaa "), "claims outside the scope are never listed: {text}");
+    assert_eq!(result["truncated"], json!(true), "matches past the scan were not looked at: {text}");
+}
+
 /// A formal declaration of `Main.lean` admitted as the Lean service admits
 /// one, with one formal-check evidence record of the file's indexed text.
 fn lean_declaration_with_evidence(f: &Fixture) -> (EntityId, EntityId, exposition_graph::EvidenceId) {
@@ -700,6 +813,64 @@ fn lean_declaration_with_evidence(f: &Fixture) -> (EntityId, EntityId, expositio
     };
     let evidence = f.graph.register_evidence(&origin, evidence).unwrap();
     (file, declaration, evidence)
+}
+
+/// Evidence lists are bounded (an entity's own records, the records of each
+/// associated declaration, the evidence an impact affects); a list that left
+/// records out says so (`evidenceTruncated`, and `truncated`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graph_queries_say_when_evidence_is_left_out() {
+    let f = fixture();
+    let (_, declaration, first) = lean_declaration_with_evidence(&f);
+    let record = f.graph.with_store(|s| Ok(s.evidence(&first)?)).unwrap().expect("the first record");
+    let origin = Origin::Service { service: "lean".into() };
+    for i in 0..50u64 {
+        let copy = exposition_graph::Evidence {
+            id: exposition_graph::EvidenceId::mint(),
+            recorded_at_ms: 2 + i,
+            ..record.clone()
+        };
+        f.graph.register_evidence(&origin, copy).unwrap();
+    }
+    apply_ops(
+        &f,
+        vec![GraphOperation::AddRelation {
+            kind: RelationKind::Formalizes,
+            from: EntityRef::Id { id: declaration.clone() },
+            to: EntityRef::Id { id: f.ids.lemma.clone() },
+            evidence_kind: None,
+            evidence: vec![],
+            note: None,
+        }],
+    );
+    let mut h = harness(Some(Arc::clone(&f.graph)), f.data.path());
+    let req = request(&f.root, TaskScope::Workspace, PermissionProfile::ReadOnly, ContextConsent::ScopeContent);
+    let queries = vec![
+        query("decl", "entity", "", declaration.as_str(), "", 1),
+        query("lemma", "entity", "", f.ids.lemma.as_str(), "", 1),
+        query("impact", "impact", "", declaration.as_str(), "", 1),
+    ];
+    let (id, _) = run(&mut h, req, queries, true).await;
+    let parse = |tool_use_id: &str| -> Value {
+        let (_, err, text) = call(&h, &id, tool_use_id);
+        assert!(!err, "{tool_use_id}: {text}");
+        serde_json::from_str(&text).unwrap()
+    };
+    let decl = parse("decl");
+    assert!(decl["evidence"].as_array().unwrap().len() < 51, "{}", decl["evidence"]);
+    assert_eq!((decl["evidenceTruncated"].clone(), decl["truncated"].clone()), (json!(true), json!(true)), "{decl}");
+    let lemma = parse("lemma");
+    let formal = &lemma["formalEvidence"][0];
+    assert!(formal["evidence"].as_array().unwrap().len() < 51, "{formal}");
+    assert_eq!(formal["evidenceTruncated"], json!(true), "{formal}");
+    assert_eq!(lemma["truncated"], json!(true), "{lemma}");
+    let impact = parse("impact");
+    assert!(impact["evidence"].as_array().unwrap().len() < 51, "{}", impact["evidence"]);
+    assert_eq!(
+        (impact["evidenceTruncated"].clone(), impact["truncated"].clone()),
+        (json!(true), json!(true)),
+        "{impact}"
+    );
 }
 
 /// Pre-review walkthrough, leads A and B. The agent asked what a change to a
@@ -2622,4 +2793,623 @@ async fn a_restart_resolves_a_waiting_proposal_and_it_cannot_be_approved() {
     // Stop the first process's worker.
     h.service.cancel_task(&id).unwrap();
     h.service.join(&id).await;
+}
+
+// ---------------------------------------------------------------------------
+// Review (graph consumers): every bound of graph_query flags what it left
+// out, and only then, exactly at the bound and one past it. graph_query is
+// called directly with a task spec; ground truth is read from the store.
+// ---------------------------------------------------------------------------
+
+mod query_bounds_review {
+    use super::*;
+    use exposition_agents::graph::query::{self as gq, GraphQueryInput};
+    use exposition_graph::{Evidence, EvidenceId, EvidenceKind, EvidenceOutcome, ImpactRequest, ServiceBatch};
+
+    /// The serialized size bound of one graph_query result.
+    const RESULT_BYTES: usize = 64 * 1024;
+
+    fn spec(f: &Fixture, scope: TaskScope) -> TaskSpec {
+        TaskSpec {
+            prompt: "review".into(),
+            workspace_root: f.root.display().to_string(),
+            scope,
+            permission: PermissionProfile::ReadOnly,
+            execution: ExecutionMode::Disabled,
+            consent: ContextConsent::ScopeContent,
+            budgets: Budgets::default(),
+            provider: ProviderChoice { provider: ProviderKind::Scripted, model: String::new(), effort: Effort::Low },
+            approval_mode: ApprovalMode::Ask,
+        }
+    }
+
+    fn input(q: &str, text: &str, kinds: &[&str], entity: &str) -> GraphQueryInput {
+        GraphQueryInput {
+            query: q.into(),
+            text: text.into(),
+            kinds: kinds.iter().map(|k| (*k).to_owned()).collect(),
+            entity: entity.into(),
+            path: String::new(),
+            depth: 1,
+            limit: 100,
+        }
+    }
+
+    /// One query as a task with `scope` runs it: the result and its serialized size.
+    fn ask(f: &Fixture, scope: TaskScope, input: &GraphQueryInput) -> (Value, usize) {
+        let out = match gq::run(GraphEnv { service: &f.graph, project: None }, &f.root, &spec(f, scope), input) {
+            Ok(out) => out,
+            Err(out) => panic!("refused: {}", out.content),
+        };
+        assert!(!out.is_error, "{}", out.content);
+        let size = serde_json::to_string(&out.content).unwrap().len();
+        (out.content, size)
+    }
+
+    fn len(v: &Value) -> usize {
+        v.as_array().map_or(0, Vec::len)
+    }
+
+    /// The template formal-check record of `lean_declaration_with_evidence`.
+    fn template(f: &Fixture, id: &EvidenceId) -> Evidence {
+        f.graph.with_store(|s| Ok(s.evidence(id)?)).unwrap().expect("the record")
+    }
+
+    /// Records of `kind` about `subject`, recorded at the given times.
+    fn records(f: &Fixture, t: &Evidence, subject: &EntityId, kind: EvidenceKind, at: impl Iterator<Item = u64>) {
+        let evidence: Vec<Evidence> = at
+            .map(|at| Evidence {
+                id: EvidenceId::mint(),
+                kind,
+                subject: Some(subject.clone()),
+                recorded_at_ms: at,
+                formal: if kind == EvidenceKind::FormalCheck { t.formal.clone() } else { None },
+                outcome: if kind == EvidenceKind::FormalCheck { t.outcome.clone() } else { EvidenceOutcome::Succeeded },
+                ..t.clone()
+            })
+            .collect();
+        let batch = ServiceBatch { evidence, summary: "review records".into(), ..Default::default() };
+        f.graph.apply_service_batch(&Origin::Service { service: "lean".into() }, &batch).unwrap();
+    }
+
+    fn relation(kind: RelationKind, from: EntityRef, to: EntityRef) -> GraphOperation {
+        GraphOperation::AddRelation { kind, from, to, evidence_kind: None, evidence: vec![], note: None }
+    }
+
+    fn temp(t: &str) -> EntityRef {
+        EntityRef::Temp { temp_id: t.into() }
+    }
+
+    fn existing(id: &EntityId) -> EntityRef {
+        EntityRef::Id { id: id.clone() }
+    }
+
+    /// 13 claims "Dense NN" related pairwise, `total` relations among them
+    /// (every ordered pair by `references` first, then `dependsOn`).
+    fn dense(f: &Fixture, total: usize) -> EntityId {
+        const N: usize = 13;
+        let mut ops: Vec<GraphOperation> =
+            (0..N).map(|i| unbound_claim(format!("d{i}"), format!("Dense {i:02}"))).collect();
+        let mut rels = Vec::new();
+        for kind in [RelationKind::References, RelationKind::DependsOn] {
+            for i in 0..N {
+                for j in (0..N).filter(|j| *j != i) {
+                    rels.push(relation(kind, temp(&format!("d{i}")), temp(&format!("d{j}"))));
+                }
+            }
+        }
+        assert!(total <= rels.len());
+        rels.truncate(total);
+        ops.extend(rels);
+        apply_ops(f, ops)["d0"].clone()
+    }
+
+    /// The relations among the entities a result lists, read from the store.
+    fn relations_among_listed(f: &Fixture, result: &Value) -> usize {
+        let ids: std::collections::BTreeSet<EntityId> = result["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| EntityId::parse(e["id"].as_str().unwrap()).unwrap())
+            .collect();
+        f.graph.with_store(|s| Ok(s.relations_among(&ids)?.len())).unwrap()
+    }
+
+    /// search and neighborhood list the relations among what they list:
+    /// relationsTruncated (and truncated) exactly when fewer are listed than
+    /// exist, at 299, 300 (MAX_RELATIONS) and 301 relations; every result
+    /// within the size bound.
+    #[test]
+    fn relations_among_listed_entities_are_flagged_exactly_when_some_are_left_out() {
+        for total in [299usize, 300, 301] {
+            let f = fixture();
+            let first = dense(&f, total);
+            for q in [input("search", "Dense", &[], ""), input("neighborhood", "", &[], first.as_str())] {
+                let (result, size) = ask(&f, TaskScope::Workspace, &q);
+                let listed = len(&result["relations"]);
+                let truth = relations_among_listed(&f, &result);
+                let case = format!("{} with {total} relations: {listed} of {truth} listed, {size} bytes", q.query);
+                println!("{case}");
+                assert_eq!(len(&result["entities"]), 13, "{case}");
+                assert_eq!(truth, total, "{case}");
+                assert_eq!(result["relationsTruncated"], json!(listed < truth), "{case}");
+                assert_eq!(result["truncated"], json!(listed < truth), "{case}");
+                assert!(size <= RESULT_BYTES, "{case}");
+            }
+        }
+    }
+
+    /// An entity query lists the entity's relations: relationsTruncated
+    /// exactly when some visible relation is not listed (299 / 300 / 301
+    /// relations to one hub).
+    #[test]
+    fn an_entitys_relations_are_flagged_exactly_when_some_are_left_out() {
+        for total in [299usize, 300, 301] {
+            let f = fixture();
+            let mut ops = vec![unbound_claim("hub".into(), "Hub".into())];
+            let mut n = 0;
+            let mut i = 0;
+            while n < total {
+                ops.push(unbound_claim(format!("c{i}"), format!("Spoke {i:03}")));
+                for kind in [RelationKind::References, RelationKind::DependsOn] {
+                    if n < total {
+                        ops.push(relation(kind, temp(&format!("c{i}")), temp("hub")));
+                        n += 1;
+                    }
+                }
+                i += 1;
+            }
+            let hub = apply_ops(&f, ops)["hub"].clone();
+            let truth =
+                f.graph.with_store(|s| Ok(s.relations_from(&hub)?.len() + s.relations_to(&hub)?.len())).unwrap();
+            let (result, size) = ask(&f, TaskScope::Workspace, &input("entity", "", &[], hub.as_str()));
+            let listed = len(&result["relations"]);
+            let case = format!("entity with {total} relations: {listed} of {truth} listed, {size} bytes");
+            println!("{case}");
+            assert_eq!(truth, total);
+            assert_eq!(result["relationsTruncated"], json!(listed < truth), "{case}");
+            assert_eq!(result["truncated"], json!(listed < truth), "{case}");
+            assert!(size <= RESULT_BYTES, "{case}");
+        }
+    }
+
+    /// A search reads 2,000 matches before the scope filter. With exactly
+    /// 2,000 claims the one in scope (sorted last) is read and listed and
+    /// the result is complete; with 2,001 it is not read, and the result
+    /// says it is incomplete.
+    #[test]
+    fn the_search_scan_is_flagged_exactly_past_its_bound() {
+        for (added, complete) in [(1999usize, true), (2000, false)] {
+            let f = fixture();
+            let mut left = added;
+            let mut batch = 0;
+            while left > 0 {
+                let n = left.min(500);
+                apply_ops(&f, (0..n).map(|i| unbound_claim(format!("a{i}"), format!("Aaa {batch}-{i:03}"))).collect());
+                left -= n;
+                batch += 1;
+            }
+            let (result, _) = ask(&f, files_scope(), &input("search", "", &["claim"], ""));
+            let listed: Vec<&str> =
+                result["entities"].as_array().unwrap().iter().filter_map(|e| e["label"].as_str()).collect();
+            let case = format!("{} claims: listed {listed:?}, truncated {}", added + 1, result["truncated"]);
+            assert_eq!(listed == [CLAIM], complete, "{case}");
+            assert_eq!(result["truncated"], json!(!complete), "{case}");
+        }
+    }
+
+    /// An entity's own evidence: 20 (MAX_EVIDENCE) records listed and
+    /// complete; 21 flagged.
+    #[test]
+    fn an_entitys_own_evidence_is_flagged_exactly_past_its_bound() {
+        for (n, flagged) in [(20u64, false), (21, true)] {
+            let f = fixture();
+            let (_, declaration, first) = lean_declaration_with_evidence(&f);
+            let t = template(&f, &first);
+            records(&f, &t, &declaration, EvidenceKind::Review, 2..n + 1);
+            let (result, _) = ask(&f, TaskScope::Workspace, &input("entity", "", &[], declaration.as_str()));
+            let case = format!("{n} records: {} listed, {result}", len(&result["evidence"]));
+            assert_eq!(len(&result["evidence"]), 20, "{case}");
+            assert_eq!(result["evidenceTruncated"], json!(flagged), "{case}");
+            assert_eq!(result["truncated"], json!(flagged), "{case}");
+        }
+    }
+
+    /// The formal checks of an associated declaration: 5 listed and
+    /// complete; 6 flagged on the item and on the result.
+    #[test]
+    fn a_declarations_formal_checks_are_flagged_exactly_past_their_bound() {
+        for (n, flagged) in [(5u64, false), (6, true)] {
+            let f = fixture();
+            let (_, declaration, first) = lean_declaration_with_evidence(&f);
+            let t = template(&f, &first);
+            records(&f, &t, &declaration, EvidenceKind::FormalCheck, 2..n + 1);
+            apply_ops(&f, vec![relation(RelationKind::Formalizes, existing(&declaration), existing(&f.ids.lemma))]);
+            let (result, _) = ask(&f, TaskScope::Workspace, &input("entity", "", &[], f.ids.lemma.as_str()));
+            let item = &result["formalEvidence"][0];
+            let case = format!("{n} formal checks: {item}");
+            assert_eq!(len(&item["evidence"]), 5, "{case}");
+            assert_eq!(item["evidenceTruncated"], json!(flagged), "{case}");
+            assert_eq!(result["truncated"], json!(flagged), "{case}");
+        }
+    }
+
+    /// FINDING (low): a declaration with more than 200 records of any kind
+    /// has its formal-check list flagged although every formal check is
+    /// listed: here 3 formal checks among 201 records, the one record past
+    /// the read is a review, and the item says evidenceTruncated.
+    #[test]
+    fn formal_checks_are_not_flagged_when_only_other_records_were_past_the_read() {
+        let f = fixture();
+        let (_, declaration, first) = lean_declaration_with_evidence(&f);
+        let t = template(&f, &first);
+        // first (formal, at 1); reviews at 2..=198 (197); formal at 5000, 5001; review at 0 (the oldest).
+        records(&f, &t, &declaration, EvidenceKind::Review, 2..199);
+        records(&f, &t, &declaration, EvidenceKind::FormalCheck, 5000..5002);
+        records(&f, &t, &declaration, EvidenceKind::Review, 0..1);
+        apply_ops(&f, vec![relation(RelationKind::Formalizes, existing(&declaration), existing(&f.ids.lemma))]);
+        let (all, more) = f.graph.with_store(|s| Ok(s.evidence_for_subject_bounded(&declaration, 10_000)?)).unwrap();
+        let formal_total = all.iter().filter(|e| e.kind == EvidenceKind::FormalCheck).count();
+        assert_eq!((all.len(), more), (201, false));
+        let (result, _) = ask(&f, TaskScope::Workspace, &input("entity", "", &[], f.ids.lemma.as_str()));
+        let item = &result["formalEvidence"][0];
+        assert_eq!((formal_total, len(&item["evidence"])), (3, 3), "every formal check is listed: {item}");
+        assert_eq!(item["evidenceTruncated"], json!(false), "nothing formal was left out: {item}");
+    }
+
+    /// The evidence an impact affects: 50 (MAX_IMPACT_EVIDENCE) listed and
+    /// complete; 51 flagged.
+    #[test]
+    fn impact_evidence_is_flagged_exactly_past_its_bound() {
+        for (n, flagged) in [(50u64, false), (51, true)] {
+            let f = fixture();
+            let (_, declaration, first) = lean_declaration_with_evidence(&f);
+            let t = template(&f, &first);
+            records(&f, &t, &declaration, EvidenceKind::Review, 2..n + 1);
+            let report = f
+                .graph
+                .impact(&ImpactRequest {
+                    entities: vec![declaration.clone()],
+                    max_depth: Some(1),
+                    max_items: Some(1000),
+                })
+                .unwrap();
+            assert_eq!(report.evidence.len() as u64, n, "the service reports every affected record");
+            let (result, _) = ask(&f, TaskScope::Workspace, &input("impact", "", &[], declaration.as_str()));
+            let case = format!("{n} affected records: {} listed", len(&result["evidence"]));
+            assert_eq!(len(&result["evidence"]), 50, "{case}");
+            assert_eq!(result["evidenceTruncated"], json!(flagged), "{case}");
+            assert_eq!(result["truncated"], json!(flagged), "{case}");
+        }
+    }
+
+    /// FINDING (low): the impact's evidence flag counts records the task may
+    /// not see. 50 visible records of the root are all listed; one record of
+    /// an out-of-scope dependent (hidden from the items too) makes the
+    /// result say evidenceTruncated, which also tells the task that such a
+    /// dependent exists.
+    #[test]
+    fn impact_evidence_is_not_flagged_by_evidence_the_task_cannot_see() {
+        let f = fixture();
+        let (_, declaration, first) = lean_declaration_with_evidence(&f);
+        let t = template(&f, &first);
+        records(&f, &t, &declaration, EvidenceKind::Review, 2..51);
+        // The theorem (private/secret.typ, outside the scope below) depends on the declaration.
+        apply_ops(&f, vec![relation(RelationKind::DependsOn, existing(&f.ids.theorem), existing(&declaration))]);
+        records(&f, &t, &f.ids.theorem, EvidenceKind::Review, 1..2);
+        let report = f
+            .graph
+            .impact(&ImpactRequest { entities: vec![declaration.clone()], max_depth: Some(1), max_items: Some(1000) })
+            .unwrap();
+        assert_eq!(report.evidence.len(), 51, "50 records of the declaration and 1 of the hidden theorem");
+        let scope = TaskScope::Files { paths: vec![p("Main.lean"), p("main.typ"), p("notes")] };
+        let (result, _) = ask(&f, scope, &input("impact", "", &[], declaration.as_str()));
+        assert!(!result.to_string().contains(f.ids.theorem.as_str()), "the theorem is not visible");
+        assert_eq!(len(&result["evidence"]), 50, "every visible record is listed");
+        assert_eq!(
+            result["evidenceTruncated"],
+            json!(false),
+            "no visible record was left out: {}",
+            result["truncated"]
+        );
+    }
+
+    /// FINDING (medium): every entity a result describes carries at most 5
+    /// of its evidence records (`evidence` of the entity, also in the graph
+    /// context), and nothing says when it has more: a declaration with 6
+    /// records is listed with 5 and the result reads complete.
+    #[test]
+    fn an_entitys_evidence_summary_says_when_records_are_left_out() {
+        let f = fixture();
+        let (_, declaration, first) = lean_declaration_with_evidence(&f);
+        let t = template(&f, &first);
+        records(&f, &t, &declaration, EvidenceKind::Review, 2..7);
+        let (result, _) = ask(&f, TaskScope::Workspace, &input("search", "", &["formalDeclaration"], ""));
+        let listed = result["entities"].as_array().unwrap().iter().find(|e| e["id"] == json!(declaration)).unwrap();
+        let shown = len(&listed["evidence"]);
+        println!("summary lists {shown} of 6 records; entity: {listed}; truncated {}", result["truncated"]);
+        let flagged = result["truncated"] == json!(true) || listed.get("evidenceTruncated") == Some(&json!(true));
+        assert!(shown == 6 || flagged, "5 of 6 records listed and nothing says so: {listed}");
+    }
+
+    /// FINDING (pre-existing, medium): the size bound does not hold for an
+    /// entity result: `bounded` trims only relations, entities, items and
+    /// neighbors, so a statement formalized by 10 declarations, each with 5
+    /// formal checks of a 2,000-character statement, is returned above
+    /// 64 KiB (after its relations and neighbors were cut to nothing).
+    #[test]
+    fn an_entity_result_stays_within_the_size_bound() {
+        use exposition_graph::{BatchRef, EntityUpsert, RelationUpsert, SourceBinding};
+        let f = fixture();
+        let (file, declaration, first) = lean_declaration_with_evidence(&f);
+        let mut t = template(&f, &first);
+        if let Some(formal) = t.formal.as_mut() {
+            formal.statement = "s".repeat(2000);
+        }
+        let mut declarations = vec![declaration];
+        for i in 1..10 {
+            let batch = ServiceBatch {
+                entities: vec![EntityUpsert {
+                    id: None,
+                    kind: EntityKind::FormalDeclaration,
+                    roles: Vec::new(),
+                    label: format!("t{i}"),
+                    key: Some(format!("t{i}")),
+                    attributes: BTreeMap::new(),
+                    lifecycle: None,
+                    tombstone_reason: None,
+                    bindings: Some(vec![SourceBinding {
+                        entity: EntityId::mint(),
+                        path: p("Main.lean"),
+                        selector: SourceSelector::Declaration {
+                            syntax: "lean.declaration".into(),
+                            name: Some(format!("t{i}")),
+                            ordinal: None,
+                        },
+                        range: None,
+                        version: None,
+                        fingerprint: None,
+                        state: BindingState::Resolved,
+                        detail: None,
+                    }]),
+                }],
+                relations: vec![RelationUpsert {
+                    kind: RelationKind::AnchoredIn,
+                    from: BatchRef::Batch(0),
+                    to: BatchRef::Existing(file.clone()),
+                    status: None,
+                    evidence_kind: None,
+                    evidence: Vec::new(),
+                    note: None,
+                }],
+                summary: format!("Admit t{i}"),
+                ..Default::default()
+            };
+            let origin = Origin::Service { service: "lean".into() };
+            declarations.push(f.graph.apply_service_batch(&origin, &batch).unwrap().entity_ids.remove(0));
+        }
+        for d in &declarations {
+            records(&f, &t, d, EvidenceKind::FormalCheck, 10..15);
+        }
+        apply_ops(
+            &f,
+            declarations
+                .iter()
+                .map(|d| relation(RelationKind::Formalizes, existing(d), existing(&f.ids.lemma)))
+                .collect(),
+        );
+        let (result, size) = ask(&f, TaskScope::Workspace, &input("entity", "", &[], f.ids.lemma.as_str()));
+        println!(
+            "{size} bytes; relations {} (relationsTruncated {}), neighbors {}, formalEvidence {}",
+            len(&result["relations"]),
+            result["relationsTruncated"],
+            len(&result["neighbors"]),
+            len(&result["formalEvidence"])
+        );
+        assert!(size <= RESULT_BYTES, "{size} bytes");
+    }
+
+    /// `n` more formal declarations of Main.lean (anchored in it, as the Lean
+    /// service admits them), each formalizing the lemma.
+    fn formalizing_declarations(f: &Fixture, file: &EntityId, n: usize) -> Vec<EntityId> {
+        use exposition_graph::{BatchRef, EntityUpsert, RelationUpsert, SourceBinding};
+        let origin = Origin::Service { service: "lean".into() };
+        let ids: Vec<EntityId> = (0..n)
+            .map(|i| {
+                let batch = ServiceBatch {
+                    entities: vec![EntityUpsert {
+                        id: None,
+                        kind: EntityKind::FormalDeclaration,
+                        roles: Vec::new(),
+                        label: format!("u{i}"),
+                        key: Some(format!("u{i}")),
+                        attributes: BTreeMap::new(),
+                        lifecycle: None,
+                        tombstone_reason: None,
+                        bindings: Some(vec![SourceBinding {
+                            entity: EntityId::mint(),
+                            path: p("Main.lean"),
+                            selector: SourceSelector::Declaration {
+                                syntax: "lean.declaration".into(),
+                                name: Some(format!("u{i}")),
+                                ordinal: None,
+                            },
+                            range: None,
+                            version: None,
+                            fingerprint: None,
+                            state: BindingState::Resolved,
+                            detail: None,
+                        }]),
+                    }],
+                    relations: vec![RelationUpsert {
+                        kind: RelationKind::AnchoredIn,
+                        from: BatchRef::Batch(0),
+                        to: BatchRef::Existing(file.clone()),
+                        status: None,
+                        evidence_kind: None,
+                        evidence: Vec::new(),
+                        note: None,
+                    }],
+                    summary: format!("Admit u{i}"),
+                    ..Default::default()
+                };
+                f.graph.apply_service_batch(&origin, &batch).unwrap().entity_ids.remove(0)
+            })
+            .collect();
+        apply_ops(
+            f,
+            ids.iter().map(|d| relation(RelationKind::Formalizes, existing(d), existing(&f.ids.lemma))).collect(),
+        );
+        ids
+    }
+
+    /// The declarations associated with a statement are listed up to 10;
+    /// past that the list says so by name (formalEvidenceTruncated), like
+    /// the other lists of the result.
+    #[test]
+    fn the_associated_declarations_are_flagged_exactly_past_their_bound() {
+        for (n, flagged) in [(10usize, false), (11, true)] {
+            let f = fixture();
+            let (file, _, _) = lean_declaration_with_evidence(&f);
+            formalizing_declarations(&f, &file, n);
+            let (result, _) = ask(&f, TaskScope::Workspace, &input("entity", "", &[], f.ids.lemma.as_str()));
+            let case = format!("{n} declarations: {} listed", len(&result["formalEvidence"]));
+            assert_eq!(len(&result["formalEvidence"]), 10, "{case}");
+            assert_eq!(result["formalEvidenceTruncated"], json!(flagged), "{case}");
+            assert_eq!(result["truncated"], json!(flagged), "{case}");
+        }
+    }
+
+    /// An entity summary lists at most 16 attributes, chosen among those
+    /// the task may see, and says when it left visible ones out: under
+    /// metadata-only consent a path-valued attribute that sorts after 20
+    /// withheld ones is still listed; with content consent 16 of 21 are
+    /// listed and the summary says so.
+    #[test]
+    fn an_entitys_attribute_summary_lists_what_the_task_may_see_and_says_when_some_are_left_out() {
+        let f = fixture();
+        let mut attributes: BTreeMap<String, String> = (0..20).map(|i| (format!("a{i:02}"), "x".to_owned())).collect();
+        attributes.insert("research.path".into(), "notes".into());
+        let claim = apply_ops(
+            &f,
+            vec![GraphOperation::CreateEntity {
+                temp_id: "attrs".into(),
+                kind: EntityKind::Claim,
+                roles: vec![],
+                label: "Attributed claim".into(),
+                key: None,
+                attributes,
+                binding: None,
+            }],
+        )["attrs"]
+            .clone();
+        let summary = |consent: ContextConsent| -> Value {
+            let mut s = spec(&f, TaskScope::Workspace);
+            s.consent = consent;
+            let out = gq::run(
+                GraphEnv { service: &f.graph, project: None },
+                &f.root,
+                &s,
+                &input("search", "", &["claim"], ""),
+            )
+            .unwrap_or_else(|e| panic!("{}", e.content));
+            out.content["entities"].as_array().unwrap().iter().find(|e| e["id"] == json!(claim)).unwrap().clone()
+        };
+        let metadata = summary(ContextConsent::MetadataOnly);
+        assert_eq!(metadata["attributes"], json!({"research.path": "notes"}), "{metadata}");
+        assert!(metadata.get("attributesTruncated").is_none(), "nothing visible was left out: {metadata}");
+        let content = summary(ContextConsent::ScopeContent);
+        assert_eq!(content["attributes"].as_object().map_or(0, |a| a.len()), 16, "{content}");
+        assert_eq!(content["attributesTruncated"], json!(true), "{content}");
+    }
+
+    /// The entity summary's flags are additive: absent while everything is
+    /// listed, exactly at the bounds (5 evidence records, 16 attributes),
+    /// and `true` one past them.
+    #[test]
+    fn summary_flags_are_absent_at_the_bound_and_true_past_it() {
+        for (n, flagged) in [(5u64, false), (6, true)] {
+            let f = fixture();
+            let (_, declaration, first) = lean_declaration_with_evidence(&f);
+            let t = template(&f, &first);
+            records(&f, &t, &declaration, EvidenceKind::Review, 2..n + 1);
+            let (result, _) = ask(&f, TaskScope::Workspace, &input("search", "", &["formalDeclaration"], ""));
+            let e = result["entities"].as_array().unwrap().iter().find(|e| e["id"] == json!(declaration)).unwrap();
+            assert_eq!(len(&e["evidence"]), 5, "{e}");
+            assert_eq!(e.get("evidenceTruncated").cloned(), flagged.then_some(json!(true)), "{n} records: {e}");
+        }
+        for (n, flagged) in [(16usize, false), (17, true)] {
+            let f = fixture();
+            let attributes: BTreeMap<String, String> = (0..n).map(|i| (format!("a{i:02}"), "x".to_owned())).collect();
+            let claim = apply_ops(
+                &f,
+                vec![GraphOperation::CreateEntity {
+                    temp_id: "attrs".into(),
+                    kind: EntityKind::Claim,
+                    roles: vec![],
+                    label: "Attributed claim".into(),
+                    key: None,
+                    attributes,
+                    binding: None,
+                }],
+            )["attrs"]
+                .clone();
+            let (result, _) = ask(&f, TaskScope::Workspace, &input("search", "Attributed", &["claim"], ""));
+            let e = result["entities"].as_array().unwrap().iter().find(|e| e["id"] == json!(claim)).unwrap();
+            assert_eq!(e["attributes"].as_object().map_or(0, |a| a.len()), 16, "{e}");
+            assert_eq!(e.get("attributesTruncated").cloned(), flagged.then_some(json!(true)), "{n} attributes: {e}");
+        }
+    }
+
+    /// The size bound with every large list at once: 20 own formal-check
+    /// records and 10 associated declarations with 5 each, all with
+    /// 2,000-character statements (about 160 KB before trimming). The
+    /// result is within 64 KiB, parses as JSON, and every list shorter than
+    /// what exists says so.
+    #[test]
+    fn the_size_bound_holds_with_large_own_and_formal_evidence_and_flags_every_cut() {
+        let f = fixture();
+        let (file, declaration, first) = lean_declaration_with_evidence(&f);
+        let mut t = template(&f, &first);
+        if let Some(formal) = t.formal.as_mut() {
+            formal.statement = "s".repeat(2000);
+        }
+        records(&f, &t, &f.ids.lemma, EvidenceKind::FormalCheck, 100..120);
+        let mut declarations = formalizing_declarations(&f, &file, 9);
+        apply_ops(&f, vec![relation(RelationKind::Formalizes, existing(&declaration), existing(&f.ids.lemma))]);
+        declarations.push(declaration);
+        for d in &declarations {
+            records(&f, &t, d, EvidenceKind::FormalCheck, 10..15);
+        }
+        let out = match gq::run(
+            GraphEnv { service: &f.graph, project: None },
+            &f.root,
+            &spec(&f, TaskScope::Workspace),
+            &input("entity", "", &[], f.ids.lemma.as_str()),
+        ) {
+            Ok(out) => out,
+            Err(out) => panic!("{}", out.content),
+        };
+        let text = serde_json::to_string(&out.content).unwrap();
+        let result: Value = serde_json::from_str(&text).expect("valid JSON");
+        let relations_total = f
+            .graph
+            .with_store(|s| Ok(s.relations_from(&f.ids.lemma)?.len() + s.relations_to(&f.ids.lemma)?.len()))
+            .unwrap();
+        let (formal, own, relations) =
+            (len(&result["formalEvidence"]), len(&result["evidence"]), len(&result["relations"]));
+        println!(
+            "{} bytes; formalEvidence {formal}/10, evidence {own}/20, relations {relations}/{relations_total}",
+            text.len()
+        );
+        assert!(text.len() <= RESULT_BYTES, "{} bytes", text.len());
+        assert_eq!(result["truncated"], json!(true));
+        assert_eq!(result["formalEvidenceTruncated"], json!(formal < 10), "{formal} of 10 listed");
+        assert_eq!(result["evidenceTruncated"], json!(own < 20), "{own} of 20 listed");
+        assert_eq!(
+            result["relationsTruncated"],
+            json!(relations < relations_total),
+            "{relations} of {relations_total}"
+        );
+    }
 }

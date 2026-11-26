@@ -313,7 +313,9 @@ The agent runtime may be reworked on top of these contracts. Keep them:
 - **Tool results say what they left out.** `read_file` (`complete`,
   `nextStartLine`), `list_files` (`nextOffset`, `listing`, `listingChanged`),
   `run_python` (`outputTruncated`, `resultsOmitted`), `check_lean`
-  (`diagnosticsOmitted`), graph reads (`truncated`). New tools follow the same
+  (`diagnosticsOmitted`), graph reads (`truncated`, `relationsTruncated`,
+  `evidenceTruncated`, `formalEvidenceTruncated`, and per entity summary
+  `evidenceTruncated` / `attributesTruncated`). New tools follow the same
   rule; none may return a clean short answer.
 - **No decision is cached.** The gate, authority re-read, consent, scope and
   exposure checks run per call. `edit_document` works only on a revision the
@@ -331,9 +333,8 @@ The agent runtime may be reworked on top of these contracts. Keep them:
 Measured sizes to design against: system prompt 7.8 KB; tool definitions
 35.8 KB, of which `workflow_propose` is 13.9 KB; building the tool list
 0.6 ms per request; one turn about 12 ms of local work (debug). Not yet
-addressed: tool-definition size per request, per-event render cost in the
-webview (no app benchmark exists for the agents view), and the remaining
-unflagged `take(300)` relation reads in the agents' graph queries.
+addressed: tool-definition size per request and per-event render cost in the
+webview (no app benchmark exists for the agents view).
 
 Several agents running at once in the app multiply every per-run cost above.
 What is known for that case, and what is not:

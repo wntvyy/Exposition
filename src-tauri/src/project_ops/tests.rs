@@ -64,6 +64,8 @@ struct FakeData {
     data_restores: Mutex<Vec<String>>,
     /// Graph entities the source side asks about.
     details: Vec<exposition_graph::model::EntityDetail>,
+    /// What the graph has read of the project's files (`None`: as without a graph).
+    indexing: Option<crate::source_removal::Indexing>,
 }
 
 fn wp(s: &str) -> WorkspacePath {
@@ -146,6 +148,9 @@ impl DataSide for FakeData {
     }
     fn entity_detail(&self, entity: &str) -> Option<exposition_graph::model::EntityDetail> {
         self.details.iter().find(|d| d.entity.id.as_str() == entity).cloned()
+    }
+    fn indexing(&self) -> Option<crate::source_removal::Indexing> {
+        self.indexing.clone()
     }
     fn after_paths(&self, outcomes: &[OpOutcome]) {
         self.after.lock().unwrap().push(outcomes.to_vec());
@@ -1395,4 +1400,558 @@ fn a_lean_declaration_lists_literal_uses_of_its_name_in_other_lean_files() {
     let result = apply_plan(&ops, &fx, &data, &plan).unwrap();
     assert_eq!(result.outcomes[0].status, OpStatus::Succeeded);
     assert_eq!(buffer(&fx, "lean/LeanBasic/Basel.lean").text, "namespace LeanBasic\n\nend LeanBasic\n");
+}
+
+/// Delete from Source plans from what the graph read of the item: when that
+/// read left relationships or their items out, the plan says its list of
+/// uses is incomplete and asks for the decision, instead of reading as "used
+/// by nothing" (here a claim depends on the theorem, but the bounded read
+/// of its neighbors did not include the claim).
+#[test]
+fn a_removal_planned_from_an_incomplete_read_of_its_uses_says_so() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    fs::write(fx.file("paper.tex"), PAPER).unwrap();
+    let theorem = entity(EntityKind::Theorem, "Theorem thm:main", Some("thm:main"));
+    let mut claim = entity(EntityKind::Claim, "Claim C", None);
+    claim.origin = Origin::User;
+    let thm_binding = binding(&theorem, "paper.tex", PAPER, "latex.env:theorem", Some("thm:main"));
+    let mut depends = relation(exposition_graph::vocabulary::RelationKind::DependsOn, &claim, &theorem);
+    depends.origin = Origin::User;
+    depends.status = exposition_graph::model::AssertionStatus::Accepted;
+    for (relations_truncated, neighbors_truncated) in [(false, true), (true, false)] {
+        let mut d = detail(theorem.clone(), vec![thm_binding.clone()], vec![depends.clone()], Vec::new());
+        if relations_truncated {
+            // The read of the relationships TO it stopped at its bound: more
+            // may exist than were read.
+            d.incoming = vec![depends.clone(); exposition_graph::store::MAX_ROWS];
+        }
+        d.relations_truncated = relations_truncated;
+        d.neighbors_truncated = neighbors_truncated;
+        let data = FakeData { details: vec![d], ..FakeData::default() };
+        let plan = ops.plan(&fx.ws, &data, delete(&[&theorem], false, OpActor::User)).unwrap();
+        let case = format!("relations_truncated {relations_truncated}, neighbors_truncated {neighbors_truncated}");
+        assert_eq!(plan.effects.len(), 1, "{case}: still removable as a reviewed, unsaved edit");
+        assert!(plan.needs_decision, "{case}: an incomplete list of uses is a decision: {:?}", plan.impacts);
+        let incomplete: Vec<&OpImpact> =
+            plan.impacts.iter().filter(|i| i.message.starts_with("Not every use of “Theorem thm:main”")).collect();
+        assert_eq!(incomplete.len(), 1, "{case}: {:?}", plan.impacts);
+        assert_eq!(incomplete[0].kind, ImpactKind::SourceDependents);
+        assert!(incomplete[0].message.contains("more relationships than this plan reads"), "{}", incomplete[0].message);
+    }
+}
+
+/// The uses of an item come from the graph's relations as of the files it
+/// has indexed: files it has not indexed yet (pending) or could not index
+/// (failed) may use the item too, so the plan says so; with every file
+/// indexed it does not.
+#[test]
+fn files_the_graph_has_not_indexed_make_the_list_of_uses_incomplete() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let p = paper(&fx);
+    let complete = ops.plan(&fx.ws, &p.data, delete(&[&p.theorem], false, OpActor::User)).unwrap();
+    assert!(
+        complete.impacts.iter().all(|i| !i.message.starts_with("Not every use of")),
+        "every file indexed: {:?}",
+        complete.impacts
+    );
+    use exposition_graph::model::CoverageState::{Complete, Failed, Pending};
+    let read = |files: &[(&str, exposition_graph::model::CoverageState)], first_read: bool| {
+        let mut files: BTreeMap<WorkspacePath, _> = files.iter().map(|(p, s)| (wp(p), *s)).collect();
+        files.insert(wp("paper.tex"), Complete);
+        Some(crate::source_removal::Indexing { files, first_read })
+    };
+    let indexed = FakeData { details: p.data.details.clone(), indexing: read(&[], false), ..FakeData::default() };
+    let plan = ops.plan(&fx.ws, &indexed, delete(&[&p.theorem], false, OpActor::User)).unwrap();
+    assert!(plan.impacts.iter().all(|i| !i.message.starts_with("Not every use of")), "{:?}", plan.impacts);
+    for (indexing, reason) in [
+        (read(&[("a.tex", Pending), ("b.tex", Pending)], false), "2 files are not indexed yet (a.tex, b.tex)"),
+        (
+            read(&[("c.tex", Failed), ("x.py", Failed), ("L.lean", Pending)], false),
+            "1 file could not be indexed (c.tex)",
+        ),
+        (
+            read(
+                &[("a.tex", Pending), ("c.tex", Failed), ("d.tex", Failed), ("e.ltx", Failed), ("f.tex", Failed)],
+                false,
+            ),
+            "1 file is not indexed yet (a.tex); 4 files could not be indexed (c.tex, d.tex, e.ltx and 1 more)",
+        ),
+        (read(&[], true), "the project's files are still being read"),
+    ] {
+        let data = FakeData { details: p.data.details.clone(), indexing, ..FakeData::default() };
+        let plan = ops.plan(&fx.ws, &data, delete(&[&p.theorem], false, OpActor::User)).unwrap();
+        let incomplete: Vec<&OpImpact> =
+            plan.impacts.iter().filter(|i| i.message.starts_with("Not every use of “Theorem thm:main”")).collect();
+        assert_eq!(incomplete.len(), 1, "{reason}: {:?}", plan.impacts);
+        assert_eq!(
+            incomplete[0].message,
+            format!(
+                "Not every use of “Theorem thm:main” could be checked: {reason}. Uses not listed here may break \
+                 too; check the sources before you save."
+            )
+        );
+        assert!(plan.needs_decision);
+    }
+}
+
+/// A Lean declaration whose literal uses are looked for in the project's
+/// Lean files: a file that cannot be read is not silently skipped.
+#[test]
+fn a_lean_file_that_cannot_be_read_makes_the_list_of_mentions_incomplete() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let basel = "namespace LeanBasic\n\ntheorem basel : True := by\n  trivial\n\nend LeanBasic\n";
+    fs::create_dir_all(fx.file("lean/LeanBasic")).unwrap();
+    fs::write(fx.file("lean/LeanBasic/Basel.lean"), basel).unwrap();
+    // Not UTF-8 text: the plan cannot look for mentions in it.
+    fs::write(fx.file("lean/Broken.lean"), [0x74, 0x68, 0xff, 0xfe, 0x00, 0xc3, 0x28]).unwrap();
+    let mut decl = entity(EntityKind::FormalDeclaration, "LeanBasic.basel", Some("LeanBasic.basel"));
+    decl.origin = Origin::Extracted { extractor: "lean/1".into() };
+    let b = binding(&decl, "lean/LeanBasic/Basel.lean", basel, "lean.theorem", Some("LeanBasic.basel"));
+    let data = FakeData { details: vec![detail(decl.clone(), vec![b], Vec::new(), Vec::new())], ..FakeData::default() };
+    let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+    assert!(plan.needs_decision, "{:?}", plan.impacts);
+    let impact = plan.impacts.iter().find(|i| i.message.starts_with("Not every use of “LeanBasic.basel”"));
+    let impact = impact.unwrap_or_else(|| panic!("{:?}", plan.impacts));
+    assert_eq!(impact.kind, ImpactKind::SourceDependents);
+    assert!(impact.message.contains("1 Lean file could not be read (lean/Broken.lean)"), "{}", impact.message);
+}
+
+/// The places that mention a removed Lean name are counted in full: the
+/// decision names 25 of them and says how many more there are.
+#[test]
+fn the_count_of_places_that_mention_a_lean_name_is_complete() {
+    let fx = fixture();
+    let ops = fx.ops(FakeTrash::default());
+    let basel = "namespace LeanBasic\n\ntheorem basel : True := by\n  trivial\n\nend LeanBasic\n";
+    fs::create_dir_all(fx.file("lean/LeanBasic")).unwrap();
+    fs::write(fx.file("lean/LeanBasic/Basel.lean"), basel).unwrap();
+    for i in 0..30 {
+        fs::write(fx.file(&format!("lean/U{i:02}.lean")), format!("theorem u{i} : True := LeanBasic.basel\n")).unwrap();
+    }
+    let mut decl = entity(EntityKind::FormalDeclaration, "LeanBasic.basel", Some("LeanBasic.basel"));
+    decl.origin = Origin::Extracted { extractor: "lean/1".into() };
+    let b = binding(&decl, "lean/LeanBasic/Basel.lean", basel, "lean.theorem", Some("LeanBasic.basel"));
+    let data = FakeData { details: vec![detail(decl.clone(), vec![b], Vec::new(), Vec::new())], ..FakeData::default() };
+    let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+    let impact = plan.impacts.iter().find(|i| i.message.contains("is mentioned by name in")).expect("the mentions");
+    assert_eq!(impact.consumers.len(), 25, "the decision names a bounded number: {impact:?}");
+    assert!(impact.message.contains(" and 25 more."), "5 shown of 30: {}", impact.message);
+    assert!(plan.impacts.iter().all(|i| !i.message.starts_with("Not every use")), "{:?}", plan.impacts);
+}
+
+// ----- review: Delete from Source with an incomplete list of uses --------------------------
+
+mod incomplete_uses_review {
+    use super::*;
+
+    const BASEL: &str = "namespace LeanBasic\n\ntheorem basel : True := by\n  trivial\n\nend LeanBasic\n";
+
+    /// lean/LeanBasic/Basel.lean and the FakeData detail of its declaration.
+    fn basel(fx: &Fixture) -> (FakeData, exposition_graph::model::Entity) {
+        fs::create_dir_all(fx.file("lean/LeanBasic")).unwrap();
+        fs::write(fx.file("lean/LeanBasic/Basel.lean"), BASEL).unwrap();
+        let mut decl = entity(EntityKind::FormalDeclaration, "LeanBasic.basel", Some("LeanBasic.basel"));
+        decl.origin = Origin::Extracted { extractor: "lean/1".into() };
+        let b = binding(&decl, "lean/LeanBasic/Basel.lean", BASEL, "lean.theorem", Some("LeanBasic.basel"));
+        (FakeData { details: vec![detail(decl.clone(), vec![b], Vec::new(), Vec::new())], ..FakeData::default() }, decl)
+    }
+
+    fn incomplete(plan: &OpPlan) -> Vec<&OpImpact> {
+        plan.impacts.iter().filter(|i| i.message.starts_with("Not every use of")).collect()
+    }
+
+    /// Not UTF-8: the plan cannot look for mentions in it.
+    const BROKEN: [u8; 7] = [0x74, 0x68, 0xff, 0xfe, 0x00, 0xc3, 0x28];
+
+    /// The Lean walk through the whole plan: 2,000 Lean files (its bound)
+    /// are all searched and the plan is complete (no decision: nothing
+    /// mentions the name); 2,001 are not, and the plan says so.
+    #[test]
+    fn the_lean_file_bound_is_said_exactly_past_it() {
+        for (total, capped) in [(2000usize, false), (2001, true)] {
+            let fx = fixture();
+            let ops = fx.ops(FakeTrash::default());
+            let (data, decl) = basel(&fx);
+            fs::create_dir_all(fx.file("lean/many")).unwrap();
+            for i in 1..total {
+                fs::write(fx.file(&format!("lean/many/F{i:04}.lean")), "theorem f : True := trivial\n").unwrap();
+            }
+            let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+            let found = incomplete(&plan);
+            let case = format!("{total} Lean files: {:?}", plan.impacts);
+            if capped {
+                assert_eq!(found.len(), 1, "{case}");
+                assert!(
+                    found[0].message.contains("only the first 2000 Lean files of the project were searched"),
+                    "{case}"
+                );
+                assert!(plan.needs_decision, "{case}");
+            } else {
+                assert!(found.is_empty(), "{case}");
+                assert!(!plan.needs_decision, "{case}");
+            }
+        }
+    }
+
+    /// The incompleteness is part of what the decision rests on: when a Lean
+    /// file becomes unreadable after planning, or readable again, the plan
+    /// is stale and nothing is removed.
+    #[test]
+    fn a_change_in_what_could_be_read_makes_the_plan_stale() {
+        let fx = fixture();
+        let ops = fx.ops(FakeTrash::default());
+        let (data, decl) = basel(&fx);
+        // Complete when planned; a file that cannot be read appears before apply.
+        let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+        assert!(incomplete(&plan).is_empty() && !plan.needs_decision, "{:?}", plan.impacts);
+        fs::write(fx.file("lean/Broken.lean"), BROKEN).unwrap();
+        assert_eq!(apply_plan(&ops, &fx, &data, &plan).unwrap_err().code, "ops.planStale");
+        assert!(fx.ws.documents().find_by_path(&wp("lean/LeanBasic/Basel.lean")).is_none(), "nothing edited");
+        // Incomplete when planned; the file becomes readable before apply.
+        let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+        assert_eq!(incomplete(&plan).len(), 1, "{:?}", plan.impacts);
+        fs::write(fx.file("lean/Broken.lean"), "theorem b : True := trivial\n").unwrap();
+        assert_eq!(apply_plan(&ops, &fx, &data, &plan).unwrap_err().code, "ops.planStale");
+        assert!(fx.ws.documents().find_by_path(&wp("lean/LeanBasic/Basel.lean")).is_none(), "nothing edited");
+    }
+
+    /// Warn, don't block: a plan whose list of uses is incomplete applies
+    /// (after the decision) as one unsaved edit in the shared undo history;
+    /// no file on disk changes, the unreadable file included.
+    #[test]
+    fn an_incomplete_plan_applies_only_as_an_unsaved_undoable_edit() {
+        let fx = fixture();
+        let ops = fx.ops(FakeTrash::default());
+        let (data, decl) = basel(&fx);
+        fs::write(fx.file("lean/Broken.lean"), BROKEN).unwrap();
+        let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+        assert!(plan.needs_decision);
+        assert_eq!(plan.effects.len(), 1);
+        let result = apply_plan(&ops, &fx, &data, &plan).unwrap();
+        assert_eq!(result.outcomes[0].status, OpStatus::Succeeded, "{:?}", result.outcomes);
+        let state = buffer(&fx, "lean/LeanBasic/Basel.lean");
+        assert_eq!(state.text, "namespace LeanBasic\n\nend LeanBasic\n");
+        assert_ne!(state.info.saved_revision, Some(state.info.revision), "unsaved");
+        assert_eq!(fs::read_to_string(fx.file("lean/LeanBasic/Basel.lean")).unwrap(), BASEL, "nothing on disk");
+        assert_eq!(fs::read(fx.file("lean/Broken.lean")).unwrap(), BROKEN);
+        fx.ws.documents().undo(&state.info.id, EditOrigin::Source).unwrap();
+        assert_eq!(buffer(&fx, "lean/LeanBasic/Basel.lean").text, BASEL, "Undo brings it back");
+    }
+
+    /// An agent is refused Delete from Source whatever the plan could read;
+    /// the refused item's consequences are not listed.
+    #[test]
+    fn an_agent_is_refused_even_when_the_read_was_incomplete() {
+        let fx = fixture();
+        let ops = fx.ops(FakeTrash::default());
+        let (data, decl) = basel(&fx);
+        fs::write(fx.file("lean/Broken.lean"), BROKEN).unwrap();
+        let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::Agent { task: "t-1".into() })).unwrap();
+        assert_eq!(plan.refusals.len(), 1);
+        assert_eq!(plan.refusals[0].code, "ops.agentScope");
+        assert!(plan.effects.is_empty() && plan.impacts.is_empty() && !plan.needs_decision, "{plan:?}");
+    }
+
+    /// The wording: counts, plurals, "and N more", the per-file mention cap,
+    /// and project-relative paths only.
+    #[test]
+    fn the_incompleteness_message_counts_and_names_project_paths() {
+        let fx = fixture();
+        let ops = fx.ops(FakeTrash::default());
+        let (data, decl) = basel(&fx);
+        for i in 0..4 {
+            fs::write(fx.file(&format!("lean/B{i}.lean")), BROKEN).unwrap();
+        }
+        let crowded: String = (0..51).map(|i| format!("theorem u{i} : True := LeanBasic.basel\n")).collect();
+        fs::write(fx.file("lean/Crowded.lean"), crowded).unwrap();
+        let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+        let found = incomplete(&plan);
+        assert_eq!(found.len(), 1, "{:?}", plan.impacts);
+        assert_eq!(
+            found[0].message,
+            "Not every use of “LeanBasic.basel” could be checked: 4 Lean files could not be read (lean/B0.lean, \
+             lean/B1.lean, lean/B2.lean and 1 more); only the first 50 mentions per file were read in \
+             lean/Crowded.lean. Uses not listed here may break too; check the sources before you save."
+        );
+        let mentions = plan.impacts.iter().find(|i| i.message.contains("is mentioned by name in")).unwrap();
+        assert!(mentions.message.contains(" and 45 more."), "50 places read, 5 named: {}", mentions.message);
+        let root = fx.project().display().to_string();
+        assert!(plan.impacts.iter().all(|i| !i.message.contains(&root)), "{:?}", plan.impacts);
+    }
+
+    /// A folder that cannot be listed (here: listing denied to everyone) is
+    /// named by its project path.
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_that_cannot_be_listed_is_named_by_its_project_path() {
+        struct Denied(PathBuf);
+        impl Drop for Denied {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("icacls").arg(&self.0).args(["/remove:d", "*S-1-1-0"]).output();
+            }
+        }
+        let fx = fixture();
+        let ops = fx.ops(FakeTrash::default());
+        let (data, decl) = basel(&fx);
+        fs::create_dir_all(fx.file("lean/Locked")).unwrap();
+        fs::write(fx.file("lean/Locked/Hidden.lean"), "theorem h : True := LeanBasic.basel\n").unwrap();
+        let locked = Denied(fx.file("lean/Locked"));
+        let out =
+            std::process::Command::new("icacls").arg(&locked.0).args(["/deny", "*S-1-1-0:(RD)"]).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+        assert!(fs::read_dir(&locked.0).is_err(), "the folder cannot be listed");
+        let plan = ops.plan(&fx.ws, &data, delete(&[&decl], false, OpActor::User)).unwrap();
+        drop(locked);
+        let found = incomplete(&plan);
+        assert_eq!(found.len(), 1, "{:?}", plan.impacts);
+        assert!(found[0].message.contains("1 folder could not be listed (lean/Locked)"), "{}", found[0].message);
+        assert!(plan.needs_decision);
+    }
+
+    /// FINDING (low): the plan reads "it has more relationships than this
+    /// plan reads" whenever the graph's detail read left neighbors out, also
+    /// when those were only items the removed item itself uses (outgoing):
+    /// every relationship TO it was read and its item is known.
+    #[test]
+    fn neighbors_left_out_only_on_the_outgoing_side_do_not_make_the_uses_incomplete() {
+        use exposition_graph::model::AssertionStatus;
+        use exposition_graph::vocabulary::RelationKind;
+        let fx = fixture();
+        let ops = fx.ops(FakeTrash::default());
+        fs::write(fx.file("paper.tex"), PAPER).unwrap();
+        let theorem = entity(EntityKind::Theorem, "Theorem thm:main", Some("thm:main"));
+        let mut claim = entity(EntityKind::Claim, "Claim C", None);
+        claim.origin = Origin::User;
+        let thm_binding = binding(&theorem, "paper.tex", PAPER, "latex.env:theorem", Some("thm:main"));
+        let mut depends = relation(RelationKind::DependsOn, &claim, &theorem);
+        depends.origin = Origin::User;
+        depends.status = AssertionStatus::Accepted;
+        // The theorem cites 501 sources: its detail lists 500 neighbors (the claim among them).
+        let cited: Vec<_> = (0..501).map(|i| entity(EntityKind::Reference, &format!("Ref {i}"), None)).collect();
+        let mut d = detail(theorem.clone(), vec![thm_binding], vec![depends], vec![claim.clone()]);
+        d.outgoing = cited.iter().map(|c| relation(RelationKind::References, &theorem, c)).collect();
+        d.neighbors.extend(cited.iter().take(499).cloned());
+        d.neighbors_truncated = true;
+        let data = FakeData { details: vec![d], ..FakeData::default() };
+        let plan = ops.plan(&fx.ws, &data, delete(&[&theorem], false, OpActor::User)).unwrap();
+        assert!(plan.impacts.iter().any(|i| i.message.contains("“Claim C” depends on it")), "{:?}", plan.impacts);
+        assert!(incomplete(&plan).is_empty(), "every use was read: {:?}", plan.impacts);
+    }
+}
+
+// ----- review: Delete from Source and the graph's indexing coverage -------------------------
+
+/// Delete from Source with the real graph service: the plan's data side reads
+/// the entity detail and the coverage exactly as `AppData` does.
+mod coverage_review {
+    use exposition_graph::model::{Entity, EntityDetail};
+    use exposition_graph::reconcile::{ReconcileOptions, Scope};
+    use exposition_graph::{GraphConfig, GraphService};
+
+    use super::*;
+
+    const MAIN: &str = "\\documentclass{article}\n\\begin{document}\n\n\\begin{lemma}\\label{lem:a}\nA closed subset is compact.\n\\end{lemma}\n\n\\end{document}\n";
+
+    /// `AppData`'s graph reads, over a graph service of the test's own.
+    struct GraphData(Arc<GraphService>);
+
+    impl DataSide for GraphData {
+        fn impacts_for_paths(&self, _paths: &[WorkspacePath], _kind: &OpKind) -> DataPlan {
+            DataPlan::default()
+        }
+        fn plan_data(&self, request: &OpRequest) -> DataPlan {
+            FakeData::default().plan_data(request)
+        }
+        fn apply_data(&self, _plan: &OpPlan, _choices: &BTreeMap<String, String>) -> Vec<OpOutcome> {
+            Vec::new()
+        }
+        fn prepare_paths(&self, _plan: &OpPlan, _choices: &BTreeMap<String, String>) -> Vec<OpRefusal> {
+            Vec::new()
+        }
+        fn after_paths(&self, _outcomes: &[OpOutcome]) {}
+        fn restore_data(&self, _restore: &OpRestore) -> Option<OpOutcome> {
+            None
+        }
+        fn graph_resource(&self, _path: &WorkspacePath) -> bool {
+            false
+        }
+        fn entity_detail(&self, entity: &str) -> Option<EntityDetail> {
+            let id = exposition_graph::ids::EntityId::parse(entity).ok()?;
+            self.0.entity_detail(&id).ok()
+        }
+        fn indexing(&self) -> Option<crate::source_removal::Indexing> {
+            crate::source_removal::indexing_of(&self.0)
+        }
+    }
+
+    struct Real {
+        dir: Temp,
+        ws: Arc<WorkspaceService>,
+        graph: Arc<GraphService>,
+        data: GraphData,
+    }
+
+    impl Real {
+        fn root(&self) -> PathBuf {
+            self.dir.0.join("project")
+        }
+        fn write(&self, path: &str, bytes: &[u8]) {
+            let mut full = self.root();
+            full.extend(path.split('/'));
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, bytes).unwrap();
+        }
+        fn reconcile(&self) {
+            self.graph.reconcile(&ReconcileOptions { scope: Scope::Full, force: false }).unwrap();
+        }
+        fn lemma(&self) -> Entity {
+            let (found, _) =
+                self.graph.with_store(|s| Ok(s.find_entities(Some(&[EntityKind::Lemma]), None, false, 10)?)).unwrap();
+            assert_eq!(found.len(), 1, "{found:?}");
+            found.into_iter().next().unwrap()
+        }
+        fn plan(&self, ops: &ProjectOps) -> OpPlan {
+            ops.plan(&self.ws, &self.data, delete(&[&self.lemma()], false, OpActor::User)).unwrap()
+        }
+        fn ops(&self) -> ProjectOps {
+            ProjectOps::new(&self.dir.0.join("app-data"), Arc::new(FakeTrash::default()))
+        }
+    }
+
+    /// A project with main.tex (one lemma nothing refers to) and `files`,
+    /// opened, attached and fully indexed.
+    fn real(files: &[(&str, &[u8])]) -> Real {
+        let dir = Temp::new();
+        let root = dir.0.join("project");
+        fs::create_dir_all(&root).unwrap();
+        let ws = WorkspaceService::new(Arc::new(DocumentService::new()), dir.0.join("data"));
+        ws.open_workspace(&root).unwrap();
+        let graph = GraphService::new(GraphConfig { data_dir: dir.0.join("graph-data") });
+        let real = Real { dir, ws, graph: Arc::clone(&graph), data: GraphData(graph) };
+        real.write("main.tex", MAIN.as_bytes());
+        for (path, bytes) in files {
+            real.write(path, bytes);
+        }
+        assert!(real.graph.attach(&root).is_usable());
+        real.reconcile();
+        real
+    }
+
+    fn incomplete(plan: &OpPlan) -> Vec<&OpImpact> {
+        plan.impacts.iter().filter(|i| i.message.starts_with("Not every use of")).collect()
+    }
+
+    /// Latin-1 text: not readable as UTF-8, so the graph cannot index it.
+    fn latin1(text: &str) -> Vec<u8> {
+        text.chars().map(|c| c as u32 as u8).collect()
+    }
+
+    /// Baseline: every file indexed, nothing uses the lemma: a routine
+    /// removal, no decision.
+    #[test]
+    fn a_fully_indexed_project_asks_nothing() {
+        let r = real(&[("analysis/run.py", b"x = 1\n")]);
+        let plan = r.plan(&r.ops());
+        assert!(plan.impacts.is_empty() && !plan.needs_decision, "{:?}", plan.impacts);
+    }
+
+    /// Accurate case: a LaTeX file the graph could not index (Latin-1) refers
+    /// to the lemma; its \ref is not in the graph, and the plan says that a
+    /// file could not be indexed.
+    #[test]
+    fn an_unindexed_latex_file_that_refers_to_the_item_is_said() {
+        let r = real(&[("other.tex", &latin1("Caf\u{e9}: see Lemma~\\ref{lem:a}.\n"))]);
+        assert_eq!(r.graph.status().coverage.failed, 1);
+        let plan = r.plan(&r.ops());
+        let found = incomplete(&plan);
+        assert_eq!(found.len(), 1, "{:?}", plan.impacts);
+        assert!(found[0].message.contains("1 file could not be indexed"), "{}", found[0].message);
+        assert!(plan.needs_decision);
+    }
+
+    /// Files in dependency and tool folders are not resources, so their
+    /// failures are not counted.
+    #[test]
+    fn unindexable_files_in_dependency_folders_are_not_counted() {
+        let bad = latin1("# caf\u{e9}\n");
+        let r =
+            real(&[(".venv/lib/legacy.py", &bad), ("node_modules/pkg/README.md", &bad), (".lake/build/X.lean", &bad)]);
+        assert_eq!(r.graph.status().coverage.failed, 0);
+        let plan = r.plan(&r.ops());
+        assert!(incomplete(&plan).is_empty() && !plan.needs_decision, "{:?}", plan.impacts);
+    }
+
+    /// FINDING (medium): any file the graph could not index counts, whatever
+    /// it is: a Python script and a Lean file that cannot be read (Latin-1)
+    /// cannot refer to a LaTeX lemma, yet every Delete from Source of a
+    /// LaTeX, Typst or BibTeX item in this project now asks for a decision
+    /// ("2 files could not be indexed"), for as long as those files stay.
+    #[test]
+    fn files_that_cannot_refer_to_the_item_do_not_make_its_uses_incomplete() {
+        let r = real(&[
+            ("analysis/legacy.py", &latin1("# caf\u{e9}\nx = 1\n")),
+            ("formal/Basic.lean", &latin1("theorem t : True := trivial -- caf\u{e9}\n")),
+        ]);
+        assert_eq!(r.graph.status().coverage.failed, 2);
+        let plan = r.plan(&r.ops());
+        assert!(incomplete(&plan).is_empty(), "nothing that could refer to the lemma is unindexed: {:?}", plan.impacts);
+        assert!(!plan.needs_decision);
+    }
+
+    /// FINDING (low): a pending file counts whatever it is: a Python script
+    /// saved a moment ago makes the removal of a LaTeX lemma ask for a
+    /// decision until the graph has read it again.
+    #[test]
+    fn a_pending_file_that_cannot_refer_to_the_item_does_not_make_its_uses_incomplete() {
+        let r = real(&[("analysis/run.py", b"x = 1\n")]);
+        r.graph.mark_pending(&[wp("analysis/run.py")]).unwrap();
+        assert_eq!(r.graph.status().coverage.pending, 1);
+        let plan = r.plan(&r.ops());
+        assert!(incomplete(&plan).is_empty(), "{:?}", plan.impacts);
+    }
+
+    /// A plan made while a file is pending says so; once the graph has read
+    /// the file, the plan is stale (the interface plans again and shows the
+    /// decision a second time).
+    #[test]
+    fn a_plan_made_while_a_file_is_pending_goes_stale_when_it_is_indexed() {
+        let r = real(&[]);
+        let ops = r.ops();
+        r.graph.mark_pending(&[wp("main.tex")]).unwrap();
+        let plan = r.plan(&ops);
+        let found = incomplete(&plan);
+        assert_eq!(found.len(), 1, "{:?}", plan.impacts);
+        assert!(found[0].message.contains("1 file is not indexed yet"), "{}", found[0].message);
+        r.graph.reconcile(&ReconcileOptions { scope: Scope::Paths(vec![wp("main.tex")]), force: false }).unwrap();
+        let applied = ops.apply(
+            &r.ws,
+            &r.data,
+            OpApply { plan: plan.plan.clone(), plan_hash: plan.plan_hash.clone(), choices: BTreeMap::new() },
+        );
+        assert_eq!(applied.unwrap_err().code, "ops.planStale");
+    }
+
+    /// FINDING (medium, under-warning): a file changed on disk that the
+    /// graph has not read yet but has not marked pending either — the state
+    /// of every file changed while the app was closed, until the full pass
+    /// that follows opening the project reaches it (the driver schedules
+    /// that pass without marking files pending; only the freshness says
+    /// Pending/Reconciling) — is not counted: here a new LaTeX file refers
+    /// to the lemma, and the plan lists no use and says nothing.
+    #[test]
+    fn a_file_the_graph_has_not_read_since_opening_is_said() {
+        let r = real(&[]);
+        r.write("other.tex", b"See Lemma~\\ref{lem:a}.\n");
+        let plan = r.plan(&r.ops());
+        let listed =
+            plan.impacts.iter().any(|i| i.message.contains("refers to it") || i.message.contains("references it"));
+        assert!(
+            listed || !incomplete(&plan).is_empty(),
+            "the \\ref in other.tex is unknown and unsaid: {:?}",
+            plan.impacts
+        );
+    }
 }

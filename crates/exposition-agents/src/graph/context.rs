@@ -111,23 +111,31 @@ impl<'a> Visibility<'a> {
         (self.content() || path_derived).then(|| truncate_chars(&entity.label, MAX_LABEL_CHARS))
     }
 
-    /// Attributes the task may see. Path-valued attributes (a research space's
-    /// folder) are metadata and shown when the path is in scope; the rest are
-    /// written by people or derived from content and need content consent.
-    pub fn attributes(&self, entity: &Entity) -> BTreeMap<String, String> {
+    /// Attributes the task may see (at most [`MAX_ATTRIBUTES`], chosen among
+    /// the visible ones), and whether it may see more. Path-valued attributes
+    /// (a research space's folder) are metadata and shown when the path is in
+    /// scope; the rest are written by people or derived from content and need
+    /// content consent.
+    pub fn attributes(&self, entity: &Entity) -> (BTreeMap<String, String>, bool) {
         let mut out = BTreeMap::new();
-        for (key, value) in entity.attributes.iter().take(MAX_ATTRIBUTES) {
+        let mut more = false;
+        for (key, value) in &entity.attributes {
             let path_valued = PATH_ATTRIBUTES.contains(&key.as_str());
             let visible = if path_valued {
                 WorkspacePath::parse(value).is_ok_and(|p| self.whole_project() || self.path(&p))
             } else {
                 self.content()
             };
-            if visible {
-                out.insert(key.clone(), truncate_chars(value, MAX_ATTRIBUTE_CHARS));
+            if !visible {
+                continue;
             }
+            if out.len() >= MAX_ATTRIBUTES {
+                more = true;
+                break;
+            }
+            out.insert(key.clone(), truncate_chars(value, MAX_ATTRIBUTE_CHARS));
         }
-        out
+        (out, more)
     }
 
     pub fn relation(&self, relation: &Relation) -> ContextRelation {
@@ -162,7 +170,8 @@ impl<'a> Visibility<'a> {
             _ => None,
         };
         let mut evidence = Vec::new();
-        for record in store.evidence_for_subject(&entity.id)?.iter().take(MAX_EVIDENCE_PER_ENTITY) {
+        let (records, more_evidence) = store.evidence_for_subject_bounded(&entity.id, MAX_EVIDENCE_PER_ENTITY)?;
+        for record in &records {
             let freshness = match evidence_freshness(store, record) {
                 Freshness::Current => EvidenceState::Current,
                 Freshness::Stale { .. } => EvidenceState::Stale,
@@ -170,6 +179,7 @@ impl<'a> Visibility<'a> {
             };
             evidence.push(ContextEvidence { kind: record.kind, freshness });
         }
+        let (attributes, more_attributes) = self.attributes(entity);
         Ok(ContextEntity {
             id: entity.id.clone(),
             kind: entity.kind,
@@ -180,10 +190,12 @@ impl<'a> Visibility<'a> {
             revision: entity.revision,
             origin: OriginKind::of(&entity.origin),
             version: binding.and_then(|b| b.version.clone()),
-            attributes: Some(self.attributes(entity)).filter(|a| !a.is_empty()),
+            attributes: Some(attributes).filter(|a| !a.is_empty()),
+            attributes_truncated: more_attributes.then_some(true),
             binding: binding.map(|b| b.state),
             coverage,
             evidence,
+            evidence_truncated: more_evidence.then_some(true),
         })
     }
 

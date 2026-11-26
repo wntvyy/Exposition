@@ -121,10 +121,21 @@ pub struct ContextEntity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub attributes: Option<std::collections::BTreeMap<String, String>>,
+    /// `true` when the task may see more attributes than `attributes` lists
+    /// (absent: all are listed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attributes_truncated: Option<bool>,
     pub binding: Option<BindingState>,
     /// Extraction coverage of the file (resources).
     pub coverage: Option<CoverageState>,
+    /// The newest evidence records about it (at most 5).
     pub evidence: Vec<ContextEvidence>,
+    /// `true` when more evidence records exist than `evidence` lists
+    /// (absent: all are listed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub evidence_truncated: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 
 use exposition_core::path::WorkspacePath;
-use exposition_graph::store::GraphStore;
+use exposition_graph::store::{GraphStore, StoreResult};
 use exposition_graph::{
     AssertionStatus, EntityId, EntityKind, Evidence, EvidenceKind, EvidenceOutcome, Freshness, ImpactRequest,
     Lifecycle, RelationKind, service::evidence_freshness,
@@ -23,7 +23,21 @@ use crate::tools::exec::{ToolOutput, codes};
 
 pub const MAX_LIMIT: u32 = 100;
 pub const MAX_DEPTH: u32 = 3;
+/// Relations listed in one result; a result that leaves some out says so
+/// (`relationsTruncated`).
 const MAX_RELATIONS: usize = 300;
+/// Matches a search reads before the scope filter; more matches than that
+/// leave the result incomplete (`truncated`), whatever it lists.
+const SEARCH_SCAN: usize = 2000;
+/// An entity's own evidence records listed (`evidenceTruncated`).
+const MAX_EVIDENCE: usize = 20;
+/// Formal-check records listed per associated declaration (`evidenceTruncated`
+/// of the `formalEvidence` item).
+const MAX_FORMAL_RECORDS: usize = 5;
+/// Declarations listed under `formalEvidence` (`formalEvidenceTruncated`).
+const MAX_FORMAL_DECLARATIONS: usize = 10;
+/// Affected evidence listed by an impact result (`evidenceTruncated`).
+const MAX_IMPACT_EVIDENCE: usize = 50;
 /// Serialized size bound of one result.
 const MAX_RESULT_BYTES: usize = 64 * 1024;
 
@@ -164,9 +178,18 @@ fn not_visible(_id: &str) -> ToolOutput {
     )
 }
 
-/// Trim a result to its size bound.
+/// Trim a result to its size bound, list by list in this order; what it
+/// cuts is said (`truncated`, and the list's own flag where it has one).
 fn bounded(mut out: Value) -> Value {
-    for key in ["relations", "entities", "items", "neighbors"] {
+    const LISTS: [(&str, Option<&str>); 6] = [
+        ("relations", Some("relationsTruncated")),
+        ("entities", None),
+        ("items", None),
+        ("neighbors", None),
+        ("formalEvidence", Some("formalEvidenceTruncated")),
+        ("evidence", Some("evidenceTruncated")),
+    ];
+    for (key, flag) in LISTS {
         while serde_json::to_string(&out).map(|s| s.len()).unwrap_or(0) > MAX_RESULT_BYTES {
             let Some(list) = out.get_mut(key).and_then(Value::as_array_mut) else { break };
             if list.is_empty() {
@@ -175,9 +198,23 @@ fn bounded(mut out: Value) -> Value {
             let keep = list.len() / 2;
             list.truncate(keep);
             out["truncated"] = json!(true);
+            if let Some(flag) = flag {
+                out[flag] = json!(true);
+            }
         }
     }
     out
+}
+
+/// The relations among `ids` (visible entities, so every relation among
+/// them is visible), at most [`MAX_RELATIONS`], and whether more exist.
+fn relations_among(
+    store: &GraphStore,
+    vis: &Visibility<'_>,
+    ids: &BTreeSet<EntityId>,
+) -> StoreResult<(Vec<ContextRelation>, bool)> {
+    let (relations, more) = store.relations_among_bounded(ids, MAX_RELATIONS)?;
+    Ok((relations.iter().map(|r| vis.relation(r)).collect(), more))
 }
 
 /// Run a validated query.
@@ -225,21 +262,23 @@ fn search(
         kinds =
             if kinds.is_empty() { files.to_vec() } else { kinds.into_iter().filter(|k| files.contains(k)).collect() };
         if kinds.is_empty() {
-            return Ok(json!({"entities": [], "relations": [], "truncated": false}));
+            return Ok(json!({"entities": [], "relations": [], "truncated": false, "relationsTruncated": false}));
         }
     }
     graph
         .service
         .with_store(|store| {
-            let (found, _) = store.find_entities(
+            let (found, total) = store.find_entities(
                 (!kinds.is_empty()).then_some(kinds.as_slice()),
                 (!text.is_empty()).then_some(text),
                 false,
-                2000,
+                SEARCH_SCAN,
             )?;
             let mut entities: Vec<ContextEntity> = Vec::new();
             let mut ids = BTreeSet::new();
-            let mut truncated = false;
+            // The scope filter runs on the matches read: matches past them
+            // were not looked at, so the result cannot be complete.
+            let mut truncated = total > found.len();
             for e in found {
                 let Some(bindings) = vis.entity(store, &e)? else { continue };
                 if entities.len() >= limit {
@@ -249,9 +288,13 @@ fn search(
                 ids.insert(e.id.clone());
                 entities.push(vis.describe(store, &e, &bindings)?);
             }
-            let relations: Vec<ContextRelation> =
-                store.relations_among(&ids)?.iter().take(MAX_RELATIONS).map(|r| vis.relation(r)).collect();
-            Ok(json!({"entities": entities, "relations": relations, "truncated": truncated}))
+            let (relations, relations_truncated) = relations_among(store, vis, &ids)?;
+            Ok(json!({
+                "entities": entities,
+                "relations": relations,
+                "truncated": truncated || relations_truncated,
+                "relationsTruncated": relations_truncated,
+            }))
         })
         .map_err(store_error)
 }
@@ -269,11 +312,13 @@ fn entity(graph: GraphEnv<'_>, vis: &Visibility<'_>, input: &GraphQueryInput) ->
             let mut all = store.relations_from(&id)?;
             all.extend(store.relations_to(&id)?);
             let mut truncated = false;
+            let mut relations_truncated = false;
             for r in all {
                 let other = if r.from == id { &r.to } else { &r.from };
                 let Some((o, ob)) = vis.entity_id(store, other)? else { continue };
                 if relations.len() >= MAX_RELATIONS {
                     truncated = true;
+                    relations_truncated = true;
                     break;
                 }
                 relations.push(vis.relation(&r));
@@ -282,36 +327,40 @@ fn entity(graph: GraphEnv<'_>, vis: &Visibility<'_>, input: &GraphQueryInput) ->
                 }
             }
             // Evidence about the entity itself.
-            let evidence: Vec<Value> =
-                store.evidence_for_subject(&id)?.iter().take(20).map(|r| evidence_item(store, vis, r)).collect();
+            let (own, evidence_truncated) = store.evidence_for_subject_bounded(&id, MAX_EVIDENCE)?;
+            truncated |= evidence_truncated;
+            let evidence: Vec<Value> = own.iter().map(|r| evidence_item(store, vis, r)).collect();
             // Formal evidence belongs to a declaration, never to what it
             // formalizes: for an informal entity, the evidence of each
             // associated declaration is listed apart, with the state of the
             // association (rejected ones are left out).
             let mut formal_evidence = Vec::new();
+            let mut formal_truncated = false;
             if e.kind != EntityKind::FormalDeclaration {
                 for r in store.relations_to(&id)? {
                     if r.kind != RelationKind::Formalizes || r.status == AssertionStatus::Rejected {
                         continue;
                     }
                     let Some((declaration, _)) = vis.entity_id(store, &r.from)? else { continue };
-                    if formal_evidence.len() >= 10 {
+                    if formal_evidence.len() >= MAX_FORMAL_DECLARATIONS {
                         truncated = true;
+                        formal_truncated = true;
                         break;
                     }
-                    let mut records: Vec<Evidence> = store
-                        .evidence_for_subject(&declaration.id)?
-                        .into_iter()
-                        .filter(|x| x.kind == EvidenceKind::FormalCheck)
-                        .collect();
-                    records.sort_by_key(|x| std::cmp::Reverse(x.recorded_at_ms));
-                    let records: Vec<Value> = records.iter().take(5).map(|x| evidence_item(store, vis, x)).collect();
+                    let (records, records_truncated) = store.evidence_of_kind_bounded(
+                        &declaration.id,
+                        EvidenceKind::FormalCheck,
+                        MAX_FORMAL_RECORDS,
+                    )?;
+                    truncated |= records_truncated;
+                    let records: Vec<Value> = records.iter().map(|x| evidence_item(store, vis, x)).collect();
                     let mut item = json!({
                         "declaration": declaration.id,
                         "label": vis.label(&declaration),
                         "relation": r.id,
                         "association": r.status,
                         "evidence": records,
+                        "evidenceTruncated": records_truncated,
                     });
                     // How the verdicts below reach this statement: through a
                     // link nobody reviewed, or one whose review no longer
@@ -345,9 +394,12 @@ fn entity(graph: GraphEnv<'_>, vis: &Visibility<'_>, input: &GraphQueryInput) ->
                 "neighbors": neighbors,
                 "evidence": evidence,
                 "truncated": truncated,
+                "relationsTruncated": relations_truncated,
+                "evidenceTruncated": evidence_truncated,
             });
             if e.kind != EntityKind::FormalDeclaration && !formal_evidence.is_empty() {
                 out["formalEvidence"] = json!(formal_evidence);
+                out["formalEvidenceTruncated"] = json!(formal_truncated);
             }
             if formal {
                 out["evidenceNote"] = json!(FORMAL_EVIDENCE_NOTE);
@@ -416,10 +468,14 @@ fn neighborhood(
                     queue.push_back((other, d + 1));
                 }
             }
-            let relations: Vec<ContextRelation> =
-                store.relations_among(&seen)?.iter().take(MAX_RELATIONS).map(|r| vis.relation(r)).collect();
+            let (relations, relations_truncated) = relations_among(store, vis, &seen)?;
             let formal = mentions_formal(&entities, &relations);
-            let mut out = json!({"entities": entities, "relations": relations, "truncated": truncated});
+            let mut out = json!({
+                "entities": entities,
+                "relations": relations,
+                "truncated": truncated || relations_truncated,
+                "relationsTruncated": relations_truncated,
+            });
             if formal {
                 out["evidenceNote"] = json!(FORMAL_EVIDENCE_NOTE);
             }
@@ -484,8 +540,7 @@ fn inspect(
                 }
                 v
             });
-            let relations: Vec<ContextRelation> =
-                store.relations_among(&ids)?.iter().take(MAX_RELATIONS).map(|r| vis.relation(r)).collect();
+            let (relations, relations_truncated) = relations_among(store, vis, &ids)?;
             let formal = mentions_formal(&entities, &relations);
             let mut out = json!({
                 "path": path,
@@ -493,7 +548,8 @@ fn inspect(
                 "coverage": coverage,
                 "entities": entities,
                 "relations": relations,
-                "truncated": truncated,
+                "truncated": truncated || relations_truncated,
+                "relationsTruncated": relations_truncated,
             });
             if formal {
                 out["evidenceNote"] = json!(FORMAL_EVIDENCE_NOTE);
@@ -563,11 +619,18 @@ fn impact(
                 items.push(v);
             }
             // Evidence the change would affect, with its current
-            // applicability (only evidence of entities the task may see).
+            // applicability. Only evidence of entities the task may see
+            // counts, listed or left out: a hidden record neither appears nor
+            // makes the list read as incomplete.
             let mut evidence = Vec::new();
-            for hit in report.evidence.iter().take(50) {
+            let mut evidence_truncated = false;
+            for hit in &report.evidence {
                 if vis.entity_id(store, &hit.subject)?.is_none() {
                     continue;
+                }
+                if evidence.len() >= MAX_IMPACT_EVIDENCE {
+                    evidence_truncated = true;
+                    break;
                 }
                 let freshness = match &hit.freshness {
                     Freshness::Current => "current",
@@ -591,7 +654,8 @@ fn impact(
                 "items": items,
                 "evidence": evidence,
                 "unknownCoverage": unknown,
-                "truncated": truncated,
+                "truncated": truncated || evidence_truncated,
+                "evidenceTruncated": evidence_truncated,
             });
             if root_kind == EntityKind::Resource {
                 out["scope"] = json!(FILE_IMPACT_NOTE);

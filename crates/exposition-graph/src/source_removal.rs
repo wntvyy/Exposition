@@ -196,7 +196,8 @@ pub struct Mention {
     pub declaration: Option<String>,
 }
 
-/// Mentions per file are capped (the decision lists names, not every use).
+/// Mentions per file are capped (the decision lists names, not every use);
+/// [`lean_mentions_bounded`] says when a file has more.
 pub const MAX_MENTIONS: usize = 50;
 
 fn id_first(c: char) -> bool {
@@ -226,12 +227,22 @@ fn names(token: &str, full: &[&str]) -> bool {
 /// Literal uses of the Lean declaration `full_name` in `text` (comments and
 /// strings excluded), outside `exclude` (the removed text). This is a
 /// mention, not a resolved dependency: `open` and local names are not
-/// interpreted, so a person reviews the list.
+/// interpreted, so a person reviews the list. At most [`MAX_MENTIONS`].
 pub fn lean_mentions(path: &WorkspacePath, text: &str, full_name: &str, exclude: &[TextRange]) -> Vec<Mention> {
+    lean_mentions_bounded(path, text, full_name, exclude).0
+}
+
+/// [`lean_mentions`], and whether `text` has more mentions than are listed.
+pub fn lean_mentions_bounded(
+    path: &WorkspacePath,
+    text: &str,
+    full_name: &str,
+    exclude: &[TextRange],
+) -> (Vec<Mention>, bool) {
     let full: Vec<&str> = full_name.split('.').filter(|p| !p.is_empty()).collect();
-    let Some(last) = full.last() else { return Vec::new() };
+    let Some(last) = full.last() else { return (Vec::new(), false) };
     if !text.contains(last) {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let (masked, _, _) = extract::lean::mask(text);
     let extraction: Option<Extraction> = extract::extract(path, text);
@@ -264,6 +275,9 @@ pub fn lean_mentions(path: &WorkspacePath, text: &str, full_name: &str, exclude:
         if exclude.iter().any(|x| x.start <= range.start && range.end <= x.end) {
             continue;
         }
+        if out.len() >= MAX_MENTIONS {
+            return (out, true);
+        }
         let line = index.line_column(range.start as usize).map_or(0, |p| p.line as usize + 1);
         let declaration = extraction.as_ref().and_then(|x| {
             x.declarations
@@ -273,11 +287,8 @@ pub fn lean_mentions(path: &WorkspacePath, text: &str, full_name: &str, exclude:
                 .and_then(|d| d.name.clone())
         });
         out.push(Mention { range, line, declaration });
-        if out.len() >= MAX_MENTIONS {
-            break;
-        }
     }
-    out
+    (out, false)
 }
 
 #[cfg(test)]
@@ -443,6 +454,16 @@ mod tests {
             vec![(Some("LeanBasic.uses_basel"), 8), (Some("LeanBasic.field"), 10), (None, 19)],
             "the header, the comment, the string and Foo.basel are not uses of LeanBasic.basel"
         );
+        assert!(!lean_mentions_bounded(&wp("B.lean"), LEAN, "LeanBasic.basel", &[removal]).1);
+    }
+
+    #[test]
+    fn a_file_with_more_mentions_than_are_listed_says_so() {
+        let uses = |n: usize| (0..n).map(|i| format!("theorem u{i} : True := basel\n")).collect::<String>();
+        let (listed, more) = lean_mentions_bounded(&wp("U.lean"), &uses(MAX_MENTIONS), "basel", &[]);
+        assert_eq!((listed.len(), more), (MAX_MENTIONS, false), "exactly the bound: complete");
+        let (listed, more) = lean_mentions_bounded(&wp("U.lean"), &uses(MAX_MENTIONS + 1), "basel", &[]);
+        assert_eq!((listed.len(), more), (MAX_MENTIONS, true));
     }
 
     /// Remove the declaration `syntax`/`name` of `text` the way Delete from Source does.

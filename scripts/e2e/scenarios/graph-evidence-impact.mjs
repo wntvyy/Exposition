@@ -52,6 +52,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { runCommand } from "../palette.mjs";
 import { invoke, openInEditor, waitFor } from "../workspace-helpers.mjs";
@@ -144,14 +145,26 @@ export default async function graphEvidenceImpact({ launchApp, artifactsDir, ass
       { timeout: 30_000, message: `task ${prompt}` },
     );
     const detail = await invoke(page, "agents_task_detail", { task: task.id });
+    // The transcript shows each result cut to a preview; the task was given
+    // the whole result, as stored.
+    const db = new DatabaseSync(join(dataDir, "agents.sqlite3"), { readOnly: true });
+    let stored;
+    try {
+      stored = new Map(
+        db.prepare("SELECT tool_use_id, result FROM tool_calls WHERE task_id = ?").all(task.id).map((r) => [r.tool_use_id, r.result]),
+      );
+    } finally {
+      db.close();
+    }
     const results = {};
     for (const item of detail.transcript) {
       if (item.kind !== "toolCall") continue;
+      const text = stored.get(item.toolUseId) ?? item.result;
       let value;
       try {
-        value = JSON.parse(item.result ?? "null");
+        value = JSON.parse(text ?? "null");
       } catch {
-        value = { raw: item.result };
+        value = { raw: text };
       }
       results[item.toolUseId] = { value, isError: item.isError, status: item.status };
     }

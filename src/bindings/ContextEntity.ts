@@ -32,8 +32,22 @@ version: SourceVersion | null,
  * Attributes the task may see: path-valued ones (`research.path`) always,
  * the others only with content consent. Absent when there are none.
  */
-attributes?: { [key in string]: string }, binding: BindingState | null, 
+attributes?: { [key in string]: string }, 
+/**
+ * `true` when the task may see more attributes than `attributes` lists
+ * (absent: all are listed).
+ */
+attributesTruncated?: boolean, binding: BindingState | null, 
 /**
  * Extraction coverage of the file (resources).
  */
-coverage: CoverageState | null, evidence: Array<ContextEvidence>, };
+coverage: CoverageState | null, 
+/**
+ * The newest evidence records about it (at most 5).
+ */
+evidence: Array<ContextEvidence>, 
+/**
+ * `true` when more evidence records exist than `evidence` lists
+ * (absent: all are listed).
+ */
+evidenceTruncated?: boolean, };
