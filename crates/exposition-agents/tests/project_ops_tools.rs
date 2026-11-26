@@ -456,7 +456,6 @@ impl ProjectOperations for UncheckedOps {
 /// copy could not be checked, the review says the copy "is in use now",
 /// which nobody knows: the message should say that what uses it could not be
 /// checked.
-#[ignore = "review finding (low): reverting a copy while a consumer source cannot be read says 'The copy is in use now', which is not known"]
 #[tokio::test]
 async fn review_reverting_a_copy_whose_users_could_not_be_checked_does_not_say_it_is_in_use() {
     let fx = fixture();
@@ -516,6 +515,60 @@ async fn review_an_ask_task_is_refused_a_deletion_whose_users_could_not_be_check
     if let Gate::Refused(out) = &gate {
         assert_eq!(out.content["impacts"][0]["kind"], "consumersUnknown", "{}", out.content);
         assert!(out.content["impacts"][0]["consequence"].as_str().unwrap().contains("could not be checked"));
+    }
+    assert!(fx.exists("notes/a.typ") && fx.services.ops.applied.lock().unwrap().is_empty(), "nothing changed");
+}
+
+/// A deletion whose consumers could not be checked is refused before anyone
+/// is asked in every mode: an approval card would only lead to a refusal
+/// when the deletion is applied. The refusal says to ask the user to delete
+/// the item (running the task with review of each change would not help).
+#[tokio::test]
+async fn a_deletion_whose_users_could_not_be_checked_is_refused_in_every_mode_without_an_approval() {
+    struct Unchecked(Arc<UncheckedOps>);
+    #[async_trait]
+    impl ToolServices for Unchecked {
+        fn available(&self, kind: ServiceKind) -> bool {
+            kind == ServiceKind::ProjectOps
+        }
+        fn restricted_backend(&self) -> Option<String> {
+            None
+        }
+        async fn build_document(&self, _: BuildRequest, _: CancellationToken) -> Result<Value, ServiceError> {
+            Err(ServiceError::NotAvailable(ServiceKind::Typesetting))
+        }
+        async fn run_python(&self, _: PythonRequest, _: CancellationToken) -> Result<Value, ServiceError> {
+            Err(ServiceError::NotAvailable(ServiceKind::Research))
+        }
+        async fn check_lean(&self, _: LeanRequest, _: CancellationToken) -> Result<Value, ServiceError> {
+            Err(ServiceError::NotAvailable(ServiceKind::Lean))
+        }
+        async fn run_command(&self, _: CommandRequest, _: CancellationToken) -> Result<Value, ServiceError> {
+            Err(ServiceError::NotAvailable(ServiceKind::Execution))
+        }
+        fn project_operations(&self) -> Option<Arc<dyn ProjectOperations>> {
+            Some(self.0.clone())
+        }
+    }
+    let fx = fixture();
+    let services = Unchecked(Arc::new(UncheckedOps(fx.services.ops.clone())));
+    let call = ToolCall::parse(tools::DELETE_PATHS, &json!({"paths": ["notes/a.typ"]})).unwrap();
+    for (permission, mode) in [
+        (PermissionProfile::AutoApply, ApprovalMode::Ask),
+        (PermissionProfile::ReviewEdits, ApprovalMode::Ask),
+        (PermissionProfile::AutoApply, ApprovalMode::Auto),
+        (PermissionProfile::ReviewEdits, ApprovalMode::Auto),
+    ] {
+        let spec = TaskSpec { approval_mode: mode, ..fx.spec(permission, TaskScope::Workspace) };
+        let env = ToolEnv { services: &services, ..fx.env(&spec) };
+        let gate = exec::gate(&call, &env);
+        assert_eq!(refused_code(&gate), exec::codes::NEEDS_DECISION, "{permission:?} {mode:?}");
+        if let Gate::Refused(out) = &gate {
+            let text = out.content["error"].as_str().unwrap();
+            assert!(text.contains("could not be checked") && text.contains("ask the user to delete them"), "{text}");
+            assert!(!text.contains("review of each change"), "{text}");
+            assert_eq!(out.content["impacts"][0]["kind"], "consumersUnknown");
+        }
     }
     assert!(fx.exists("notes/a.typ") && fx.services.ops.applied.lock().unwrap().is_empty(), "nothing changed");
 }
