@@ -257,18 +257,21 @@ describe("the combined decision", () => {
   });
 
   it("consumers that could not be checked are decided like any consequence: shown under their own heading, nothing applied on Cancel", async () => {
-    const one = del(["data/raw.csv"]);
+    const one = del(["data/raw.csv", "data/b.csv", "data/c.csv"]);
     const message =
-      "Manuscripts, workflows and retained evidence that use “data/raw.csv” could not be checked: the project graph could not be read. They may be affected if you delete it.";
+      "Manuscripts, workflows and retained evidence using “data/raw.csv”, “data/b.csv” and “data/c.csv” could not be checked: the project graph could not be read.";
     ipc.plan.mockResolvedValue(
       plan(one, { needsDecision: true, impacts: [{ kind: "consumersUnknown", target: one.targets[0]!, consumers: [], message }] }),
     );
-    ipc.apply.mockResolvedValue(result([outcome("data/raw.csv")]));
+    ipc.apply.mockResolvedValue(result(["data/raw.csv", "data/b.csv", "data/c.csv"].map((p) => outcome(p))));
     const cancelled = runOperation(one);
     let dialog = await screen.findByRole("alertdialog");
+    expect(dialog.querySelector(".xp-ops-decision__lead")?.textContent).toBe("Deleting may have consequences that could not be checked:");
     const group = dialog.querySelector('[data-impact="consumersUnknown"]') as HTMLElement;
     expect(within(group).getByRole("heading", { name: "Could not be checked" })).toBeTruthy();
-    expect(within(group).getByText(message)).toBeTruthy();
+    // One line for the source, naming every item itself (no per-item prefix).
+    expect(group.querySelectorAll('[data-testid="op-impact"]')).toHaveLength(1);
+    expect(group.querySelector('[data-testid="op-impact"]')?.textContent).toBe(message);
     expect(group.querySelector('[data-testid="op-impact"]')?.getAttribute("data-kind")).toBe("consumersUnknown");
     expect(dialog.querySelectorAll("[data-choice]")).toHaveLength(0);
     await waitFor(() => expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Cancel" })));

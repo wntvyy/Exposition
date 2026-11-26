@@ -526,9 +526,10 @@ fn unchecked(plan: &OpPlan) -> Vec<(String, String)> {
 }
 
 /// A plan whose consumers could not all be read says so to the user: one
-/// "could not be checked" impact per deleted path and per source that
-/// failed, which needs the decision like every other impact. A plan whose
-/// readers all work is the plan it always was.
+/// "could not be checked" impact per source that failed, naming the deleted
+/// paths it covers (up to three by name), which needs the decision like
+/// every other impact. A plan whose readers all work is the plan it always
+/// was.
 #[test]
 fn a_plan_says_which_consumers_could_not_be_checked() {
     let e = env();
@@ -542,16 +543,10 @@ fn a_plan_says_which_consumers_could_not_be_checked() {
     assert!(research.choices.is_empty(), "there is nothing to choose, only to confirm or cancel");
     assert_eq!(
         unchecked(&research),
-        vec![
-            (
-                "data/obs.csv".to_owned(),
-                "Running research runs that use “data/obs.csv” could not be checked: the research run records could not be read. They may be affected if you delete it.".to_owned()
-            ),
-            (
-                "notes.md".to_owned(),
-                "Running research runs that use “notes.md” could not be checked: the research run records could not be read. They may be affected if you delete it.".to_owned()
-            ),
-        ]
+        vec![(
+            "data/obs.csv".to_owned(),
+            "Research runs using “data/obs.csv” and “notes.md” could not be checked: the research run records could not be read.".to_owned()
+        )]
     );
     *e.research.failing.lock().unwrap() = None;
     let again = e.plan(request());
@@ -563,8 +558,11 @@ fn a_plan_says_which_consumers_could_not_be_checked() {
 
     *e.tasks.failing.lock().unwrap() = Some(OpError::new("agents.store", "the task records cannot be read"));
     let tasks = unchecked(&e.plan(request()));
-    assert_eq!(tasks.len(), 2);
-    assert!(tasks[0].1.starts_with("Running agent tasks that use “data/obs.csv” could not be checked: the agent task records could not be read."), "{tasks:?}");
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        tasks[0].1,
+        "Agent tasks using “data/obs.csv” and “notes.md” could not be checked: the agent task records could not be read."
+    );
     *e.tasks.failing.lock().unwrap() = None;
 
     e.tasks.records.lock().unwrap().push(task(&e, "task-1", true));
@@ -577,11 +575,27 @@ fn a_plan_says_which_consumers_could_not_be_checked() {
     e.fx.graph.detach();
     *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
     let both = e.plan(request());
-    let messages: Vec<String> =
-        unchecked(&both).into_iter().filter(|(t, _)| t == "data/obs.csv").map(|(_, m)| m).collect();
-    assert_eq!(messages.len(), 2, "{messages:?}");
-    assert!(messages.iter().any(|m| m.starts_with("Manuscripts, workflows and retained evidence that use “data/obs.csv” could not be checked: the project graph could not be read.")), "{messages:?}");
+    let messages: Vec<String> = unchecked(&both).into_iter().map(|(_, m)| m).collect();
+    assert_eq!(
+        messages,
+        vec![
+            "Manuscripts, workflows and retained evidence using “data/obs.csv” and “notes.md” could not be checked: the project graph could not be read.",
+            "Research runs using “data/obs.csv” and “notes.md” could not be checked: the research run records could not be read.",
+        ]
+    );
     assert!(both.needs_decision);
+
+    // Many paths: the first three by name and how many there are.
+    let many: Vec<OpTarget> = ["data/obs.csv", "notes.md", "experiment.py", "data/extra.csv", "data"].map(p).to_vec();
+    let five = e.plan(e.request(delete(false), many));
+    let names: Vec<String> = unchecked(&five).into_iter().map(|(_, m)| m).collect();
+    assert_eq!(names.len(), 2);
+    assert!(
+        names[1].starts_with(
+            "Research runs using 5 items (“data/obs.csv”, “notes.md”, “experiment.py” and 2 more) could not be checked:"
+        ),
+        "{names:?}"
+    );
 }
 
 /// An active workflow run whose record cannot be read is not a run that reads
@@ -602,7 +616,7 @@ fn an_active_run_whose_record_cannot_be_read_is_not_left_out() {
         unchecked(&unread),
         vec![(
             "data/obs.csv".to_owned(),
-            "Running workflows that use “data/obs.csv” could not be checked: the record of a running workflow could not be read. They may be affected if you delete it.".to_owned()
+            "Running workflows using “data/obs.csv” could not be checked: the record of a running workflow could not be read.".to_owned()
         )]
     );
     release.store(true, Ordering::SeqCst);
@@ -617,13 +631,12 @@ fn an_agent_may_not_delete_what_could_not_be_checked() {
     *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
     let agent = e.plan(OpRequest {
         kind: delete(false),
-        targets: vec![p("notes.md")],
+        targets: vec![p("notes.md"), p("experiment.py")],
         actor: OpActor::Agent { task: "task-x".into() },
     });
     assert!(agent.needs_decision);
     let refused = e.prepare(&agent, &[]);
-    assert_eq!(refused.len(), 1, "{refused:?}");
-    assert_eq!(refused[0].target, p("notes.md"));
+    assert_eq!(refused.iter().map(|r| r.target.clone()).collect::<Vec<_>>(), vec![p("notes.md"), p("experiment.py")]);
     assert_eq!(
         (refused[0].code.as_str(), refused[0].message.as_str()),
         ("ops.agentScope", "What uses this item could not be checked; an agent cannot delete it. Ask the user.")
@@ -656,7 +669,7 @@ fn triggers_that_cannot_be_read_are_never_taken_as_none() {
     assert_eq!(serde_json::to_value(unread.impacts[0].kind).unwrap(), "consumersUnknown");
     assert_eq!(
         unread.impacts[0].message,
-        "Enabled triggers that use “notes.md” could not be checked: the workflow triggers could not be read. They may be affected if you delete it."
+        "Enabled triggers using “notes.md” could not be checked: the workflow triggers could not be read."
     );
     assert_ne!(unread.fingerprint, readable.fingerprint, "triggers that could not be read are not \"none\"");
 }

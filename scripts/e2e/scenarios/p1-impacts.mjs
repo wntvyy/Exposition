@@ -251,9 +251,13 @@ export default async function p1Impacts({ launchApp, artifactsDir, assert, fixtu
     assert.equal(await unchecked.count(), 1, "one notice: the project graph could not be read");
     assert.match(
       await unchecked.textContent(),
-      /Manuscripts, workflows and retained evidence that use “scratch\/unused\.txt” could not be checked: the project graph could not be read\./,
+      /^Manuscripts, workflows and retained evidence using “scratch\/unused\.txt” could not be checked: the project graph could not be read\.$/,
     );
     assert.equal(await decision(page).locator("[data-choice]").count(), 0, "nothing to choose, only Cancel or Delete");
+    assert.equal(
+      await decision(page).locator(".xp-ops-decision__lead").textContent(),
+      "Deleting may have consequences that could not be checked:",
+    );
     await shot(page, "p1-impact-unchecked-light");
     await decision(page).getByRole("button", { name: "Cancel" }).click();
     await page.waitForTimeout(400);

@@ -427,9 +427,10 @@ struct Unchecked {
 /// A source of consumers that cannot be read (the project graph, the
 /// records of running workflows, research run records, agent tasks or a
 /// task's files, triggers) is never taken as "nothing uses these paths":
-/// each such source adds a `consumersUnknown` impact per path (decided by
-/// the user like any other) and its error code to the fingerprint, so a plan
-/// made while it failed goes stale once it reads again.
+/// each such source adds one `consumersUnknown` impact naming the paths it
+/// covers (decided by the user like any other; refused for an agent) and its
+/// error code to the fingerprint, so a plan made while it failed goes stale
+/// once it reads again.
 pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &OpKind) -> DataPlan {
     let mut plan = DataPlan::default();
     if !matches!(kind, OpKind::Delete { .. }) || paths.is_empty() {
@@ -484,10 +485,8 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
         }
         Some(Err(e)) => {
             plan.fingerprint.push(format!("research:{}", e.code));
-            unchecked.push(Unchecked {
-                what: "Running research runs",
-                cause: "the research run records could not be read".into(),
-            });
+            unchecked
+                .push(Unchecked { what: "Research runs", cause: "the research run records could not be read".into() });
         }
         None => {}
     }
@@ -500,7 +499,7 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
                         Err(e) => {
                             plan.fingerprint.push(format!("taskPaths:{}:{}", task.id.0, e.code));
                             unchecked.push(Unchecked {
-                                what: "Running agent tasks",
+                                what: "Agent tasks",
                                 cause: format!("the files of {} could not be read", quoted(&task.title)),
                             });
                             continue;
@@ -517,10 +516,8 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
             }
             Err(e) => {
                 plan.fingerprint.push(format!("tasks:{}", e.code));
-                unchecked.push(Unchecked {
-                    what: "Running agent tasks",
-                    cause: "the agent task records could not be read".into(),
-                });
+                unchecked
+                    .push(Unchecked { what: "Agent tasks", cause: "the agent task records could not be read".into() });
             }
         }
     }
@@ -577,23 +574,34 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
             push_choice(&mut plan.choices, triggers_choice());
         }
     }
-    for path in paths {
+    // One entry per source that could not be read, naming the paths it
+    // covers (every deleted path); it belongs to the first of them.
+    if let Some(first) = paths.first() {
+        let subject = covered(paths);
         for u in &unchecked {
             plan.impacts.push(OpImpact {
                 kind: ImpactKind::ConsumersUnknown,
-                target: OpTarget::Path { path: path.clone() },
+                target: OpTarget::Path { path: first.clone() },
                 consumers: Vec::new(),
-                message: format!(
-                    "{} that use {} could not be checked: {}. They may be affected if you delete it.",
-                    u.what,
-                    quoted(path.as_str()),
-                    u.cause
-                ),
+                message: format!("{} using {subject} could not be checked: {}.", u.what, u.cause),
             });
         }
     }
     plan.fingerprint.extend(fingerprint_of(&plan.impacts));
     plan
+}
+
+/// The deleted paths a "could not be checked" entry covers: each named up
+/// to three, else their number and the first three.
+fn covered(paths: &[WorkspacePath]) -> String {
+    let names: Vec<String> = paths.iter().take(3).map(|p| quoted(p.as_str())).collect();
+    match names.as_slice() {
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [a, b, c] if paths.len() == 3 => format!("{a}, {b} and {c}"),
+        [a, b, c] => format!("{} items ({a}, {b}, {c} and {} more)", paths.len(), paths.len() - 3),
+        _ => String::new(),
+    }
 }
 
 /// Before file work: stop the work and turn off the triggers the user chose
@@ -621,11 +629,16 @@ pub fn prepare_paths(cx: &DataContext<'_>, plan: &OpPlan, choices: &BTreeMap<Str
             ),
             // What uses it could not be checked: an agent cannot show that
             // deleting it is safe (the person decides for themselves).
-            ImpactKind::ConsumersUnknown if agent => refuse(
-                &impact.target,
-                "ops.agentScope",
-                "What uses this item could not be checked; an agent cannot delete it. Ask the user.".into(),
-            ),
+            // The entry covers every deleted path: each is refused.
+            ImpactKind::ConsumersUnknown if agent => {
+                for target in plan.request.targets.iter().filter(|t| matches!(t, OpTarget::Path { .. })) {
+                    refuse(
+                        target,
+                        "ops.agentScope",
+                        "What uses this item could not be checked; an agent cannot delete it. Ask the user.".into(),
+                    );
+                }
+            }
             ImpactKind::ActiveWork if !stop => refuse(
                 &impact.target,
                 "ops.activeWork",

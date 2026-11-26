@@ -12,15 +12,15 @@
 //     graph does not index (node_modules): nothing asks.
 //  E. Rapid successive deletes from the tree: no dialog.
 //  F. The project graph made unavailable: three files at once ask once, one
-//     "Could not be checked" line per file naming it; Cancel changes nothing.
+//     "Could not be checked" line for the graph naming the three files, under
+//     a lead that says consequences may exist; Cancel changes nothing.
 //     The graph recovered (Start new) while the decision is open, then
 //     Delete: the plan is stale, the decision comes back with the note and
 //     without the impact; Delete applies.
 //  G. A project switch while a trusted native workflow batch of the previous
-//     project runs: delete plans in the new project for 15 s. A plan that
-//     says "could not be checked" is a review finding: printed, and failing
-//     the scenario only with EXPOSITION_REVIEW_FINDINGS=1. Skipped when the
-//     batch cannot start (no Python found).
+//     project runs: delete plans in the new project for 15 s; none says
+//     "could not be checked" (the batch is the other project's work).
+//     Skipped when the batch cannot start (no Python found).
 import { cp, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -185,14 +185,15 @@ export default async function reviewConsumersUnknown({ launchApp, artifactsDir, 
     const group = decision(page).locator('[data-impact="consumersUnknown"]');
     assert.equal(await group.locator("h4").textContent(), "Could not be checked");
     const lines = decision(page).locator('[data-testid="op-impact"][data-kind="consumersUnknown"]');
-    assert.equal(await lines.count(), 3, "one line per file");
-    for (let i = 0; i < 3; i++) {
-      const text = await lines.nth(i).textContent();
-      const name = three[i].split("/").pop();
-      assert.ok(text.startsWith(`${name}: `), `per-target prefix: ${text}`);
-      assert.ok(text.includes(`“${three[i]}”`), `names its file: ${text}`);
-    }
+    assert.equal(await lines.count(), 1, "one line for the source that could not be read");
+    const text = await lines.first().textContent();
+    assert.equal(
+      text,
+      "Manuscripts, workflows and retained evidence using “scratch/x1.txt”, “scratch/x2.txt” and “scratch/x3.txt” could not be checked: the project graph could not be read.",
+      "names every file once, with no per-file prefix",
+    );
     const lead = await decision(page).locator(".xp-ops-decision__lead").textContent();
+    assert.equal(lead, "Deleting may have consequences that could not be checked:");
     evidence.notes.push(`decision lead: "${lead}"; first line: "${await lines.first().textContent()}"`);
     await settle(page);
     await page.screenshot({ path: join(artifactsDir, "review-unchecked-three.png") });
@@ -251,10 +252,7 @@ export default async function reviewConsumersUnknown({ launchApp, artifactsDir, 
       }
       const finding = `after switching away from a running workflow batch: ${asked} of ${total} delete plans in the new (healthy) project said "could not be checked" (the last ${last} ms after the switch): ${sample}`;
       evidence.notes.push(finding);
-      if (asked > 0) {
-        console.log(`REVIEW FINDING: ${finding}`);
-        if (process.env.EXPOSITION_REVIEW_FINDINGS === "1") assert.equal(asked, 0, finding);
-      }
+      assert.equal(asked, 0, finding);
     }
 
     assert.deepEqual(consoleErrors(app), [], "no console errors");
