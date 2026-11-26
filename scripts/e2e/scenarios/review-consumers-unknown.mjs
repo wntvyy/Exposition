@@ -26,7 +26,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { consoleErrors, decision, dismissNotifications, expectNoDialog, fileRow, selectFiles, settle, platformSkip } from "../p1-helpers.mjs";
+import { consoleErrors, decision, dismissNotifications, expectNoDialog, fileRow, selectFiles, settle, platformSkip, waitForNotification } from "../p1-helpers.mjs";
 import { invoke, waitFor } from "../workspace-helpers.mjs";
 
 const user = { kind: "user" };
@@ -110,6 +110,9 @@ export default async function reviewConsumersUnknown({ launchApp, artifactsDir, 
     await page.keyboard.press("Delete");
     await expectNoDialog(page, assert, 800, "a delete right after opening a fresh folder asks nothing");
     await waitFor(async () => !existsSync(join(first, "scratch", "b.txt")), { message: "b.txt deleted" });
+    // The file leaves the disk before the operation ends; a Delete pressed
+    // while one is still running is ignored, so wait for its result.
+    await waitForNotification(page, /^Moved “b\.txt” to the (Recycle Bin|Trash)$/);
     await dismissNotifications(page);
 
     // --- B. a project switch: at once in the second project ---------------------------------
@@ -122,6 +125,7 @@ export default async function reviewConsumersUnknown({ launchApp, artifactsDir, 
     await page.keyboard.press("Delete");
     await expectNoDialog(page, assert, 800, "a delete right after a project switch asks nothing");
     await waitFor(async () => !existsSync(join(second, "scratch", "b.txt")), { message: "b.txt deleted in the second project" });
+    await waitForNotification(page, /^Moved “b\.txt” to the (Recycle Bin|Trash)$/);
     await dismissNotifications(page);
 
     // --- C. plans while a switch is in flight --------------------------------------------------
@@ -165,6 +169,8 @@ export default async function reviewConsumersUnknown({ launchApp, artifactsDir, 
       await page.keyboard.press("Delete");
       await expectNoDialog(page, assert, 150, `rapid delete of ${name} asks nothing`);
       await waitFor(async () => !existsSync(join(second, "scratch", name)), { timeout: 10_000, message: `${name} deleted` });
+      // The next Delete as soon as this one has ended (one pressed earlier is ignored).
+      await waitForNotification(page, new RegExp(`^Moved “${name.replace(".", "\\.")}” to the (Recycle Bin|Trash)$`));
     }
     await expectNoDialog(page, assert, 600, "no dialog after rapid deletes");
     await dismissNotifications(page);

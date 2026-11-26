@@ -200,6 +200,9 @@ export default async function p1Impacts({ launchApp, artifactsDir, assert, fixtu
     await setTheme(page, "light");
     await decision(page).getByRole("button", { name: /^Delete$/ }).click();
     await waitFor(async () => !existsSync(join(root, "refs.bib")), { message: "refs.bib deleted after the decision" });
+    // The file leaves the disk before the operation ends; a Delete pressed
+    // while one is still running is ignored, so wait for its result.
+    await waitForNotification(page, /^Moved “refs\.bib” to the (Recycle Bin|Trash)$/);
     assert.equal(await readFile(join(root, "paper.tex"), "utf8"), paper, "no cascade into the manuscript");
     evidence.notes.push("manuscript dependency: one decision naming paper.tex; Cancel kept the file; Delete removed only refs.bib");
     await dismissNotifications(page);
@@ -213,6 +216,7 @@ export default async function p1Impacts({ launchApp, artifactsDir, assert, fixtu
     await shot(page, "p1-workflow-input-decision-light");
     await decision(page).getByRole("button", { name: /^Delete$/ }).click();
     await waitFor(async () => !existsSync(join(root, "data", "obs.csv")), { message: "input deleted" });
+    await waitForNotification(page, /^Moved “obs\.csv” to the (Recycle Bin|Trash)$/);
     const after = await invoke(page, "workflow_get", { id: saved.id, revision: null });
     assert.deepEqual(after.definition.inputs, workflow().inputs, "the workflow is unchanged (still names its input)");
     const summary = (await invoke(page, "workflow_list")).find((w) => w.id === saved.id);
