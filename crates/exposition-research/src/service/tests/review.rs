@@ -922,7 +922,6 @@ fn batch_record(f: &Fixture, root: &Path, id: &str) {
 /// With the change, `active_run_records` fails in the open project, so every
 /// delete there asks "Running research runs … could not be checked" (and an
 /// agent's deletion is refused) until the other project's batch has ended.
-#[ignore = "review finding: a live batch of the previous project makes active_run_records fail in the open project (false 'could not be checked' for every delete; agents refused)"]
 #[tokio::test(flavor = "multi_thread")]
 async fn review_a_live_batch_of_the_previous_project_is_no_unreadable_record_of_the_open_one() {
     let f = Fixture::new();
@@ -951,7 +950,6 @@ async fn review_a_live_batch_of_the_previous_project_is_no_unreadable_record_of_
 /// in use by it yet (its inputs are already staged as copies), but
 /// `active_run_records` fails, so a delete planned then asks "could not be
 /// checked" in a healthy project.
-#[ignore = "review finding (low): a batch marked live before its first record is written makes a delete plan in that window ask 'could not be checked'"]
 #[tokio::test(flavor = "multi_thread")]
 async fn review_a_batch_marked_live_before_its_record_is_written_is_no_unreadable_record() {
     let f = Fixture::new();

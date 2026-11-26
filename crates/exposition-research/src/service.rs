@@ -170,9 +170,10 @@ struct Shared {
     /// deletion and restore of records, so that no write brings back a
     /// record deleted at the same moment.
     late_writes: Mutex<()>,
-    /// Workflow batch runs executing now (their manifests read "running"
-    /// legitimately and are not settled as orphans).
-    batches: Mutex<HashSet<String>>,
+    /// Workflow batch runs executing now, with the project each runs in
+    /// (their manifests read "running" legitimately and are not settled as
+    /// orphans; the active runs of a project are its own batches only).
+    batches: Mutex<HashMap<String, Option<PathBuf>>>,
     /// Positions of the open project's run records ([`crate::history`]).
     history: crate::history::HistoryIndex,
     /// Guided environment setup (one run at a time) and its records.
@@ -349,6 +350,30 @@ impl Shared {
         records.into_iter().map(|record| record.id).collect()
     }
 
+    /// The error the kernel reported for a run: kept with the run while it
+    /// is in memory (marked late when its final record is being or was
+    /// written, so that a release writes it first), written to its stored
+    /// record when the run was already released ([`Self::record_error`]).
+    fn note_run_error(&self, run_id: &str, error: RunErrorInfo) {
+        let released = {
+            let mut runs = lock(&self.runs);
+            runs.get_mut(run_id).and_then(|run| {
+                if run.released.is_some() {
+                    // Its manifest lives in its record now: the error is written there.
+                    return Some(run.root.clone());
+                }
+                if run.finishing || run.finished {
+                    run.late = true;
+                }
+                run.manifest.error = Some(error.clone());
+                None
+            })
+        };
+        if let Some(root) = released {
+            self.record_error(&root, run_id, error);
+        }
+    }
+
     /// Record the error of a run whose in-memory copy was already released:
     /// in its stored manifest ([`Self::update_record`]) and in the summary
     /// the history lists for it. Nothing when the record cannot take it (the
@@ -390,7 +415,7 @@ impl ResearchService {
                 runs: Mutex::new(HashMap::new()),
                 stored_runs: Mutex::new(VecDeque::new()),
                 late_writes: Mutex::new(()),
-                batches: Mutex::new(HashSet::new()),
+                batches: Mutex::new(HashMap::new()),
                 history: crate::history::HistoryIndex::default(),
             }),
         }
@@ -962,14 +987,15 @@ impl ResearchService {
     /// Whether a run executes now: an unfinished interactive run, or a
     /// workflow batch (P1: never deleted while active).
     pub fn run_active(&self, run_id: &str) -> bool {
-        lock(&self.shared.batches).contains(run_id) || lock(&self.shared.runs).get(run_id).is_some_and(|r| !r.finished)
+        lock(&self.shared.batches).contains_key(run_id)
+            || lock(&self.shared.runs).get(run_id).is_some_and(|r| !r.finished)
     }
 
     /// Whether a workflow batch executes `run_id` now. A batch is part of its
     /// workflow run and is stopped through it ([`Self::cancel_run`] cancels
     /// interactive runs only).
     pub fn is_batch_run(&self, run_id: &str) -> bool {
-        lock(&self.shared.batches).contains(run_id)
+        lock(&self.shared.batches).contains_key(run_id)
     }
 
     /// Runs executing now in the open project (interactive and batch).
@@ -980,8 +1006,10 @@ impl ResearchService {
             .filter(|r| !r.finished && Some(&r.root) == root.as_ref())
             .map(|r| r.id().to_owned())
             .collect();
-        for id in lock(&self.shared.batches).iter() {
-            if !ids.contains(id) {
+        // A batch of another project (the previous one, still stopping
+        // after a switch) is not active work of this one.
+        for (id, batch_root) in lock(&self.shared.batches).iter() {
+            if batch_root.as_ref() == root.as_ref() && !ids.contains(id) {
                 ids.push(id.clone());
             }
         }
@@ -1124,17 +1152,24 @@ impl ResearchService {
     /// A stored manifest as it stands: "running" without live state means
     /// Exposition stopped before it finished, unless a batch runs it now.
     fn settle(&self, manifest: RunManifest) -> RunManifest {
-        if lock(&self.shared.batches).contains(&manifest.record.id.0) { manifest } else { settle_orphan(manifest) }
+        if lock(&self.shared.batches).contains_key(&manifest.record.id.0) { manifest } else { settle_orphan(manifest) }
     }
 
-    /// Mark a workflow batch run as executing (or no longer executing).
+    /// Mark a workflow batch run as executing in the open project (or no
+    /// longer executing).
     pub(crate) fn set_batch_live(&self, run_id: &str, live: bool) {
-        let mut batches = lock(&self.shared.batches);
         if live {
-            batches.insert(run_id.to_owned());
+            let root = self.workspace_root();
+            lock(&self.shared.batches).insert(run_id.to_owned(), root);
         } else {
-            batches.remove(run_id);
+            lock(&self.shared.batches).remove(run_id);
         }
+    }
+
+    /// Mark a workflow batch run as executing in the project at `root` (the
+    /// canonical root the batch runner checked).
+    pub(crate) fn set_batch_live_in(&self, run_id: &str, root: &Path) {
+        lock(&self.shared.batches).insert(run_id.to_owned(), Some(root.to_path_buf()));
     }
 
     /// Page through retained output (live runs) or the stored transcript.
@@ -1815,23 +1850,8 @@ impl Session {
                 self.push_output(&shared, &run_id, OutputItem::ClearOutput { wait });
             }
             HelperEvent::Error { run_id, ename, evalue, traceback } => {
-                let released = {
-                    let mut runs = lock(&shared.runs);
-                    runs.get_mut(&run_id).and_then(|run| {
-                        let redact = |text: &str| shared.config.launcher.redact(text);
-                        let error = RunErrorInfo { ename: redact(&ename), evalue: redact(&evalue) };
-                        if run.released.is_none() {
-                            run.manifest.error = Some(error);
-                            None
-                        } else {
-                            // Its manifest lives in its record now: the error is written there.
-                            Some((run.root.clone(), error))
-                        }
-                    })
-                };
-                if let Some((root, error)) = released {
-                    shared.record_error(&root, &run_id, error);
-                }
+                let redact = |text: &str| shared.config.launcher.redact(text);
+                shared.note_run_error(&run_id, RunErrorInfo { ename: redact(&ename), evalue: redact(&evalue) });
                 self.push_output(&shared, &run_id, OutputItem::Error { ename, evalue, traceback });
             }
             HelperEvent::RunFinished { run_id, status, reason, execution_count, stream_dropped, files_dropped } => {
@@ -2727,6 +2747,26 @@ mod tests {
         service.set_workspace(&root, true).unwrap();
         assert_eq!(service.run_summary(&id).unwrap().error, expected);
         assert_eq!(service.run_manifest(&id).unwrap().error, expected);
+    }
+
+    /// An error noted for a finished run still held in memory, and a release
+    /// before the error's output entry arrives (the window between the two
+    /// steps of the kernel's error event): the release writes the error to
+    /// the stored manifest.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_error_noted_just_before_a_release_is_in_the_stored_manifest() {
+        let f = Fixture::new();
+        let service = &f._service;
+        let root = service.workspace_root().unwrap();
+        let id = finished_run(&f, 0, 10);
+        assert!(lock(&service.shared.runs)[&id].released.is_none());
+        let error = RunErrorInfo { ename: "ValueError".into(), evalue: "noted before the release".into() };
+        service.shared.note_run_error(&id, error.clone());
+        service.clear_workspace();
+        service.set_workspace(&root, true).unwrap();
+        assert!(lock(&service.shared.runs)[&id].released.is_some());
+        assert_eq!(read_manifest(&root, &id).unwrap().error, Some(error.clone()), "written before the release");
+        assert_eq!(service.run_summary(&id).unwrap().error, Some(error));
     }
 
     /// A display artifact registered for a run that was already released

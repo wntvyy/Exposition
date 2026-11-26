@@ -91,6 +91,13 @@ pub(crate) fn manifest_exists(root: &Path, id: &str) -> bool {
     valid_run_id(id) && manifest_path(root, id).is_file()
 }
 
+/// Whether a batch's record has been begun: it exists, or it is being
+/// written now (a record being replaced can be missing by name for a moment;
+/// that is never taken as "not written yet").
+fn batch_record_started(root: &Path, id: &str) -> bool {
+    manifest_exists(root, id) || store::being_replaced(root, id)
+}
+
 fn artifact_dir(root: &Path, id: &str) -> PathBuf {
     join(root, ARTIFACTS).join(id)
 }
@@ -288,14 +295,19 @@ impl ResearchService {
     /// Records of the runs executing now in the open project: the entries
     /// [`Self::run_records`] marks active, found from the runs that are
     /// executing instead of by reading the whole run history. An active run
-    /// whose record cannot be read (a workflow batch's damaged manifest, or
-    /// one not written yet) is an error, never left out: what it uses is
-    /// unknown.
+    /// whose record cannot be read (a workflow batch's damaged manifest) is
+    /// an error, never left out: what it uses is unknown. A batch marked live
+    /// whose first record is not written yet is not one: its job has not
+    /// started, and the inputs it reads are copies it staged.
     pub fn active_run_records(&self) -> Result<Vec<RunRecordInfo>, ResearchError> {
         let root = self.records_root()?;
         let mut out: Vec<RunRecordInfo> = Vec::new();
         for id in self.active_run_ids() {
-            out.push(info(&root, &self.run_manifest(&id)?, true, None));
+            match self.run_manifest(&id) {
+                Ok(manifest) => out.push(info(&root, &manifest, true, None)),
+                Err(_) if self.is_batch_run(&id) && !batch_record_started(&root, &id) => {}
+                Err(e) => return Err(e),
+            }
         }
         out.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms).then_with(|| b.id.cmp(&a.id)));
         Ok(out)
