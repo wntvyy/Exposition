@@ -175,3 +175,128 @@ async fn the_graph_follows_files_and_buffers_without_any_frontend() {
     assert_eq!(theorem(g)[0].id, thm.id);
     s.reconciler.shutdown();
 }
+
+/// Type `text` at `at` into an open document; returns the new revision.
+fn type_into(s: &Setup, doc: &exposition_core::document::DocumentId, base_revision: u64, at: u32, text: &str) -> u64 {
+    let outcome = s
+        .workspace
+        .documents()
+        .apply(TransactionRequest {
+            id: TransactionId(format!("t-{base_revision}")),
+            origin: EditOrigin::Source,
+            edits: vec![DocumentEdit {
+                document: doc.clone(),
+                base_revision,
+                patches: vec![TextPatch::insert(at, text)],
+            }],
+            undo: UndoBehavior::NewGroup,
+            conflict: ConflictPolicy::Reject,
+            label: None,
+            selection: None,
+        })
+        .unwrap();
+    outcome.applied[0].revision
+}
+
+const LABELLED: &[(&str, &str)] =
+    &[("notes/a.tex", "\\section{Intro}\\label{sec:intro}\nText.\n"), ("notes/r.tex", "See.\n")];
+/// Typed after "See" in notes/r.tex: one label another file declares (a
+/// section label: no entity, only the index of labels knows it) and one that
+/// no file declares.
+const REFERENCES: &str = " \\ref{sec:intro} and \\ref{sec:nowhere}";
+
+async fn indexed_with_r_open(s: &Setup) -> (exposition_core::document::DocumentId, u64) {
+    let g = &s.graph;
+    wait_for("initial reconciliation", Duration::from_secs(20), || {
+        (synchronized(g) && g.resource(&wp("notes/r.tex")).ok().flatten().is_some()).then_some(())
+    })
+    .await;
+    let opened = s.workspace.open_document(&wp("notes/r.tex")).unwrap();
+    (opened.state.info.id.clone(), opened.state.info.revision)
+}
+
+/// A pass started elsewhere (a rename or move on an IPC thread, an applied
+/// proposal that binds sources) holds the session's index of labels. An
+/// edit made meanwhile is not overlaid against less than that index nor
+/// against a copy of the whole stored index read for this one document: the
+/// overlay waits for the pass and is computed once it is over, against the
+/// index the pass leaves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_edit_during_a_pass_started_elsewhere_is_overlaid_once_the_pass_is_over() {
+    let s = setup(LABELLED).await;
+    let g = &s.graph;
+    let (doc, revision) = indexed_with_r_open(&s).await;
+
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = {
+        let g = Arc::clone(g);
+        std::thread::spawn(move || {
+            g.reconcile_after(|| {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                ((), None)
+            })
+        })
+    };
+    held_rx.recv().unwrap();
+    let typed = type_into(&s, &doc, revision, 3, REFERENCES);
+    // Long enough for the overlay's quiet period and several attempts.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let during = g.overlay(&wp("notes/r.tex")).map(|o| o.revision);
+    release_tx.send(()).unwrap();
+    let (_, report) = holder.join().unwrap();
+    assert!(report.is_none());
+    assert_ne!(during, Some(typed), "no overlay is computed while the pass holds the session's index");
+
+    let overlay = wait_for("the overlay after the pass", Duration::from_secs(10), || {
+        g.overlay(&wp("notes/r.tex")).filter(|o| o.revision == typed)
+    })
+    .await;
+    let coverage = overlay.coverage.clone().expect("coverage");
+    assert_eq!(coverage.unresolved, 1, "only sec:nowhere is missing: {coverage:?}");
+    s.reconciler.shutdown();
+}
+
+/// A pass started elsewhere changes the saved projection under open
+/// buffers, as the driver's own passes do: their overlays are computed
+/// again after it (no file event announces such a pass to the driver).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_buffers_are_overlaid_again_after_a_pass_started_elsewhere() {
+    let s = setup(LABELLED).await;
+    let g = &s.graph;
+    let (doc, revision) = indexed_with_r_open(&s).await;
+    let typed = type_into(&s, &doc, revision, 3, REFERENCES);
+    let mut first = wait_for("the overlay", Duration::from_secs(10), || {
+        g.overlay(&wp("notes/r.tex")).filter(|o| o.revision == typed)
+    })
+    .await;
+    // Every computation the edit and the driver's own passes cause is over
+    // once the overlay stays as it is for a while.
+    loop {
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let now = g.overlay(&wp("notes/r.tex")).expect("the overlay stays");
+        if now.computed_at_ms == first.computed_at_ms && synchronized(g) {
+            break;
+        }
+        first = now;
+    }
+    let other = Arc::clone(g);
+    tokio::task::spawn_blocking(move || {
+        other
+            .reconcile(&reconcile::ReconcileOptions {
+                scope: reconcile::Scope::Paths(vec![wp("notes/a.tex")]),
+                force: true,
+            })
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    let again = wait_for("the overlay computed again", Duration::from_secs(10), || {
+        g.overlay(&wp("notes/r.tex")).filter(|o| o.computed_at_ms > first.computed_at_ms)
+    })
+    .await;
+    assert_eq!(again.revision, typed);
+    assert_eq!(again.coverage.as_ref().map(|c| c.unresolved), Some(1));
+    s.reconciler.shutdown();
+}

@@ -9,6 +9,14 @@
 //! or a lagged event stream becomes a full pass. Freshness is reported through
 //! [`GraphService::set_freshness`]: Pending (with the number of paths
 //! waiting) → Reconciling → Synchronized with a checkpoint.
+//!
+//! Passes also run elsewhere (a rename or move on an IPC thread, project
+//! data operations, an applied proposal that binds sources). An overlay
+//! requested while such a pass holds the session's index is deferred and
+//! computed when the pass is over (its events say so; a short retry covers
+//! a holder that sends none), and after any pass this driver did not run,
+//! the overlays of open unsaved buffers are computed again, as after its
+//! own passes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -32,6 +40,9 @@ pub const SETTLE: Duration = Duration::from_millis(250);
 pub const MAX_DELAY: Duration = Duration::from_secs(2);
 /// Quiet period after the last edit before an overlay is recomputed.
 pub const OVERLAY_SETTLE: Duration = Duration::from_millis(150);
+/// A deferred overlay is asked for again after this, unless the event of
+/// the pass that held the session's index comes first.
+pub const OVERLAY_RETRY: Duration = Duration::from_millis(100);
 /// More changed paths than this in one pass: scan the whole project instead.
 pub const FULL_SCAN_THRESHOLD: usize = 200;
 
@@ -118,6 +129,12 @@ struct Driver {
     first_event: Option<Instant>,
     due: Option<Instant>,
     overlays: BTreeMap<DocumentId, Instant>,
+    /// Overlays deferred while a pass started elsewhere held the session's
+    /// index (also queued in `overlays`, for the retry).
+    deferred: BTreeSet<DocumentId>,
+    /// The graph's count of written passes when this driver last computed
+    /// the overlays of open buffers after them.
+    passes_seen: u64,
     doc_paths: BTreeMap<DocumentId, WorkspacePath>,
     replies: Vec<oneshot::Sender<GraphResult<ReconcileReport>>>,
     backed_up: bool,
@@ -136,6 +153,8 @@ impl Driver {
             first_event: None,
             due: None,
             overlays: BTreeMap::new(),
+            deferred: BTreeSet::new(),
+            passes_seen: 0,
             doc_paths: BTreeMap::new(),
             replies: Vec::new(),
             backed_up: false,
@@ -166,8 +185,11 @@ impl Driver {
                     Some(Command::Shutdown) | None => break,
                 },
                 event = graph_rx.recv() => match event {
-                    Ok(GraphEvent::Status { .. }) | Err(RecvError::Lagged(_)) => self.check_attach(),
-                    Ok(_) => {}
+                    Ok(GraphEvent::Status { .. }) | Err(RecvError::Lagged(_)) => {
+                        self.check_attach();
+                        self.after_other_passes();
+                    }
+                    Ok(GraphEvent::Changed { .. } | GraphEvent::Reconciled { .. }) => self.after_other_passes(),
                     Err(RecvError::Closed) => break,
                 },
                 event = ws_rx.recv() => match event {
@@ -196,6 +218,7 @@ impl Driver {
                             if info.saved_revision == Some(info.revision) {
                                 // Saved (or back at the saved text): the file is the truth.
                                 self.overlays.remove(&info.id);
+                                self.deferred.remove(&info.id);
                                 self.graph.clear_overlay(&path);
                                 self.schedule([path]);
                             } else {
@@ -205,6 +228,7 @@ impl Driver {
                     }
                     Ok(DocumentEvent::Closed { document }) => {
                         self.overlays.remove(&document);
+                        self.deferred.remove(&document);
                         if let Some(path) = self.doc_paths.remove(&document) {
                             self.graph.clear_overlay(&path);
                         }
@@ -222,11 +246,7 @@ impl Driver {
                         self.due = None;
                         self.pass();
                         // The saved projection changed under open buffers.
-                        for info in self.workspace.documents().list() {
-                            if info.path.is_some() && info.saved_revision != Some(info.revision) {
-                                self.overlays.entry(info.id).or_insert(now);
-                            }
-                        }
+                        self.overlay_open_buffers(now);
                     }
                     let ready: Vec<DocumentId> =
                         self.overlays.iter().filter(|(_, at)| **at <= now).map(|(id, _)| id.clone()).collect();
@@ -251,6 +271,8 @@ impl Driver {
         self.generation = generation;
         self.paths.clear();
         self.overlays.clear();
+        self.deferred.clear();
+        self.passes_seen = self.graph.passes_written();
         self.first_event = None;
         self.backed_up = false;
         self.attached = self.graph.is_usable();
@@ -334,8 +356,48 @@ impl Driver {
         }
     }
 
+    /// Queue the overlay of every open buffer with unsaved changes (the saved
+    /// projection changed under them: a pass was written).
+    fn overlay_open_buffers(&mut self, at: Instant) {
+        self.passes_seen = self.graph.passes_written();
+        for info in self.workspace.documents().list() {
+            if info.path.is_some() && info.saved_revision != Some(info.revision) {
+                self.overlays.entry(info.id).or_insert(at);
+            }
+        }
+    }
+
+    /// After a graph event: deferred overlays are asked for again (the pass
+    /// that held the session's index may be over), and after passes this
+    /// driver did not run, every open buffer is overlaid again.
+    fn after_other_passes(&mut self) {
+        if !self.attached {
+            return;
+        }
+        let now = Instant::now();
+        for id in std::mem::take(&mut self.deferred) {
+            self.overlays.insert(id, now);
+        }
+        if self.graph.passes_written() != self.passes_seen {
+            self.overlay_open_buffers(now);
+        }
+    }
+
+    /// Ask for the overlay again later (and as soon as a graph event comes).
+    fn defer_overlay(&mut self, id: &DocumentId) {
+        self.deferred.insert(id.clone());
+        self.overlays.entry(id.clone()).or_insert(Instant::now() + OVERLAY_RETRY);
+    }
+
     fn compute_overlay(&mut self, id: &DocumentId) {
         if !self.attached {
+            return;
+        }
+        self.deferred.remove(id);
+        // A pass started elsewhere holds the session's index: nothing is
+        // read or hashed until it is over.
+        if self.graph.reconcile_busy() {
+            self.defer_overlay(id);
             return;
         }
         let documents = self.workspace.documents();
@@ -359,6 +421,7 @@ impl Driver {
         match super::overlay::compute(&self.graph, &path, snapshot.revision, &snapshot.text) {
             Ok(Some(entry)) => self.graph.set_overlay(generation, entry),
             Ok(None) => self.graph.clear_overlay(&path),
+            Err(e) if super::overlay::is_deferred(&e) => self.defer_overlay(id),
             Err(_) => {}
         }
     }

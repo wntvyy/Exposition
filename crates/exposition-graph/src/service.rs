@@ -82,6 +82,20 @@ impl From<serde_json::Error> for GraphError {
 
 pub type GraphResult<T> = Result<T, GraphError>;
 
+/// What [`GraphService::session_index_drift`] did (for tests): a check that
+/// was not made says why, so a caller never reads it as "no difference".
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionIndexCheck {
+    /// Compared with a fresh read of the store: what differs (empty: nothing).
+    Compared(Vec<String>),
+    /// This session has not read the index (no graph attached, or nothing
+    /// read it since the project was attached): nothing to compare.
+    NotRead,
+    /// A pass (or another reader) holds the index right now.
+    Held,
+}
+
 /// Folder inside a project that holds the graph.
 pub const PROJECT_DIR: &str = ".exposition";
 
@@ -153,6 +167,9 @@ pub struct GraphService {
     overlay: Mutex<BTreeMap<WorkspacePath, Arc<OverlayEntry>>>,
     /// Bumped on every attach/detach (stale overlays and passes are dropped).
     generation: AtomicU64,
+    /// Passes written so far, whoever ran them (the driver computes the
+    /// overlays of open buffers again after passes started elsewhere).
+    passes_written: AtomicU64,
     /// When this service started: journal records older than this that are
     /// still pending were interrupted by an earlier session.
     started_at_ms: u64,
@@ -182,6 +199,7 @@ impl GraphService {
             reconcile: Mutex::new(ReconcileState::default()),
             overlay: Mutex::new(BTreeMap::new()),
             generation: AtomicU64::new(0),
+            passes_written: AtomicU64::new(0),
             started_at_ms: now_ms(),
             change_token: AtomicU64::new(now_ms()),
             evidence_key,
@@ -520,14 +538,20 @@ impl GraphService {
         })
     }
 
-    /// The reconciliation state, unless a pass holds it right now.
+    /// The reconciliation state of the current attach generation (started
+    /// afresh when it belongs to an earlier one, as for a pass), unless a
+    /// pass holds it right now.
     pub(crate) fn try_reconcile_state(&self) -> Option<MutexGuard<'_, ReconcileState>> {
-        let state = match self.reconcile.try_lock() {
+        let mut state = match self.reconcile.try_lock() {
             Ok(s) => s,
             Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return None,
         };
-        (state.generation == self.generation()).then_some(state)
+        let generation = self.generation();
+        if state.generation != generation {
+            *state = ReconcileState { generation, ..Default::default() };
+        }
+        Some(state)
     }
 
     pub(crate) fn reconcile_state(&self) -> MutexGuard<'_, ReconcileState> {
@@ -537,6 +561,37 @@ impl GraphService {
             *state = ReconcileState { generation, ..Default::default() };
         }
         state
+    }
+
+    /// A pass (or another reader of the session's index) holds the
+    /// reconciliation state right now.
+    pub(crate) fn reconcile_busy(&self) -> bool {
+        matches!(self.reconcile.try_lock(), Err(std::sync::TryLockError::WouldBlock))
+    }
+
+    /// Passes written so far by this service, whoever ran them.
+    pub(crate) fn passes_written(&self) -> u64 {
+        self.passes_written.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn count_pass_written(&self) {
+        self.passes_written.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Differential check of the session's index (labels, LaTeX main files,
+    /// awaited targets: a cache of the stored index) against a fresh read of
+    /// the store, or why it was not compared. For tests.
+    #[doc(hidden)]
+    pub fn session_index_drift(&self) -> GraphResult<SessionIndexCheck> {
+        let Some(root) = self.attached_root() else { return Ok(SessionIndexCheck::NotRead) };
+        let Some(state) = self.try_reconcile_state() else { return Ok(SessionIndexCheck::Held) };
+        if !state.index.loaded || state.root.as_deref() != Some(root.as_path()) {
+            return Ok(SessionIndexCheck::NotRead);
+        }
+        self.with_store_for(&root, |store| {
+            let fresh = crate::reconcile::engine::ProjectIndex::read(store)?;
+            Ok(SessionIndexCheck::Compared(state.index.differences(&fresh)))
+        })
     }
 
     /// The LaTeX main files the reconciler knows for the attached project,
@@ -550,12 +605,8 @@ impl GraphService {
         {
             return state.index.latex_mains.clone();
         }
-        self.with_store(|store| {
-            let mut index = crate::reconcile::engine::ProjectIndex::default();
-            index.load(store)?;
-            Ok(index.latex_mains)
-        })
-        .unwrap_or_default()
+        self.with_store(|store| Ok(crate::reconcile::engine::ProjectIndex::read(store)?.latex_mains))
+            .unwrap_or_default()
     }
 
     /// The attached project folder (not a failed one).

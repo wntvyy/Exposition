@@ -120,14 +120,24 @@ host at the `large` scale unless a row says otherwise; release-profile figures f
 | Small commit | cost of the rows written | 44 → 1.7 ms |
 | One-file pass, file unchanged | no full-table read | 167 → 0.5 ms |
 | One-file pass, file edited | reads scoped to the pass's paths | 237 → 35 ms |
-| Overlay | scoped to the document | 94 → 3.9 ms |
+| Overlay | scoped to the document; asked for while a pass started elsewhere holds the session's index, nothing is read until that pass is over | 94 → 3.9 ms; while such a pass holds the index: 35,099 → 64 rows read (35,396 → 0 full-scan steps), 248 → 3.7 ms of computing |
 | 2,160 pending marks | one statement per batch | 3,800 → 7 ms |
 | Reads that decide (impact, removal planning) | complete, or flagged incomplete | a dependent hidden behind 20,050 rejected suggestions is now found |
 
 A scoped pass and a full reindex must produce the same graph, record for
 record (entities, bindings, relations, coverage, awaited targets, the stored
 index) and the same overlays: `review_perf_differential` checks this over
-random operation sequences and is part of the normal test suite.
+random operation sequences and is part of the normal test suite. The
+session's index of labels, LaTeX main files and awaited targets is a cache of
+the stored index that passes and overlays read (see Retained state); the same
+test compares it with a fresh read of the store after every step, counts the
+comparisons, and treats one not made while the session has read the index as
+a finding. An overlay asked for while a pass started elsewhere holds that
+index reads nothing and is computed when the pass is over, rather than
+resolve against less or read a copy of every index record for one document.
+The differential's sequences also reattach the project and run some passes
+that way while the overlays wait; `review_overlay_index` and the driver tests
+cover those cases directly.
 
 A change that concerns other files costs those files and no more, each resolved
 from its stored index without being read: a label that gains or loses a
@@ -228,6 +238,7 @@ Adding one means adding a row here and a differential test.
 | Collection | Owner | Key | Invalidation | Bound |
 |---|---|---|---|---|
 | Graph status memo | graph store | the store's change counter | any commit on any connection | one value |
+| Session index of labels, LaTeX main files and awaited targets | graph reconciliation state (held by a pass) | attach generation and project folder | updated from each written pass with what the stored records hold (no label a record dropped); read again on first use after an attach or after a read that failed | the stored index |
 | Listed run summaries | workflow `RunStore` | row id, valid while id and state match | per row on write; all on another connection's commit or on compaction | 2,048, then cleared |
 | Stored research runs | `ResearchService` | run id | output released after the record is written and read back; other projects' runs on switch | 16 runs with output |
 | Research output in the webview | research store | run id (listed runs and runs read by id) | re-read on selection; released when a run finishes or another run is selected | selected + executing + newest 8 finished |
