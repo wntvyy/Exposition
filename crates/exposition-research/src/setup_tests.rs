@@ -703,6 +703,24 @@ async fn one_setup_at_a_time_and_a_project_switch_cancels_it() {
     let started = f.service.setup_start(&plan, SessionOwner::User).await.unwrap();
     let error = f.service.setup_start(&plan, SessionOwner::Agent { task_id: "t".into() }).await.unwrap_err();
     assert_eq!(error.code(), "setup.busy", "{error:?}");
+    // Wait until the first step runs: the run has made the environment folder
+    // by then. A switch before the run's thread gets that far cancels a setup
+    // that created nothing (nothing to remove), which CI hit under load.
+    let mut events = f.service.subscribe_setup();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(status) = f.service.setup_status()
+                && status.step == Some(0)
+                && status.jobs.len() == 1
+            {
+                break;
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(100), events.recv()).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(f.target().exists(), "the run made the environment folder");
     let other = f.plan.root.parent().unwrap().join("other");
     std::fs::create_dir_all(&other).unwrap();
     f.service.set_workspace(&other, true).unwrap();

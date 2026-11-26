@@ -33,34 +33,40 @@ fn wp(s: &str) -> WorkspacePath {
     WorkspacePath::parse(s).unwrap()
 }
 
-// ----- counters on every thread -----
+// ----- counters on every thread, one per connection -----
 
-static STATEMENTS: AtomicU64 = AtomicU64::new(0);
-
-unsafe extern "C" fn count_statement(event: c_uint, _ctx: *mut c_void, _p: *mut c_void, _x: *mut c_void) -> c_int {
+unsafe extern "C" fn count_statement(event: c_uint, ctx: *mut c_void, _p: *mut c_void, _x: *mut c_void) -> c_int {
     if event == ffi::SQLITE_TRACE_STMT {
-        STATEMENTS.fetch_add(1, Ordering::SeqCst);
+        // SAFETY: `ctx` is the leaked counter `count_all_statements`
+        // registered with this connection; it is never freed.
+        let counter = unsafe { &*ctx.cast::<AtomicU64>() };
+        counter.fetch_add(1, Ordering::SeqCst);
     }
     0
 }
 
-/// Count the statements the graph's connection starts, on any thread (the
-/// driver's included), from now on. The product never traces.
-fn count_all_statements(g: &GraphService) {
+/// Count the statements this graph's connection starts, on any thread (the
+/// driver's included), from now on. Each test gets its own counter: the
+/// tests in this file run in parallel unless RUST_TEST_THREADS=1 (CI does
+/// not set it), and one process-wide counter added the passes of the
+/// back-to-back test to the deferral test's count. The product never traces.
+fn count_all_statements(g: &GraphService) -> &'static AtomicU64 {
+    let counter: &'static AtomicU64 = Box::leak(Box::new(AtomicU64::new(0)));
     g.with_store(|store| {
-        // SAFETY: the connection is alive for the call; the callback touches
-        // a static counter only and no context pointer is registered.
+        // SAFETY: the connection is alive for the call; the callback only
+        // increments `counter`, which is leaked and so outlives the connection.
         unsafe {
             ffi::sqlite3_trace_v2(
                 store.connection().handle(),
                 ffi::SQLITE_TRACE_STMT,
                 Some(count_statement),
-                std::ptr::null_mut(),
+                std::ptr::from_ref(counter).cast_mut().cast::<c_void>(),
             );
         }
         Ok(())
     })
     .unwrap();
+    counter
 }
 
 fn events(rx: &mut tokio::sync::broadcast::Receiver<GraphEvent>) -> u64 {
@@ -227,18 +233,18 @@ async fn a_deferred_overlay_reads_nothing_and_sends_nothing_while_the_state_is_h
     let g = &s.graph;
     let (doc, revision) = open(&s, "notes/r.tex").await;
     quiet(g).await;
-    count_all_statements(g);
+    let statements = count_all_statements(g);
     let mut rx = g.subscribe();
     let holder = hold(g);
     let typed = type_into(&s, &doc, revision, 3, REFERENCES);
-    STATEMENTS.store(0, Ordering::SeqCst);
+    statements.store(0, Ordering::SeqCst);
     events(&mut rx);
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let held = (STATEMENTS.load(Ordering::SeqCst), events(&mut rx), overlay_at(g, "notes/r.tex", typed).is_some());
+    let held = (statements.load(Ordering::SeqCst), events(&mut rx), overlay_at(g, "notes/r.tex", typed).is_some());
     holder.release(false);
     let overlay =
         wait_for("the overlay once released", Duration::from_secs(10), || overlay_at(g, "notes/r.tex", typed)).await;
-    let after = (STATEMENTS.load(Ordering::SeqCst) - held.0, events(&mut rx));
+    let after = (statements.load(Ordering::SeqCst) - held.0, events(&mut rx));
     eprintln!(
         "held 1.5 s: statements {}, events {}, overlay {}; after release: statements {}, events {}",
         held.0, held.1, held.2, after.0, after.1
@@ -262,7 +268,7 @@ async fn an_overlay_deferred_by_back_to_back_passes_elsewhere_is_computed_when_t
     let g = &s.graph;
     let (doc, revision) = open(&s, "notes/r.tex").await;
     quiet(g).await;
-    count_all_statements(g);
+    let statements = count_all_statements(g);
     let mut rx = g.subscribe();
     let stop = Arc::new(AtomicBool::new(false));
     let passes = Arc::new(AtomicU64::new(0));
@@ -281,7 +287,7 @@ async fn an_overlay_deferred_by_back_to_back_passes_elsewhere_is_computed_when_t
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
     let typed = type_into(&s, &doc, revision, 3, REFERENCES);
-    STATEMENTS.store(0, Ordering::SeqCst);
+    statements.store(0, Ordering::SeqCst);
     events(&mut rx);
     let p0 = passes.load(Ordering::SeqCst);
     let mut computed_during = false;
@@ -289,7 +295,7 @@ async fn an_overlay_deferred_by_back_to_back_passes_elsewhere_is_computed_when_t
         tokio::time::sleep(Duration::from_millis(50)).await;
         computed_during |= overlay_at(g, "notes/r.tex", typed).is_some();
     }
-    let burst = (passes.load(Ordering::SeqCst) - p0, STATEMENTS.load(Ordering::SeqCst), events(&mut rx));
+    let burst = (passes.load(Ordering::SeqCst) - p0, statements.load(Ordering::SeqCst), events(&mut rx));
     stop.store(true, Ordering::SeqCst);
     looping.join().unwrap();
     let overlay = wait_for("the overlay once the passes stopped", Duration::from_secs(10), || {
