@@ -12,7 +12,9 @@ import {
   consumerText,
   decisionAction,
   decisionGroups,
+  decisionLead,
   decisionTitle,
+  impactNamesTarget,
   initialChoices,
   isDelete,
   recoveryText,
@@ -64,20 +66,14 @@ function DecisionBody({
           Only what is listed below happens.
         </Banner>
       )}
-      {groups.length > 0 ? (
-        <p className="xp-ops-decision__lead">
-          {isDelete(plan.request.kind) ? "Deleting" : "This operation"} {groups.length === 1 && groups[0]!.impacts.length === 1 ? "has a consequence" : "has consequences"} in this project:
-        </p>
-      ) : (
-        <p className="xp-ops-decision__lead">Review what will happen before continuing.</p>
-      )}
+      <p className="xp-ops-decision__lead">{decisionLead(plan, groups)}</p>
       {groups.map((group) => (
         <section key={group.kind} className="xp-ops-decision__group" data-impact={group.kind} aria-label={group.heading}>
           <h4 className="ui-section-title">{group.heading}</h4>
           <ul className="xp-ops-decision__list">
             {group.impacts.map((impact, index) => (
               <li key={index} className="xp-ops-decision__impact" data-testid="op-impact" data-kind={impact.kind}>
-                {multiple && <span className="xp-ops-decision__target">{targetName(impact.target, labels)}: </span>}
+                {impactNamesTarget(impact, multiple) && <span className="xp-ops-decision__target">{targetName(impact.target, labels)}: </span>}
                 <span>{impact.message}</span>
                 {impact.consumers.length > 0 && (
                   <ul className="xp-ops-decision__consumers" aria-label="Affected">

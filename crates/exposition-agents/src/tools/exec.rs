@@ -1235,6 +1235,12 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     let project_op = match call {
         ToolCall::DeletePaths(_) | ToolCall::CopyPaths(_) => {
             let prepared = prepare_project_op(call, env)?;
+            // What uses an item could not be checked: no approval makes an
+            // agent's deletion of it safe (it would be refused when applied),
+            // so it is refused now, in every mode, before anyone is asked.
+            if prepared.plan.impacts.iter().any(|i| i.kind == exposition_core::ops::ImpactKind::ConsumersUnknown) {
+                return Err(unchecked_consumers(&prepared.plan));
+            }
             if prepared.plan.needs_decision {
                 if spec.approval_mode == ApprovalMode::Ask && spec.permission != PermissionProfile::ReviewEdits {
                     return Err(needs_decision(&prepared.plan));
@@ -1315,15 +1321,30 @@ fn decide(call: &ToolCall, env: &ToolEnv<'_>) -> Result<Gate, ToolOutput> {
     Ok(Gate::NeedsApproval { title, detail, reason: asks.reason(), for_task: asks.for_task(), authorization })
 }
 
-/// A consequential deletion or copy in an Ask task that applies changes
-/// directly: refused with the consequences (only the user decides those).
-fn needs_decision(plan: &exposition_core::ops::OpPlan) -> ToolOutput {
-    let impacts: Vec<Value> = plan
-        .impacts
+/// The consequences of a plan, for a refusal.
+fn decision_impacts(plan: &exposition_core::ops::OpPlan) -> Vec<Value> {
+    plan.impacts
         .iter()
         .filter(|i| i.kind.needs_decision())
         .map(|i| json!({"path": target_label(&i.target), "kind": i.kind, "consequence": i.message}))
-        .collect();
+        .collect()
+}
+
+/// A deletion whose consumers could not all be checked: refused in every
+/// mode (an agent cannot delete such an item, even with an approval), with
+/// what could not be checked; only the user can delete it.
+fn unchecked_consumers(plan: &exposition_core::ops::OpPlan) -> ToolOutput {
+    ToolOutput::error_with(
+        "What uses these items could not be checked (listed in `impacts`), so an agent cannot delete them. Nothing \
+         was changed; ask the user to delete them.",
+        json!({"code": codes::NEEDS_DECISION, "impacts": decision_impacts(plan)}),
+    )
+}
+
+/// A consequential deletion or copy in an Ask task that applies changes
+/// directly: refused with the consequences (only the user decides those).
+fn needs_decision(plan: &exposition_core::ops::OpPlan) -> ToolOutput {
+    let impacts = decision_impacts(plan);
     ToolOutput::error_with(
         "This needs the user's decision because it has consequences beyond the files themselves (listed in \
          `impacts`). Nothing was changed; ask the user to do it, or to run the task with review of each change.",

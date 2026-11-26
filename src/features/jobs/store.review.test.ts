@@ -1,8 +1,8 @@
 // Independent review of job tracking after output events stopped carrying
 // their text and stopped re-reading the list: the selected job's output is
 // complete and current when the panel opens mid-run, when the selection
-// changes during a burst, when the last output precedes the exit, and the
-// list still shows every refusal.
+// changes during a burst, when the last output precedes the exit, and after
+// a resync; and the list still shows every refusal.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { JobEvent } from "../../bindings/JobEvent";
@@ -159,11 +159,9 @@ describe("review: job output without event text", () => {
     expect(useJobs.getState().jobs).toHaveLength(1);
   });
 
-  // Not introduced by this lane (the base version behaves the same): after
-  // the webview fell behind, the list is re-read but the selected job's
-  // output is not, so if the dropped events were the job's last ones its
-  // output stays short until it is selected again.
-  it.fails("review: suspicion (also in the base version): a resync pulls the selected job's output", async () => {
+  // After the webview fell behind, events were dropped: if they were the
+  // selected job's last output and its exit, nothing else would pull it.
+  it("a resync pulls the selected job's output as well as the list", async () => {
     await settle();
     selectJob("job-e");
     await settle();
@@ -172,5 +170,6 @@ describe("review: job output without event text", () => {
     ipc.state.resync!();
     await settle();
     expect(shown("job-e")).toBe(logged("job-e"));
+    expect(useJobs.getState().outputs["job-e"]!.complete).toBe(true);
   });
 });

@@ -711,10 +711,16 @@ fn revert_copied(
     }
     if plan.needs_decision {
         let what: Vec<&str> = plan.impacts.iter().map(|i| i.message.as_str()).collect();
-        return Err(format!(
-            "The copy is in use now ({}); delete it yourself if you no longer need it.",
-            what.join(" ")
-        ));
+        // Whether anything uses it is not known: never said to be in use.
+        let unknown = plan.impacts.iter().any(|i| i.kind == exposition_core::ops::ImpactKind::ConsumersUnknown);
+        return Err(if unknown {
+            format!(
+                "What uses the copy could not be checked ({}), so it was not removed; delete it yourself if you no longer need it.",
+                what.join(" ")
+            )
+        } else {
+            format!("The copy is in use now ({}); delete it yourself if you no longer need it.", what.join(" "))
+        });
     }
     let result = ops.apply(&plan).map_err(|e| e.message)?;
     match result.outcomes.into_iter().next() {

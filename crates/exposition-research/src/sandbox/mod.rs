@@ -651,7 +651,7 @@ impl ScopedBatchRunner {
         if (control.canceled)() {
             return Err(canceled_before_start());
         }
-        self.research.set_batch_live(&run_id, true);
+        self.research.set_batch_live_in(&run_id, &root);
         write_manifest(&root, &manifest)?;
 
         // A language's restricted batch runs only in that language's image.

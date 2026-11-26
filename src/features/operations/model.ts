@@ -132,6 +132,7 @@ export const IMPACT_HEADINGS: Record<ImpactKind, string> = {
   workflowInput: "Required workflow inputs",
   pinnedRevision: "Pinned workflow revisions",
   retainedEvidence: "Retained evidence",
+  consumersUnknown: "Could not be checked",
   recoveryLoss: "Cannot be restored",
   savedVersionCopied: "Saved version copied",
 };
@@ -158,6 +159,26 @@ export function decisionGroups(plan: OpPlan): ImpactGroup[] {
     if (impacts.length) groups.push({ kind, heading: IMPACT_HEADINGS[kind], impacts });
   }
   return groups;
+}
+
+/**
+ * The sentence before the decision's consequences. When the only ones are
+ * consumers that could not be checked, it says they may exist rather than
+ * that they do.
+ */
+export function decisionLead(plan: OpPlan, groups: ImpactGroup[]): string {
+  if (groups.length === 0) return "Review what will happen before continuing.";
+  const subject = isDelete(plan.request.kind) ? "Deleting" : "This operation";
+  if (groups.every((g) => g.kind === "consumersUnknown")) return `${subject} may have consequences that could not be checked:`;
+  return `${subject} ${groups.length === 1 && groups[0]!.impacts.length === 1 ? "has a consequence" : "has consequences"} in this project:`;
+}
+
+/**
+ * Whether an impact line starts with its target's name (several targets).
+ * A "could not be checked" entry names every item it covers itself.
+ */
+export function impactNamesTarget(impact: OpImpact, multiple: boolean): boolean {
+  return multiple && impact.kind !== "consumersUnknown";
 }
 
 /** Informational notices of a plan (saved versions of dirty sources were copied). */

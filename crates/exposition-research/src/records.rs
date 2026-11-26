@@ -86,6 +86,18 @@ pub(crate) fn record_deleted(root: &Path, id: &str) -> bool {
     valid_run_id(id) && deleted_path(root, id).is_file()
 }
 
+/// Whether `id`'s record is in the history (not deleted, not removed).
+pub(crate) fn manifest_exists(root: &Path, id: &str) -> bool {
+    valid_run_id(id) && manifest_path(root, id).is_file()
+}
+
+/// Whether a batch's record has been begun: it exists, or it is being
+/// written now (a record being replaced can be missing by name for a moment;
+/// that is never taken as "not written yet").
+fn batch_record_started(root: &Path, id: &str) -> bool {
+    manifest_exists(root, id) || store::being_replaced(root, id)
+}
+
 fn artifact_dir(root: &Path, id: &str) -> PathBuf {
     join(root, ARTIFACTS).join(id)
 }
@@ -280,17 +292,23 @@ impl ResearchService {
         Ok(out)
     }
 
-    /// Records of the runs executing now in the open project: exactly the
-    /// entries [`Self::run_records`] marks active, found from the runs that
-    /// are executing instead of by reading the whole run history.
+    /// Records of the runs executing now in the open project: the entries
+    /// [`Self::run_records`] marks active, found from the runs that are
+    /// executing instead of by reading the whole run history. An active run
+    /// whose record cannot be read (a workflow batch's damaged manifest) is
+    /// an error, never left out: what it uses is unknown. A batch marked live
+    /// whose first record is not written yet is not one: its job has not
+    /// started, and the inputs it reads are copies it staged.
     pub fn active_run_records(&self) -> Result<Vec<RunRecordInfo>, ResearchError> {
         let root = self.records_root()?;
-        let mut out: Vec<RunRecordInfo> = self
-            .active_run_ids()
-            .iter()
-            .filter_map(|id| self.run_manifest(id).ok())
-            .map(|m| info(&root, &m, true, None))
-            .collect();
+        let mut out: Vec<RunRecordInfo> = Vec::new();
+        for id in self.active_run_ids() {
+            match self.run_manifest(&id) {
+                Ok(manifest) => out.push(info(&root, &manifest, true, None)),
+                Err(_) if self.is_batch_run(&id) && !batch_record_started(&root, &id) => {}
+                Err(e) => return Err(e),
+            }
+        }
         out.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms).then_with(|| b.id.cmp(&a.id)));
         Ok(out)
     }
@@ -343,6 +361,11 @@ impl ResearchService {
             return Err(ResearchError::coded("research.runActive", "The run is still active; cancel it first."));
         }
         let root = self.records_root()?;
+        // Output that arrives late for a released run is written to its
+        // record under the same lock: either it is in the record before it
+        // is moved or removed, or it finds the record deleted (never writes
+        // it back).
+        let _late = self.late_writes();
         let live = manifest_path(&root, id);
         let deleted = deleted_path(&root, id);
         let runs = join(&root, RUNS);
@@ -366,6 +389,8 @@ impl ResearchService {
                 std::fs::remove_file(&transcript).map_err(|e| ResearchError::io("removing the run transcript", e))?;
             }
             remove_if_empty(&root, &artifact_dir(&root, id));
+            // Gone for good: no longer listed from memory either.
+            self.forget_finished_run(id);
             return Ok(());
         }
         if !live.is_file() {
@@ -395,14 +420,18 @@ impl ResearchService {
         if live.exists() {
             return Err(ResearchError::InvalidRequest(format!("a run record {id} exists again; nothing was replaced")));
         }
-        move_no_replace(&deleted, &live).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AlreadyExists {
-                ResearchError::InvalidRequest(format!("a run record {id} exists again; nothing was replaced"))
-            } else {
-                ResearchError::io("restoring the run record", e)
-            }
-        })?;
-        let _ = std::fs::remove_file(deleted_record_marker(&root, id));
+        {
+            // Ordered with late writes, as a deletion is.
+            let _late = self.late_writes();
+            move_no_replace(&deleted, &live).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    ResearchError::InvalidRequest(format!("a run record {id} exists again; nothing was replaced"))
+                } else {
+                    ResearchError::io("restoring the run record", e)
+                }
+            })?;
+            let _ = std::fs::remove_file(deleted_record_marker(&root, id));
+        }
         self.run_record(id)
     }
 

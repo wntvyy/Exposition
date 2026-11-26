@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-use exposition_core::artifact::{ArtifactRecord, Producer, RunId, RunInput, RunRecord, RunStatus, ToolVersion};
+use exposition_core::artifact::{
+    ArtifactId, ArtifactRecord, Producer, RunId, RunInput, RunRecord, RunStatus, ToolVersion,
+};
 use exposition_core::job::{ExecutionPolicy, JobSpec};
 use exposition_core::path::WorkspacePath;
 use exposition_core::text::utf16_range_to_bytes;
@@ -163,17 +165,29 @@ struct Shared {
     /// Finished runs that still hold their output and code in memory although
     /// their record is on disk, oldest first ([`Shared::run_stored`]).
     stored_runs: Mutex<VecDeque<String>>,
-    /// Serializes appends to the records of released runs.
+    /// Serializes the writes to the stored records of finished runs (late
+    /// output, artifacts and errors; a release's last write) with the
+    /// deletion and restore of records, so that no write brings back a
+    /// record deleted at the same moment.
     late_writes: Mutex<()>,
-    /// Workflow batch runs executing now (their manifests read "running"
-    /// legitimately and are not settled as orphans).
-    batches: Mutex<HashSet<String>>,
+    /// Workflow batch runs executing now, with the project each runs in
+    /// (their manifests read "running" legitimately and are not settled as
+    /// orphans; the active runs of a project are its own batches only).
+    batches: Mutex<HashMap<String, Option<PathBuf>>>,
     /// Positions of the open project's run records ([`crate::history`]).
     history: crate::history::HistoryIndex,
     /// Guided environment setup (one run at a time) and its records.
     setup: crate::setup::SetupSlot,
     /// The environment chosen for each project (app-local).
     selections: crate::selection::SelectionStore,
+}
+
+/// Put `record` among `outputs`, in place of an earlier record with its id.
+fn put_output(outputs: &mut Vec<ArtifactRecord>, record: &ArtifactRecord) {
+    match outputs.iter_mut().find(|output| output.id == record.id) {
+        Some(output) => *output = record.clone(),
+        None => outputs.push(record.clone()),
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -236,11 +250,16 @@ impl Shared {
                 run.late = false;
                 (run.root.clone(), run.manifest.clone(), run.entries.iter().cloned().collect::<Vec<_>>())
             };
-            // Written without the run table's lock, like the final record.
-            let written = !crate::records::record_deleted(&root, run_id)
-                && write_manifest(&root, &manifest).is_ok()
-                && write_transcript(&root, run_id, &entries).is_ok()
-                && store::transcript_holds(&root, run_id, &entries);
+            // Written without the run table's lock, like the final record,
+            // and ordered with deletions ([`Self::late_writes`]).
+            let written = {
+                let _one = lock(&self.late_writes);
+                crate::records::manifest_exists(&root, run_id)
+                    && !crate::records::record_deleted(&root, run_id)
+                    && write_manifest(&root, &manifest).is_ok()
+                    && write_transcript(&root, run_id, &entries).is_ok()
+                    && store::transcript_holds(&root, run_id, &entries)
+            };
             if !written {
                 if let Some(run) = lock(&self.runs).get_mut(run_id) {
                     run.late = true;
@@ -288,6 +307,89 @@ impl Shared {
         Some(entry)
     }
 
+    /// Change the stored manifest of a run whose in-memory copy was already
+    /// released (one such write at a time, like [`Self::append_to_record`]).
+    /// `false` when the record cannot take the change (recoverably deleted,
+    /// unreadable, or not writable).
+    fn update_record(&self, root: &Path, run_id: &str, change: impl FnOnce(&mut RunManifest)) -> bool {
+        let _one = lock(&self.late_writes);
+        if crate::records::record_deleted(root, run_id) {
+            return false;
+        }
+        let Ok(mut manifest) = read_manifest(root, run_id) else { return false };
+        change(&mut manifest);
+        write_manifest(root, &manifest).is_ok()
+    }
+
+    /// Record artifacts registered for a run whose in-memory copy was
+    /// already released: added to the outputs of its stored manifest
+    /// ([`Self::update_record`]) and to the summary the history lists for
+    /// it. Returns the ids recorded: none when the record cannot take them,
+    /// so that the display entry never names an artifact its record does not
+    /// hold.
+    fn add_outputs_to_record(&self, root: &Path, run_id: &str, records: Vec<ArtifactRecord>) -> Vec<ArtifactId> {
+        if records.is_empty() {
+            return Vec::new();
+        }
+        let added = self.update_record(root, run_id, |manifest| {
+            for record in &records {
+                put_output(&mut manifest.record.outputs, record);
+            }
+        });
+        if !added {
+            return Vec::new();
+        }
+        if let Some(run) = lock(&self.runs).get_mut(run_id) {
+            for record in &records {
+                if let Some(summary) = run.released.as_mut() {
+                    put_output(&mut summary.outputs, record);
+                }
+                put_output(&mut run.manifest.record.outputs, record);
+            }
+        }
+        records.into_iter().map(|record| record.id).collect()
+    }
+
+    /// The error the kernel reported for a run: kept with the run while it
+    /// is in memory (marked late when its final record is being or was
+    /// written, so that a release writes it first), written to its stored
+    /// record when the run was already released ([`Self::record_error`]).
+    fn note_run_error(&self, run_id: &str, error: RunErrorInfo) {
+        let released = {
+            let mut runs = lock(&self.runs);
+            runs.get_mut(run_id).and_then(|run| {
+                if run.released.is_some() {
+                    // Its manifest lives in its record now: the error is written there.
+                    return Some(run.root.clone());
+                }
+                if run.finishing || run.finished {
+                    run.late = true;
+                }
+                run.manifest.error = Some(error.clone());
+                None
+            })
+        };
+        if let Some(root) = released {
+            self.record_error(&root, run_id, error);
+        }
+    }
+
+    /// Record the error of a run whose in-memory copy was already released:
+    /// in its stored manifest ([`Self::update_record`]) and in the summary
+    /// the history lists for it. Nothing when the record cannot take it (the
+    /// error entry of its output is recorded, or dropped, the same way).
+    fn record_error(&self, root: &Path, run_id: &str, error: RunErrorInfo) {
+        if !self.update_record(root, run_id, |manifest| manifest.error = Some(error.clone())) {
+            return;
+        }
+        if let Some(run) = lock(&self.runs).get_mut(run_id) {
+            if let Some(summary) = run.released.as_mut() {
+                summary.error = Some(error.clone());
+            }
+            run.manifest.error = Some(error);
+        }
+    }
+
     fn research_dir(&self, name: &str) -> Result<PathBuf, ResearchError> {
         let dir = self.config.data_dir.join("research").join(name);
         std::fs::create_dir_all(&dir).map_err(|e| ResearchError::io("creating research data directory", e))?;
@@ -313,7 +415,7 @@ impl ResearchService {
                 runs: Mutex::new(HashMap::new()),
                 stored_runs: Mutex::new(VecDeque::new()),
                 late_writes: Mutex::new(()),
-                batches: Mutex::new(HashSet::new()),
+                batches: Mutex::new(HashMap::new()),
                 history: crate::history::HistoryIndex::default(),
             }),
         }
@@ -321,6 +423,25 @@ impl ResearchService {
 
     pub fn subscribe(&self) -> broadcast::Receiver<ResearchEvent> {
         self.shared.events.subscribe()
+    }
+
+    /// The lock that orders writes to finished runs' records with the
+    /// deletion and restore of records ([`Shared::late_writes`]).
+    pub(crate) fn late_writes(&self) -> MutexGuard<'_, ()> {
+        lock(&self.shared.late_writes)
+    }
+
+    /// Forget a finished run whose record was deleted for good: the history
+    /// no longer lists it from memory, and output that still arrives for it
+    /// is dropped. A run that has not finished is kept (it is refused
+    /// deletion anyway).
+    pub(crate) fn forget_finished_run(&self, run_id: &str) {
+        let mut runs = lock(&self.shared.runs);
+        if runs.get(run_id).is_some_and(|run| run.finished) {
+            runs.remove(run_id);
+            drop(runs);
+            lock(&self.shared.stored_runs).retain(|id| id != run_id);
+        }
     }
 
     /// Run states held in memory now (benchmarks and retention tests).
@@ -866,14 +987,15 @@ impl ResearchService {
     /// Whether a run executes now: an unfinished interactive run, or a
     /// workflow batch (P1: never deleted while active).
     pub fn run_active(&self, run_id: &str) -> bool {
-        lock(&self.shared.batches).contains(run_id) || lock(&self.shared.runs).get(run_id).is_some_and(|r| !r.finished)
+        lock(&self.shared.batches).contains_key(run_id)
+            || lock(&self.shared.runs).get(run_id).is_some_and(|r| !r.finished)
     }
 
     /// Whether a workflow batch executes `run_id` now. A batch is part of its
     /// workflow run and is stopped through it ([`Self::cancel_run`] cancels
     /// interactive runs only).
     pub fn is_batch_run(&self, run_id: &str) -> bool {
-        lock(&self.shared.batches).contains(run_id)
+        lock(&self.shared.batches).contains_key(run_id)
     }
 
     /// Runs executing now in the open project (interactive and batch).
@@ -884,8 +1006,10 @@ impl ResearchService {
             .filter(|r| !r.finished && Some(&r.root) == root.as_ref())
             .map(|r| r.id().to_owned())
             .collect();
-        for id in lock(&self.shared.batches).iter() {
-            if !ids.contains(id) {
+        // A batch of another project (the previous one, still stopping
+        // after a switch) is not active work of this one.
+        for (id, batch_root) in lock(&self.shared.batches).iter() {
+            if batch_root.as_ref() == root.as_ref() && !ids.contains(id) {
                 ids.push(id.clone());
             }
         }
@@ -906,9 +1030,10 @@ impl ResearchService {
     /// stored records after `request.after`. Within a page runs are ordered
     /// by start time, newest first. A page reads only the manifests it
     /// examines (at most `limit` readable ones, plus records found damaged
-    /// on the way, which are remembered by modification time and size and
-    /// not read again until one of them changes). A record that cannot be
-    /// opened is counted in `unreadable` and read again by the next listing.
+    /// on the way, which are remembered by modification time, size and file
+    /// stamp and not read again until one of them changes:
+    /// [`crate::history`]). A record that cannot be opened is counted in
+    /// `unreadable` and read again by the next listing.
     ///
     /// Paging until `next` is absent returns every stored run that existed
     /// the whole time exactly once, whatever was created or deleted between
@@ -934,6 +1059,7 @@ impl ResearchService {
             || crate::history::scan_sized(root),
             |id| crate::history::stat(root, id),
             |id| store::being_replaced(root, id),
+            |id| crate::history::stamp(root, id),
             request.after.as_deref(),
             &|id| live.contains_key(id),
         )?;
@@ -964,7 +1090,7 @@ impl ResearchService {
                 // Counted with this listing and read again by the next:
                 // nothing is known about what the record holds.
                 RecordRead::Unopened => history.note_unopened(root, &plan, file),
-                RecordRead::Damaged { bytes } => history.note_damaged(root, &plan, file, bytes),
+                RecordRead::Damaged { bytes, stamp } => history.note_damaged(root, &plan, file, bytes, stamp),
             }
         }
         history.note_settled(root, &plan, &settled);
@@ -1026,17 +1152,24 @@ impl ResearchService {
     /// A stored manifest as it stands: "running" without live state means
     /// Exposition stopped before it finished, unless a batch runs it now.
     fn settle(&self, manifest: RunManifest) -> RunManifest {
-        if lock(&self.shared.batches).contains(&manifest.record.id.0) { manifest } else { settle_orphan(manifest) }
+        if lock(&self.shared.batches).contains_key(&manifest.record.id.0) { manifest } else { settle_orphan(manifest) }
     }
 
-    /// Mark a workflow batch run as executing (or no longer executing).
+    /// Mark a workflow batch run as executing in the open project (or no
+    /// longer executing).
     pub(crate) fn set_batch_live(&self, run_id: &str, live: bool) {
-        let mut batches = lock(&self.shared.batches);
         if live {
-            batches.insert(run_id.to_owned());
+            let root = self.workspace_root();
+            lock(&self.shared.batches).insert(run_id.to_owned(), root);
         } else {
-            batches.remove(run_id);
+            lock(&self.shared.batches).remove(run_id);
         }
+    }
+
+    /// Mark a workflow batch run as executing in the project at `root` (the
+    /// canonical root the batch runner checked).
+    pub(crate) fn set_batch_live_in(&self, run_id: &str, root: &Path) {
+        lock(&self.shared.batches).insert(run_id.to_owned(), Some(root.to_path_buf()));
     }
 
     /// Page through retained output (live runs) or the stored transcript.
@@ -1680,14 +1813,21 @@ impl Session {
                     };
                     let mut runs = lock(&shared.runs);
                     let Some(run) = runs.get_mut(&run_id) else { return };
-                    records
-                        .into_iter()
-                        .map(|record| {
-                            let id = record.id.clone();
-                            run.add_output(record);
-                            id
-                        })
-                        .collect()
+                    if run.released.is_none() {
+                        records
+                            .into_iter()
+                            .map(|record| {
+                                let id = record.id.clone();
+                                run.add_output(record);
+                                id
+                            })
+                            .collect()
+                    } else {
+                        // Its outputs live in its record now: they are added there.
+                        let root = run.root.clone();
+                        drop(runs);
+                        shared.add_outputs_to_record(&root, &run_id, records)
+                    }
                 };
                 if files.iter().any(|f| f.truncated) {
                     self.push_output(
@@ -1710,10 +1850,8 @@ impl Session {
                 self.push_output(&shared, &run_id, OutputItem::ClearOutput { wait });
             }
             HelperEvent::Error { run_id, ename, evalue, traceback } => {
-                if let Some(run) = lock(&shared.runs).get_mut(&run_id) {
-                    let redact = |text: &str| shared.config.launcher.redact(text);
-                    run.manifest.error = Some(RunErrorInfo { ename: redact(&ename), evalue: redact(&evalue) });
-                }
+                let redact = |text: &str| shared.config.launcher.redact(text);
+                shared.note_run_error(&run_id, RunErrorInfo { ename: redact(&ename), evalue: redact(&evalue) });
                 self.push_output(&shared, &run_id, OutputItem::Error { ename, evalue, traceback });
             }
             HelperEvent::RunFinished { run_id, status, reason, execution_count, stream_dropped, files_dropped } => {
@@ -2573,6 +2711,128 @@ mod tests {
         assert_eq!(kept.entries.len(), 3, "the only copy of its output is kept");
         assert!(!kept.code.is_empty());
         assert!(runs.values().filter(|r| r.id() != unwritable).all(|r| r.released.is_some()));
+    }
+
+    /// An error the kernel reports for a run that was already released is
+    /// written to its stored manifest like late output: the run's record and
+    /// its history entry name the error, also after the project is opened
+    /// again, and the error entry is in its stored output.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_error_of_a_released_run_is_added_to_its_stored_manifest() {
+        let f = Fixture::new();
+        let service = &f._service;
+        let root = service.workspace_root().unwrap();
+        let id = finished_run(&f, 0, 10);
+        service.clear_workspace();
+        service.set_workspace(&root, true).unwrap();
+        assert!(lock(&service.shared.runs)[&id].released.is_some());
+        assert_eq!(read_manifest(&root, &id).unwrap().error, None);
+
+        f.session.on_event(HelperEvent::Error {
+            run_id: id.clone(),
+            ename: "ValueError".into(),
+            evalue: "late failure".into(),
+            traceback: vec!["Traceback (most recent call last)".into()],
+        });
+        let expected = Some(RunErrorInfo { ename: "ValueError".into(), evalue: "late failure".into() });
+        assert_eq!(read_manifest(&root, &id).unwrap().error, expected, "the stored manifest names the error");
+        assert_eq!(service.run_summary(&id).unwrap().error, expected, "the history entry names it");
+        let output = service.run_output(&id, None, 500).unwrap();
+        assert!(
+            output.entries.iter().any(|e| matches!(&e.item, OutputItem::Error { ename, .. } if ename == "ValueError")),
+            "{:?}",
+            output.entries
+        );
+        service.clear_workspace();
+        service.set_workspace(&root, true).unwrap();
+        assert_eq!(service.run_summary(&id).unwrap().error, expected);
+        assert_eq!(service.run_manifest(&id).unwrap().error, expected);
+    }
+
+    /// An error noted for a finished run still held in memory, and a release
+    /// before the error's output entry arrives (the window between the two
+    /// steps of the kernel's error event): the release writes the error to
+    /// the stored manifest.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_error_noted_just_before_a_release_is_in_the_stored_manifest() {
+        let f = Fixture::new();
+        let service = &f._service;
+        let root = service.workspace_root().unwrap();
+        let id = finished_run(&f, 0, 10);
+        assert!(lock(&service.shared.runs)[&id].released.is_none());
+        let error = RunErrorInfo { ename: "ValueError".into(), evalue: "noted before the release".into() };
+        service.shared.note_run_error(&id, error.clone());
+        service.clear_workspace();
+        service.set_workspace(&root, true).unwrap();
+        assert!(lock(&service.shared.runs)[&id].released.is_some());
+        assert_eq!(read_manifest(&root, &id).unwrap().error, Some(error.clone()), "written before the release");
+        assert_eq!(service.run_summary(&id).unwrap().error, Some(error));
+    }
+
+    /// A display artifact registered for a run that was already released
+    /// (output the kernel sent after the run's record was written and its
+    /// in-memory copy was let go) is added to the stored manifest: the record
+    /// on disk names it, the artifact opens, and the history lists it, in
+    /// this session and after the project is opened again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_display_artifact_of_a_released_run_is_added_to_its_stored_manifest() {
+        let f = Fixture::new();
+        let service = &f._service;
+        let root = service.workspace_root().unwrap();
+        let id = queued_run(&f, 0, 10);
+        let dir = ensure_dir_within(&root, &artifact_dir_path(&id)).unwrap();
+        lock(&service.shared.runs).get_mut(&id).unwrap().output_dir = Some(dir.clone());
+        f.session.finish_run(&id, RunStatus::Succeeded, Some(1), None, false);
+        // Leave the project and come back: the run is released.
+        service.clear_workspace();
+        service.set_workspace(&root, true).unwrap();
+        assert!(lock(&service.shared.runs)[&id].released.is_some());
+        assert!(read_manifest(&root, &id).unwrap().record.outputs.is_empty());
+
+        // The kernel's late display, with a figure in the run's folder.
+        let png = b"\x89PNG\r\n\x1a\nlate figure".to_vec();
+        std::fs::write(dir.join("output-1.png"), &png).unwrap();
+        f.session.on_event(HelperEvent::Display {
+            run_id: id.clone(),
+            output_type: "display_data".into(),
+            execution_count: Some(1),
+            text: None,
+            files: vec![crate::protocol::HelperFile {
+                path: dir.join("output-1.png").display().to_string(),
+                name: "output-1.png".into(),
+                media_type: "image/png".into(),
+                role: "image".into(),
+                size: png.len() as u64,
+                sha256: sha256_hex(&png),
+                seq: 1,
+                truncated: false,
+            }],
+        });
+        let artifact = format!("{id}/output-1.png");
+        let stored = read_manifest(&root, &id).unwrap();
+        let named: Vec<&str> = stored.record.outputs.iter().map(|o| o.id.0.as_str()).collect();
+        assert_eq!(named, vec![artifact.as_str()], "the stored manifest names the artifact");
+        assert_eq!(stored.record.outputs[0].content_hash, format!("sha256:{}", sha256_hex(&png)));
+        // The display entry that names it is in the stored output, and it opens.
+        let output = service.run_output(&id, None, 500).unwrap();
+        assert!(
+            output.entries.iter().any(|e| matches!(
+                &e.item,
+                OutputItem::Display { artifacts, .. } if artifacts.iter().any(|a| a.0 == artifact)
+            )),
+            "{:?}",
+            output.entries
+        );
+        let (record, file) = service.artifact(&id, &artifact).unwrap();
+        assert_eq!(record, stored.record.outputs[0]);
+        assert_eq!(std::fs::read(file).unwrap(), png);
+        // The history lists it with the run.
+        assert_eq!(service.run_summary(&id).unwrap().outputs, stored.record.outputs);
+        let listed = service.runs().unwrap();
+        assert_eq!(listed.iter().find(|r| r.id.0 == id).unwrap().outputs, stored.record.outputs);
+        service.clear_workspace();
+        service.set_workspace(&root, true).unwrap();
+        assert_eq!(service.run_summary(&id).unwrap().outputs, stored.record.outputs);
     }
 
     /// The active records found directly are the ones the full record

@@ -11,7 +11,7 @@ vi.mock("./ipc", () => ({ opCommands: {}, opEvents: { projectOp: vi.fn(async () 
 import { useContextMenu } from "../../ui/components";
 import { pasteFolder } from "../workspace/fileOps";
 import { classifyAbsolute } from "./clipboard";
-import { decisionAction, decisionGroups, decisionTitle, initialChoices, summarizeResult } from "./model";
+import { decisionAction, decisionGroups, decisionLead, decisionTitle, impactNamesTarget, initialChoices, summarizeResult } from "./model";
 import { OpContextMenu } from "./OpMenu";
 import type { SurfaceActions } from "./surfaces";
 
@@ -46,6 +46,30 @@ describe("decision wording", () => {
 
   it("groups decision impacts in a fixed order and leaves the saved-version notice out", () => {
     expect(decisionGroups(plan).map((g) => g.kind)).toEqual(["manuscriptDependency", "recoveryLoss"]);
+  });
+
+  it("consumers that could not be checked need the decision and have their own group", () => {
+    const unchecked: OpPlan = {
+      ...plan,
+      impacts: [
+        ...plan.impacts,
+        { kind: "consumersUnknown", target: path("figures/plot.png"), consumers: [], message: "… could not be checked: the project graph could not be read." },
+      ],
+    };
+    const groups = decisionGroups(unchecked);
+    expect(groups.map((g) => g.kind)).toEqual(["manuscriptDependency", "consumersUnknown", "recoveryLoss"]);
+    expect(groups[1]!.heading).toBe("Could not be checked");
+    // With real consequences too, the lead says there are consequences.
+    expect(decisionLead(unchecked, groups)).toBe("Deleting has consequences in this project:");
+  });
+
+  it("a plan whose only impacts could not be checked says consequences may exist; its entries name their items", () => {
+    const impact = { kind: "consumersUnknown" as const, target: path("figures/plot.png"), consumers: [], message: "… could not be checked." };
+    const unknownOnly: OpPlan = { ...plan, impacts: [impact] };
+    expect(decisionLead(unknownOnly, decisionGroups(unknownOnly))).toBe("Deleting may have consequences that could not be checked:");
+    expect(impactNamesTarget(impact, true)).toBe(false);
+    expect(impactNamesTarget({ ...impact, kind: "manuscriptDependency" }, true)).toBe(true);
+    expect(impactNamesTarget({ ...impact, kind: "manuscriptDependency" }, false)).toBe(false);
   });
 
   it("choices start at their non-destructive default; presets only for offered values", () => {

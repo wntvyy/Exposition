@@ -117,7 +117,7 @@ pub trait TaskRecords: Send + Sync {
     fn deleted(&self) -> Result<Vec<TaskRecord>, OpError>;
     fn record(&self, id: &str) -> Result<TaskRecord, OpError>;
     /// Project files the task may write or touched.
-    fn paths(&self, id: &str) -> Vec<WorkspacePath>;
+    fn paths(&self, id: &str) -> Result<Vec<WorkspacePath>, OpError>;
     fn delete(&self, id: &str, permanent: bool) -> Result<(), OpError>;
     fn restore(&self, id: &str) -> Result<(), OpError>;
     fn stop(&self, id: &str) -> bool;
@@ -208,8 +208,8 @@ impl TaskRecords for exposition_agents::AgentService {
     fn record(&self, id: &str) -> Result<TaskRecord, OpError> {
         self.task_record(&exposition_agents::TaskId(id.to_owned())).map_err(agent_error)
     }
-    fn paths(&self, id: &str) -> Vec<WorkspacePath> {
-        self.task_paths(&exposition_agents::TaskId(id.to_owned())).unwrap_or_default()
+    fn paths(&self, id: &str) -> Result<Vec<WorkspacePath>, OpError> {
+        self.task_paths(&exposition_agents::TaskId(id.to_owned())).map_err(agent_error)
     }
     fn delete(&self, id: &str, permanent: bool) -> Result<(), OpError> {
         self.delete_task(&exposition_agents::TaskId(id.to_owned()), permanent).map_err(agent_error)
@@ -412,53 +412,112 @@ fn run_error(e: crate::model::WorkflowRunError) -> OpError {
 
 // ------------------------------------------------------- path impacts ----
 
+/// A source of a deleted path's consumers that could not be read.
+struct Unchecked {
+    /// The consumers it would have reported (plural, sentence start).
+    what: &'static str,
+    /// Why they are unknown.
+    cause: String,
+}
+
 /// Concrete consequences of deleting these project paths for data
 /// consumers (manuscripts, workflows, retained evidence, triggers, active
 /// work). Copies have none here.
+///
+/// A source of consumers that cannot be read (the project graph, the
+/// records of running workflows, research run records, agent tasks or a
+/// task's files, triggers) is never taken as "nothing uses these paths":
+/// each such source adds one `consumersUnknown` impact naming the paths it
+/// covers (decided by the user like any other; refused for an agent) and its
+/// error code to the fingerprint, so a plan made while it failed goes stale
+/// once it reads again.
 pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &OpKind) -> DataPlan {
     let mut plan = DataPlan::default();
     if !matches!(kind, OpKind::Delete { .. }) || paths.is_empty() {
         return plan;
     }
+    let mut unchecked: Vec<Unchecked> = Vec::new();
     match cx.graph.path_impacts(paths) {
         Ok(impacts) => plan.impacts.extend(impacts),
-        // An unavailable graph cannot report consumers; editing files keeps
-        // working, and the fingerprint records that nothing was known.
-        Err(e) => plan.fingerprint.push(format!("graph:{}", e.code)),
+        // Editing files keeps working while the graph is unavailable.
+        Err(e) => {
+            plan.fingerprint.push(format!("graph:{}", e.code));
+            unchecked.push(Unchecked {
+                what: "Manuscripts, workflows and retained evidence",
+                cause: "the project graph could not be read".into(),
+            });
+        }
     }
     // Active work using the paths.
     let mut active: BTreeMap<usize, Vec<OpConsumer>> = BTreeMap::new();
-    for run in cx.runs.active_run_inputs() {
+    let (runs, unread_runs) = cx.runs.read_active_run_inputs();
+    for run in runs {
         for input in &run.inputs {
             if let Some(t) = under_any(input, paths) {
                 active.entry(t).or_default().push(consumer("run", run.run.as_str(), &run.title));
             }
         }
     }
-    if let Some(research) = cx.research
-        && let Ok(records) = research.active_records()
-    {
-        for r in &records {
-            // A workflow batch is part of its workflow run (listed and
-            // stopped as that run, never on its own).
-            let owner = research_consumer(cx, r);
-            for input in &r.inputs {
-                if let Some(t) = under_any(input, paths) {
-                    active.entry(t).or_default().push(owner.clone());
+    if !unread_runs.is_empty() {
+        for e in &unread_runs {
+            plan.fingerprint.push(format!("runs:{}", e.code));
+        }
+        unchecked.push(Unchecked {
+            what: "Running workflows",
+            cause: match unread_runs.len() {
+                1 => "the record of a running workflow could not be read".into(),
+                n => format!("the records of {n} running workflows could not be read"),
+            },
+        });
+    }
+    match cx.research.map(|research| research.active_records()) {
+        Some(Ok(records)) => {
+            for r in &records {
+                // A workflow batch is part of its workflow run (listed and
+                // stopped as that run, never on its own).
+                let owner = research_consumer(cx, r);
+                for input in &r.inputs {
+                    if let Some(t) = under_any(input, paths) {
+                        active.entry(t).or_default().push(owner.clone());
+                    }
                 }
             }
         }
+        Some(Err(e)) => {
+            plan.fingerprint.push(format!("research:{}", e.code));
+            unchecked
+                .push(Unchecked { what: "Research runs", cause: "the research run records could not be read".into() });
+        }
+        None => {}
     }
-    if let Some(tasks) = cx.tasks
-        && let Ok(records) = tasks.records()
-    {
-        for task in records.iter().filter(|t| t.active && in_project(cx, &t.workspace_root)) {
-            for p in tasks.paths(task.id.0.as_str()) {
-                for (t, target) in paths.iter().enumerate() {
-                    if overlaps(&p, target) {
-                        active.entry(t).or_default().push(consumer("task", &task.id.0, &task.title));
+    if let Some(tasks) = cx.tasks {
+        match tasks.records() {
+            Ok(records) => {
+                for task in records.iter().filter(|t| t.active && in_project(cx, &t.workspace_root)) {
+                    let used = match tasks.paths(task.id.0.as_str()) {
+                        Ok(used) => used,
+                        Err(e) => {
+                            plan.fingerprint.push(format!("taskPaths:{}:{}", task.id.0, e.code));
+                            unchecked.push(Unchecked {
+                                what: "Agent tasks",
+                                cause: format!("the files of {} could not be read", quoted(&task.title)),
+                            });
+                            continue;
+                        }
+                    };
+                    for p in used {
+                        for (t, target) in paths.iter().enumerate() {
+                            if overlaps(&p, target) {
+                                active.entry(t).or_default().push(consumer("task", &task.id.0, &task.title));
+                            }
+                        }
                     }
                 }
+            }
+            Err(e) => {
+                plan.fingerprint.push(format!("tasks:{}", e.code));
+                unchecked
+                    .push(Unchecked { what: "Agent tasks", cause: "the agent task records could not be read".into() });
             }
         }
     }
@@ -481,7 +540,13 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
     // Enabled triggers watching the paths.
     if let Some(triggers) = cx.triggers {
         let mut watching: BTreeMap<usize, Vec<OpConsumer>> = BTreeMap::new();
-        for trigger in triggers.watching(paths) {
+        let enabled = triggers.try_watching(paths).unwrap_or_else(|e| {
+            plan.fingerprint.push(format!("triggers:{}", e.code));
+            unchecked
+                .push(Unchecked { what: "Enabled triggers", cause: "the workflow triggers could not be read".into() });
+            Vec::new()
+        });
+        for trigger in enabled {
             for w in &trigger.watched {
                 if let Some(t) = under_any(&w.path, paths) {
                     watching.entry(t).or_default().push(OpConsumer {
@@ -509,8 +574,34 @@ pub fn impacts_for_paths(cx: &DataContext<'_>, paths: &[WorkspacePath], kind: &O
             push_choice(&mut plan.choices, triggers_choice());
         }
     }
+    // One entry per source that could not be read, naming the paths it
+    // covers (every deleted path); it belongs to the first of them.
+    if let Some(first) = paths.first() {
+        let subject = covered(paths);
+        for u in &unchecked {
+            plan.impacts.push(OpImpact {
+                kind: ImpactKind::ConsumersUnknown,
+                target: OpTarget::Path { path: first.clone() },
+                consumers: Vec::new(),
+                message: format!("{} using {subject} could not be checked: {}.", u.what, u.cause),
+            });
+        }
+    }
     plan.fingerprint.extend(fingerprint_of(&plan.impacts));
     plan
+}
+
+/// The deleted paths a "could not be checked" entry covers: each named up
+/// to three, else their number and the first three.
+fn covered(paths: &[WorkspacePath]) -> String {
+    let names: Vec<String> = paths.iter().take(3).map(|p| quoted(p.as_str())).collect();
+    match names.as_slice() {
+        [one] => one.clone(),
+        [a, b] => format!("{a} and {b}"),
+        [a, b, c] if paths.len() == 3 => format!("{a}, {b} and {c}"),
+        [a, b, c] => format!("{} items ({a}, {b}, {c} and {} more)", paths.len(), paths.len() - 3),
+        _ => String::new(),
+    }
 }
 
 /// Before file work: stop the work and turn off the triggers the user chose
@@ -536,6 +627,18 @@ pub fn prepare_paths(cx: &DataContext<'_>, plan: &OpPlan, choices: &BTreeMap<Str
                 "ops.agentScope",
                 "Work is running on this item; an agent cannot stop it. Ask the user.".into(),
             ),
+            // What uses it could not be checked: an agent cannot show that
+            // deleting it is safe (the person decides for themselves).
+            // The entry covers every deleted path: each is refused.
+            ImpactKind::ConsumersUnknown if agent => {
+                for target in plan.request.targets.iter().filter(|t| matches!(t, OpTarget::Path { .. })) {
+                    refuse(
+                        target,
+                        "ops.agentScope",
+                        "What uses this item could not be checked; an agent cannot delete it. Ask the user.".into(),
+                    );
+                }
+            }
             ImpactKind::ActiveWork if !stop => refuse(
                 &impact.target,
                 "ops.activeWork",

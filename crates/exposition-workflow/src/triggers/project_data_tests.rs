@@ -28,6 +28,8 @@ struct Research {
     stopped: Mutex<Vec<String>>,
     /// Outputs moved aside for recovery, per run.
     held: Mutex<BTreeMap<String, Vec<OutputFile>>>,
+    /// The records cannot be read (a damaged or unreachable store).
+    failing: Mutex<Option<OpError>>,
 }
 
 impl Research {
@@ -64,6 +66,9 @@ impl Research {
 
 impl ResearchRecords for Research {
     fn records(&self) -> Result<Vec<ResearchRecord>, OpError> {
+        if let Some(e) = self.failing.lock().unwrap().clone() {
+            return Err(e);
+        }
         let all: Vec<ResearchRecord> = self.records.lock().unwrap().clone();
         Ok(all.into_iter().filter(|r| r.deleted_at_ms.is_none()).map(|r| self.current(r)).collect())
     }
@@ -148,10 +153,17 @@ struct Tasks {
     records: Mutex<Vec<TaskRecord>>,
     paths: Mutex<BTreeMap<String, Vec<WorkspacePath>>>,
     stoppable: AtomicBool,
+    /// The task records cannot be read.
+    failing: Mutex<Option<OpError>>,
+    /// Tasks whose files cannot be read.
+    unreadable_paths: Mutex<Vec<String>>,
 }
 
 impl TaskRecords for Tasks {
     fn records(&self) -> Result<Vec<TaskRecord>, OpError> {
+        if let Some(e) = self.failing.lock().unwrap().clone() {
+            return Err(e);
+        }
         Ok(self.records.lock().unwrap().iter().filter(|t| t.deleted_at_ms.is_none()).cloned().collect())
     }
     fn deleted(&self) -> Result<Vec<TaskRecord>, OpError> {
@@ -166,8 +178,11 @@ impl TaskRecords for Tasks {
             .cloned()
             .ok_or_else(|| OpError::new("agents.notFound", "unknown task"))
     }
-    fn paths(&self, id: &str) -> Vec<WorkspacePath> {
-        self.paths.lock().unwrap().get(id).cloned().unwrap_or_default()
+    fn paths(&self, id: &str) -> Result<Vec<WorkspacePath>, OpError> {
+        if self.unreadable_paths.lock().unwrap().iter().any(|t| t == id) {
+            return Err(OpError::new("agents.store", "the task's files cannot be read"));
+        }
+        Ok(self.paths.lock().unwrap().get(id).cloned().unwrap_or_default())
     }
     fn delete(&self, id: &str, permanent: bool) -> Result<(), OpError> {
         let mut records = self.records.lock().unwrap();
@@ -458,6 +473,205 @@ fn active_work_on_a_path_is_coordinated_before_deletion() {
     assert_eq!(e.fx.runs.get(&run).unwrap().state, WorkflowRunState::Canceled);
     assert_eq!(e.research.stopped.lock().unwrap().as_slice(), ["run-live"]);
     release.store(true, Ordering::SeqCst);
+}
+
+/// A reader of active work or triggers that fails does not answer "nothing
+/// uses these paths": the plan records what could not be read (as it does
+/// for an unavailable graph), so it is never the plan of a project in which
+/// nothing runs, and a plan made while a reader failed goes stale once it
+/// reads again.
+#[test]
+fn active_work_that_cannot_be_read_is_never_taken_as_none() {
+    let e = env();
+    let request = || e.request(delete(false), vec![p("data/obs.csv")]);
+    let idle = e.plan(request());
+    assert_eq!(idle.impacts, vec![]);
+
+    *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
+    let research = e.plan(request());
+    assert_eq!(unchecked(&research).len(), research.impacts.len(), "only what could not be checked");
+    assert_ne!(research.plan_hash, idle.plan_hash, "research records that could not be read are not \"none\"");
+    *e.research.failing.lock().unwrap() = None;
+    assert_eq!(e.plan(request()).plan_hash, idle.plan_hash, "readable again: the same plan as before");
+
+    *e.tasks.failing.lock().unwrap() = Some(OpError::new("agents.store", "the task records cannot be read"));
+    let tasks = e.plan(request());
+    assert_eq!(unchecked(&tasks).len(), tasks.impacts.len(), "only what could not be checked");
+    assert_ne!(tasks.plan_hash, idle.plan_hash, "agent tasks that could not be read are not \"none\"");
+    assert_ne!(tasks.plan_hash, research.plan_hash, "which reader failed is part of the plan");
+    *e.tasks.failing.lock().unwrap() = None;
+
+    // An active task of this project whose files cannot be read.
+    e.tasks.records.lock().unwrap().push(task(&e, "task-1", true));
+    assert_eq!(e.plan(request()).plan_hash, idle.plan_hash, "an active task that uses no files");
+    e.tasks.unreadable_paths.lock().unwrap().push("task-1".into());
+    let unknown = e.plan(request());
+    assert_eq!(unchecked(&unknown).len(), unknown.impacts.len(), "only what could not be checked");
+    assert_ne!(unknown.plan_hash, idle.plan_hash, "a task whose files are unknown may use these paths");
+}
+
+/// The messages of the plan's "could not be checked" impacts, by target.
+fn unchecked(plan: &OpPlan) -> Vec<(String, String)> {
+    plan.impacts
+        .iter()
+        .filter(|i| serde_json::to_value(i.kind).unwrap() == "consumersUnknown")
+        .map(|i| {
+            let target = match &i.target {
+                OpTarget::Path { path } => path.to_string(),
+                other => format!("{other:?}"),
+            };
+            (target, i.message.clone())
+        })
+        .collect()
+}
+
+/// A plan whose consumers could not all be read says so to the user: one
+/// "could not be checked" impact per source that failed, naming the deleted
+/// paths it covers (up to three by name), which needs the decision like
+/// every other impact. A plan whose readers all work is the plan it always
+/// was.
+#[test]
+fn a_plan_says_which_consumers_could_not_be_checked() {
+    let e = env();
+    let request = || e.request(delete(false), vec![p("data/obs.csv"), p("notes.md")]);
+    let healthy = e.plan(request());
+    assert_eq!((healthy.impacts.len(), healthy.needs_decision, healthy.plan_hash.as_str()), (0, false, ""));
+
+    *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
+    let research = e.plan(request());
+    assert!(research.needs_decision, "the user decides a plan whose consumers could not be checked");
+    assert!(research.choices.is_empty(), "there is nothing to choose, only to confirm or cancel");
+    assert_eq!(
+        unchecked(&research),
+        vec![(
+            "data/obs.csv".to_owned(),
+            "Research runs using “data/obs.csv” and “notes.md” could not be checked: the research run records could not be read.".to_owned()
+        )]
+    );
+    *e.research.failing.lock().unwrap() = None;
+    let again = e.plan(request());
+    assert_eq!(
+        (again.impacts, again.plan_hash),
+        (healthy.impacts.clone(), healthy.plan_hash.clone()),
+        "readable again"
+    );
+
+    *e.tasks.failing.lock().unwrap() = Some(OpError::new("agents.store", "the task records cannot be read"));
+    let tasks = unchecked(&e.plan(request()));
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        tasks[0].1,
+        "Agent tasks using “data/obs.csv” and “notes.md” could not be checked: the agent task records could not be read."
+    );
+    *e.tasks.failing.lock().unwrap() = None;
+
+    e.tasks.records.lock().unwrap().push(task(&e, "task-1", true));
+    e.tasks.unreadable_paths.lock().unwrap().push("task-1".into());
+    let task_files = unchecked(&e.plan(request()));
+    assert!(task_files[0].1.contains("the files of “Task task-1” could not be read"), "{task_files:?}");
+    e.tasks.unreadable_paths.lock().unwrap().clear();
+
+    // The project graph, and two sources at once: one impact each.
+    e.fx.graph.detach();
+    *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
+    let both = e.plan(request());
+    let messages: Vec<String> = unchecked(&both).into_iter().map(|(_, m)| m).collect();
+    assert_eq!(
+        messages,
+        vec![
+            "Manuscripts, workflows and retained evidence using “data/obs.csv” and “notes.md” could not be checked: the project graph could not be read.",
+            "Research runs using “data/obs.csv” and “notes.md” could not be checked: the research run records could not be read.",
+        ]
+    );
+    assert!(both.needs_decision);
+
+    // Many paths: the first three by name and how many there are.
+    let many: Vec<OpTarget> = ["data/obs.csv", "notes.md", "experiment.py", "data/extra.csv", "data"].map(p).to_vec();
+    let five = e.plan(e.request(delete(false), many));
+    let names: Vec<String> = unchecked(&five).into_iter().map(|(_, m)| m).collect();
+    assert_eq!(names.len(), 2);
+    assert!(
+        names[1].starts_with(
+            "Research runs using 5 items (“data/obs.csv”, “notes.md”, “experiment.py” and 2 more) could not be checked:"
+        ),
+        "{names:?}"
+    );
+}
+
+/// An active workflow run whose record cannot be read is not a run that reads
+/// nothing: the plan says that running workflows could not be checked.
+#[test]
+fn an_active_run_whose_record_cannot_be_read_is_not_left_out() {
+    let e = env();
+    let id = e.workflow();
+    let (run, release) = e.hold_run(&id);
+    let request = || e.request(delete(false), vec![p("data/obs.csv")]);
+    let readable = e.plan(request());
+    assert!(readable.impacts.iter().any(|i| i.kind == ImpactKind::ActiveWork), "the run uses the file");
+    let db = rusqlite::Connection::open(e.fx._data.path().join("workflow-runs.sqlite3")).unwrap();
+    db.execute("UPDATE runs SET body = 'not a run record' WHERE id = ?1", [run.as_str()]).unwrap();
+    let unread = e.plan(request());
+    assert!(unread.needs_decision);
+    assert_eq!(
+        unchecked(&unread),
+        vec![(
+            "data/obs.csv".to_owned(),
+            "Running workflows using “data/obs.csv” could not be checked: the record of a running workflow could not be read.".to_owned()
+        )]
+    );
+    release.store(true, Ordering::SeqCst);
+}
+
+/// What uses a path could not be checked: an agent's deletion of it is
+/// refused at once (it cannot be shown to be safe), whatever the approval
+/// said; the person's own deletion is theirs to decide and is not refused.
+#[test]
+fn an_agent_may_not_delete_what_could_not_be_checked() {
+    let e = env();
+    *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
+    let agent = e.plan(OpRequest {
+        kind: delete(false),
+        targets: vec![p("notes.md"), p("experiment.py")],
+        actor: OpActor::Agent { task: "task-x".into() },
+    });
+    assert!(agent.needs_decision);
+    let refused = e.prepare(&agent, &[]);
+    assert_eq!(refused.iter().map(|r| r.target.clone()).collect::<Vec<_>>(), vec![p("notes.md"), p("experiment.py")]);
+    assert_eq!(
+        (refused[0].code.as_str(), refused[0].message.as_str()),
+        ("ops.agentScope", "What uses this item could not be checked; an agent cannot delete it. Ask the user.")
+    );
+    let person = e.plan(e.request(delete(false), vec![p("notes.md")]));
+    assert_eq!(e.prepare(&person, &[]), vec![], "the person's decision is not refused");
+}
+
+/// The same for triggers: a trigger store that cannot be read (another
+/// program holds it) is not a project without enabled triggers.
+#[cfg(windows)]
+#[test]
+fn triggers_that_cannot_be_read_are_never_taken_as_none() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let e = env();
+    let id = e.workflow();
+    e.fx.enable(&id, watch(&["data"]));
+    let paths = [path("notes.md")];
+    let readable = impacts_for_paths(&e.cx(), &paths, &delete(false));
+    assert_eq!((readable.impacts.len(), readable.fingerprint.len()), (0, 0), "nothing watches the notes");
+    let _held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&e.fx.store).unwrap();
+    let restarted = TriggerService::new(TriggerConfig {
+        store: Some(e.fx.store.clone()),
+        starter: e.fx.starter.clone(),
+        clock: e.fx.clock.clone(),
+    });
+    let cx = DataContext { triggers: Some(&restarted), ..e.cx() };
+    let unread = impacts_for_paths(&cx, &paths, &delete(false));
+    assert_eq!(unread.impacts.len(), 1);
+    assert_eq!(serde_json::to_value(unread.impacts[0].kind).unwrap(), "consumersUnknown");
+    assert_eq!(
+        unread.impacts[0].message,
+        "Enabled triggers using “notes.md” could not be checked: the workflow triggers could not be read."
+    );
+    assert_ne!(unread.fingerprint, readable.fingerprint, "triggers that could not be read are not \"none\"");
 }
 
 // ----------------------------------------------------------- workflows ----
@@ -1274,4 +1488,154 @@ fn a_file_deletion_that_does_not_happen_leaves_a_suspended_trigger_suspended() {
         }],
     );
     assert_eq!(e.trigger_state(&id), suspended, "the rollback never grants Active");
+}
+
+// ------------------------------------------------- independent review ----
+//
+// Review of "a delete plan never takes a reader that failed for no active
+// work". Tests marked `#[ignore = "review finding: ..."]` fail against the
+// change under review and document a finding; every other test passes.
+
+/// What the base computed as the data-side fingerprint of a path plan whose
+/// readers all answered: the graph's part (nothing, when it answered) and
+/// one entry per impact (kind, target, sorted consumer ids).
+fn base_fingerprint(impacts: &[exposition_core::ops::OpImpact]) -> Vec<String> {
+    impacts
+        .iter()
+        .map(|i| {
+            let mut ids: Vec<&str> = i.consumers.iter().map(|c| c.id.as_str()).collect();
+            ids.sort();
+            format!("{:?}|{}|{}", i.kind, serde_json::to_string(&i.target).unwrap(), ids.join(","))
+        })
+        .collect()
+}
+
+/// No churn: with every reader answering, the fingerprint (and so the plan
+/// hash) is exactly what the base computed, for an idle project and for one
+/// with every kind of consumer (workflow run, agent task, research run,
+/// enabled trigger, workflow input).
+#[test]
+fn review_a_healthy_plan_has_the_base_fingerprint() {
+    let e = env();
+    let paths = [path("data/obs.csv"), path("notes.md")];
+    let idle = impacts_for_paths(&e.cx(), &paths, &delete(false));
+    assert_eq!(idle.fingerprint, base_fingerprint(&idle.impacts));
+
+    let id = e.workflow();
+    e.fx.enable(&id, watch(&["data"]));
+    let (_run, release) = e.hold_run(&id);
+    e.tasks.records.lock().unwrap().push(task(&e, "task-1", true));
+    e.tasks.paths.lock().unwrap().insert("task-1".into(), vec![path("notes.md")]);
+    e.research.records.lock().unwrap().push(research_run("run-live", true, &["data/obs.csv"], &[]));
+    let busy = impacts_for_paths(&e.cx(), &paths, &delete(false));
+    let mut kinds: Vec<ImpactKind> = busy.impacts.iter().map(|i| i.kind).collect();
+    kinds.sort();
+    kinds.dedup();
+    for kind in [ImpactKind::WorkflowInput, ImpactKind::ActiveWork, ImpactKind::EnabledTrigger] {
+        assert!(kinds.contains(&kind), "{kind:?} in {kinds:?}");
+    }
+    assert_eq!(busy.fingerprint, base_fingerprint(&busy.impacts), "no entry for a reader that answered");
+    release.store(true, Ordering::SeqCst);
+}
+
+/// A reader that answers at plan time and fails at apply time (the
+/// orchestrator recomputes the plan and compares hashes): the recomputed
+/// plan differs, whether the plan had found a consumer or not, for each
+/// reader in turn.
+#[test]
+fn review_a_reader_that_fails_only_at_apply_makes_the_plan_stale() {
+    let e = env();
+    let request = || e.request(delete(false), vec![p("notes.md")]);
+    e.tasks.records.lock().unwrap().push(task(&e, "task-1", true));
+    for consumer in [false, true] {
+        if consumer {
+            e.tasks.paths.lock().unwrap().insert("task-1".into(), vec![path("notes.md")]);
+            e.research.records.lock().unwrap().push(research_run("run-live", true, &["notes.md"], &[]));
+        }
+        let planned = e.plan(request());
+        assert_eq!(planned.impacts.is_empty(), !consumer);
+        *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "x"));
+        assert_ne!(e.plan(request()).plan_hash, planned.plan_hash, "research fails at apply ({consumer})");
+        *e.research.failing.lock().unwrap() = None;
+        *e.tasks.failing.lock().unwrap() = Some(OpError::new("agents.store", "x"));
+        assert_ne!(e.plan(request()).plan_hash, planned.plan_hash, "tasks fail at apply ({consumer})");
+        *e.tasks.failing.lock().unwrap() = None;
+        e.tasks.unreadable_paths.lock().unwrap().push("task-1".into());
+        assert_ne!(e.plan(request()).plan_hash, planned.plan_hash, "task files fail at apply ({consumer})");
+        e.tasks.unreadable_paths.lock().unwrap().clear();
+        assert_eq!(e.plan(request()).plan_hash, planned.plan_hash, "all readable again ({consumer})");
+    }
+}
+
+/// While a reader keeps failing, a plan recomputed at apply time has the
+/// same hash, so the plan itself must say it: it carries what could not be
+/// checked and needs the person's decision (no choice to make), and for the
+/// person `prepare_paths` stops or refuses nothing. (The review recorded the
+/// earlier behaviour, a plan with no impact that needed no decision; the
+/// user decided that such a plan is decided by the person.)
+#[test]
+fn review_a_plan_made_while_a_reader_keeps_failing_needs_a_decision() {
+    let e = env();
+    e.research.records.lock().unwrap().push(research_run("run-live", true, &["notes.md"], &[]));
+    let request = || e.request(delete(false), vec![p("notes.md")]);
+    let known = e.plan(request());
+    assert!(known.needs_decision);
+    *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
+    let planned = e.plan(request());
+    let at_apply = e.plan(request());
+    assert_eq!(at_apply.plan_hash, planned.plan_hash, "apply-time recomputation accepts the plan");
+    assert_eq!((planned.choices.len(), planned.needs_decision), (0, true), "the person decides; nothing to choose");
+    assert!(!planned.impacts.is_empty());
+    assert_eq!(unchecked(&planned).len(), planned.impacts.len(), "only what could not be checked");
+    assert_eq!(e.prepare(&planned, &[]), vec![], "nothing is stopped or refused");
+    assert!(e.research.stopped.lock().unwrap().is_empty());
+}
+
+/// An agent may not delete a path that active work uses (`ops.agentScope`).
+/// While the research records cannot be read, the same deletion by an agent
+/// is neither refused nor put to the user: the failed reader is recorded
+/// only in the plan hash, which nobody sees.
+#[test]
+fn review_an_agent_is_not_refused_while_a_reader_fails() {
+    let e = env();
+    e.research.records.lock().unwrap().push(research_run("run-live", true, &["notes.md"], &[]));
+    let request = || OpRequest {
+        kind: delete(false),
+        targets: vec![p("notes.md")],
+        actor: OpActor::Agent { task: "task-x".into() },
+    };
+    let known = e.plan(request());
+    assert_eq!(e.prepare(&known, &[])[0].code, "ops.agentScope", "known active work: refused");
+    *e.research.failing.lock().unwrap() = Some(OpError::new("research.io", "the run records cannot be read"));
+    let unknown = e.plan(request());
+    let refused = e.prepare(&unknown, &[]);
+    assert!(
+        unknown.needs_decision || !unknown.refusals.is_empty() || !refused.is_empty(),
+        "an agent's deletion goes ahead although what uses the path is unknown"
+    );
+}
+
+/// The first reader of active work, the workflow runs' own inputs
+/// (`WorkflowRunService::active_run_inputs`), is still infallible: an active
+/// workflow run whose stored record cannot be read is dropped without a
+/// trace, so the plan is that of a project in which it does not run.
+#[test]
+fn review_an_active_workflow_run_whose_record_cannot_be_read_is_never_taken_as_none() {
+    let e = env();
+    let id = e.workflow();
+    let request = || e.request(delete(false), vec![p("data/obs.csv")]);
+    let idle = e.plan(request());
+    let (run, release) = e.hold_run(&id);
+    let busy = e.plan(request());
+    assert!(busy.impacts.iter().any(|i| i.kind == ImpactKind::ActiveWork), "the held run is active work");
+    // Its record in the run store becomes unreadable (a damaged row).
+    let db = rusqlite::Connection::open(e.fx._data.path().join("workflow-runs.sqlite3")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(db.execute("UPDATE runs SET body = 'damaged' WHERE id = ?1", [run.as_str()]).unwrap(), 1);
+    assert!(e.fx.runs.is_active(&run), "still running");
+    assert!(e.fx.runs.get(&run).is_err(), "its record cannot be read");
+    let unread = e.plan(request());
+    let seen = unread.impacts.iter().any(|i| i.kind == ImpactKind::ActiveWork);
+    release.store(true, Ordering::SeqCst);
+    assert!(seen || unread.plan_hash != idle.plan_hash, "an active run that cannot be read is taken as none");
 }

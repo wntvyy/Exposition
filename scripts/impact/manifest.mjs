@@ -63,6 +63,7 @@ export const SCENARIOS = {
     "p1-source-removal",
     "review-source-removal-incomplete",
     "p1-security",
+    "review-consumers-unknown",
   ],
   pages: ["page-typst", "page-latex", "page-markdown", "page-export", "page-recovery", "tex-build", "research-attach-build", "review-pages-hidden"],
   equation: ["equation-source", "equation-page"],

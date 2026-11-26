@@ -579,3 +579,620 @@ async fn review_a_failed_first_discovery_does_not_poison_the_next_request() {
     // A report for data that cannot be prepared is an error, and the next request works.
     assert_eq!(d.launcher.count(), 4 * per);
 }
+
+// ---- review: display artifacts of released runs ---------------------------
+//
+// Independent review of "a display artifact registered for an already
+// released research run is written to that run's stored manifest". Tests
+// marked `#[ignore = "review finding: ..."]` fail against the change and
+// document a finding; every other test passes.
+
+/// A finished, stored run of the fixture's session with its output folder
+/// set (as a dispatched run has), not released yet.
+fn stored_run_with_folder(f: &Fixture, n: usize, chars: usize) -> (String, PathBuf) {
+    let service = &f._service;
+    let root = service.workspace_root().unwrap();
+    let id = queued_run(f, n, chars);
+    let dir = ensure_dir_within(&root, &artifact_dir_path(&id)).unwrap();
+    lock(&service.shared.runs).get_mut(&id).unwrap().output_dir = Some(dir.clone());
+    f.session.finish_run(&id, RunStatus::Succeeded, Some(1), None, false);
+    (id, dir)
+}
+
+/// The kernel displays `bytes` as `name` in the run's folder (a late
+/// display, after the run finished).
+fn late_display(session: &Arc<Session>, id: &str, dir: &Path, name: &str, bytes: &[u8]) {
+    std::fs::write(dir.join(name), bytes).unwrap();
+    session.on_event(HelperEvent::Display {
+        run_id: id.to_owned(),
+        output_type: "display_data".into(),
+        execution_count: Some(1),
+        text: None,
+        files: vec![crate::protocol::HelperFile {
+            path: dir.join(name).display().to_string(),
+            name: name.into(),
+            media_type: "image/png".into(),
+            role: "image".into(),
+            size: bytes.len() as u64,
+            sha256: sha256_hex(bytes),
+            seq: 1,
+            truncated: false,
+        }],
+    });
+}
+
+fn png(tag: &str) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend_from_slice(tag.as_bytes());
+    bytes
+}
+
+fn deleted_file(root: &Path, id: &str) -> PathBuf {
+    root.join(".exposition").join("runs").join("deleted").join(format!("{id}.json"))
+}
+
+/// A service started afresh on `root` (nothing in memory).
+fn fresh_service(f: &Fixture, root: &Path, name: &str) -> ResearchService {
+    let fresh = ResearchService::new(ResearchConfig::new(
+        f._dir.path().join(name),
+        f.launcher.clone(),
+        Arc::new(DocumentService::new()),
+    ));
+    fresh.set_workspace(root, true).unwrap();
+    fresh
+}
+
+/// Every artifact a display entry of the run's stored output names is one
+/// its stored manifest holds.
+fn displays_name_only_recorded_artifacts(service: &ResearchService, root: &Path, id: &str) -> usize {
+    let outputs = read_manifest(root, id).unwrap().record.outputs;
+    let (entries, _) = all_pages(service, id).unwrap();
+    let mut named = 0;
+    for entry in &entries {
+        if let OutputItem::Display { artifacts, .. } = &entry.item {
+            for artifact in artifacts {
+                assert!(outputs.iter().any(|o| &o.id == artifact), "{artifact:?} is not in the record");
+                named += 1;
+            }
+        }
+    }
+    named
+}
+
+/// A run released by a project switch gets a late display while another
+/// project is open: the artifact goes to the run's own project (its record
+/// and folder), nothing is written into the open project, and the history
+/// of each project is what a fresh service lists.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_a_late_artifact_after_a_project_switch_goes_to_its_own_project() {
+    let f = Fixture::new();
+    let service = &f._service;
+    let a = service.workspace_root().unwrap();
+    let (id, dir) = stored_run_with_folder(&f, 0, 10);
+    let other = f._dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    service.set_workspace(&other, true).unwrap();
+    let b = service.workspace_root().unwrap();
+    assert!(released(service, &id));
+
+    late_display(&f.session, &id, &dir, "output-1.png", &png("after the switch"));
+    let stored = read_manifest(&a, &id).unwrap();
+    assert_eq!(stored.record.outputs.len(), 1, "added to the run's record in its own project");
+    assert!(!manifest_file(&b, &id).exists(), "no record written into the open project");
+    assert!(!b.join(".exposition").join("artifacts").join(&id).exists(), "no folder in the open project");
+    assert!(service.runs().unwrap().iter().all(|r| r.id.0 != id), "not in the open project's history");
+    assert!(fresh_service(&f, &b, "fresh-b").runs().unwrap().is_empty());
+
+    service.set_workspace(&a, true).unwrap();
+    assert_eq!(displays_name_only_recorded_artifacts(service, &a, &id), 1);
+    let fresh = fresh_service(&f, &a, "fresh-a");
+    let listed = |s: &ResearchService| s.runs().unwrap().into_iter().find(|r| r.id.0 == id).unwrap();
+    assert_eq!(listed(service).outputs, listed(&fresh).outputs, "the history a fresh service lists");
+    assert_eq!(listed(service).status, listed(&fresh).status);
+    assert_eq!(service.run_summary(&id).unwrap().outputs, stored.record.outputs);
+}
+
+/// A late display for a released run whose record was deleted: a
+/// recoverably deleted record stays as it was and no record is put back in
+/// the history (also none for a permanently deleted one); restored, the
+/// record names no artifact and no display names one.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_a_late_artifact_never_brings_back_a_deleted_record() {
+    let f = Fixture::new();
+    let service = &f._service;
+    let (kept, kept_dir) = stored_run_with_folder(&f, 0, 10);
+    let (gone, gone_dir) = stored_run_with_folder(&f, 1, 10);
+    let root = release_all(service);
+    assert!(released(service, &kept) && released(service, &gone));
+
+    service.delete_run_record(&kept, false).unwrap();
+    let before = std::fs::read(deleted_file(&root, &kept)).unwrap();
+    late_display(&f.session, &kept, &kept_dir, "output-1.png", &png("deleted"));
+    assert!(!manifest_file(&root, &kept).exists(), "the deleted record is not put back");
+    assert_eq!(std::fs::read(deleted_file(&root, &kept)).unwrap(), before, "and is not changed");
+
+    service.delete_run_record(&gone, true).unwrap();
+    // The deletion removed the emptied folder; the kernel writes its figure anew.
+    std::fs::create_dir_all(&gone_dir).unwrap();
+    late_display(&f.session, &gone, &gone_dir, "output-1.png", &png("gone"));
+    assert!(!manifest_file(&root, &gone).exists(), "a permanently deleted record stays deleted");
+    assert!(!deleted_file(&root, &gone).exists());
+    assert!(service.runs().unwrap().iter().all(|r| r.id.0 != kept), "a recoverably deleted run is not listed");
+    let fresh = fresh_service(&f, &root, "fresh");
+    assert!(fresh.runs().unwrap().iter().all(|r| r.id.0 != kept && r.id.0 != gone), "nothing stored lists them");
+
+    service.restore_run_record(&kept).unwrap();
+    assert!(read_manifest(&root, &kept).unwrap().record.outputs.is_empty());
+    assert_eq!(displays_name_only_recorded_artifacts(service, &root, &kept), 0);
+}
+
+/// The same file displayed again (an updated figure under the same name):
+/// one artifact per id in the record, the summary and a fresh service's
+/// listing, with the content the file has now.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_a_late_artifact_displayed_twice_is_recorded_once_with_its_last_content() {
+    let f = Fixture::new();
+    let service = &f._service;
+    let (id, dir) = stored_run_with_folder(&f, 0, 10);
+    let root = release_all(service);
+    late_display(&f.session, &id, &dir, "output-1.png", &png("first"));
+    late_display(&f.session, &id, &dir, "output-1.png", &png("second version"));
+    let stored = read_manifest(&root, &id).unwrap();
+    assert_eq!(stored.record.outputs.len(), 1, "{:?}", stored.record.outputs);
+    assert_eq!(stored.record.outputs[0].content_hash, format!("sha256:{}", sha256_hex(&png("second version"))));
+    assert_eq!(service.run_summary(&id).unwrap().outputs, stored.record.outputs);
+    let fresh = fresh_service(&f, &root, "fresh");
+    assert_eq!(fresh.run_summary(&id).unwrap().outputs, stored.record.outputs);
+    let (record, file) = service.artifact(&id, &format!("{id}/output-1.png")).unwrap();
+    assert_eq!(record, stored.record.outputs[0]);
+    assert_eq!(std::fs::read(file).unwrap(), png("second version"));
+    assert_eq!(displays_name_only_recorded_artifacts(service, &root, &id), 2);
+}
+
+/// Late displays and late stream output for the same released run, from
+/// two threads at once (`late_writes` serializes the record's
+/// read-modify-write): no artifact and no entry is lost, the manifest's
+/// entry count is the transcript's, and the output reads back whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_late_artifacts_and_late_output_at_once_lose_nothing() {
+    let f = Fixture::new();
+    let service = &f._service;
+    let (id, dir) = stored_run_with_folder(&f, 0, 10);
+    let root = release_all(service);
+    let (figures, lines) = (24usize, 48usize);
+    std::thread::scope(|s| {
+        let session = f.session.clone();
+        let session_a = f.session.clone();
+        let (id_a, dir_a) = (id.clone(), dir.clone());
+        s.spawn(move || {
+            for k in 0..figures {
+                late_display(&session_a, &id_a, &dir_a, &format!("output-{k}.png"), &png(&format!("figure {k}")));
+            }
+        });
+        let id_b = id.clone();
+        s.spawn(move || {
+            for k in 0..lines {
+                session.on_event(HelperEvent::Stream {
+                    run_id: id_b.clone(),
+                    name: "stdout".into(),
+                    text: format!("late {k}\n"),
+                });
+            }
+        });
+    });
+    let stored = read_manifest(&root, &id).unwrap();
+    let ids: HashSet<&str> = stored.record.outputs.iter().map(|o| o.id.0.as_str()).collect();
+    assert_eq!(ids.len(), figures, "every late artifact is in the record");
+    let (entries, page) = all_pages(service, &id).unwrap();
+    assert!(!page.truncated);
+    assert_eq!(entries.len(), 3 + figures + lines, "every late entry is in the transcript");
+    assert_eq!(u64::from(stored.output.entries), entries.len() as u64, "the manifest counts the transcript");
+    assert_eq!(displays_name_only_recorded_artifacts(service, &root, &id), figures);
+    let fresh = fresh_service(&f, &root, "fresh");
+    assert_eq!(fresh.run_summary(&id).unwrap().outputs.len(), figures);
+    assert_eq!(service.run_summary(&id).unwrap().outputs.len(), figures);
+}
+
+/// Not from this change (the history's in-memory runs are unchanged): a run
+/// of this app session whose record is deleted permanently is still listed
+/// by the history, from memory, until the app restarts (a recoverably
+/// deleted one is left out); a fresh service does not list it.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_a_permanently_deleted_run_leaves_the_history() {
+    let f = Fixture::new();
+    let service = &f._service;
+    let (gone, _) = stored_run_with_folder(&f, 0, 10);
+    let root = release_all(service);
+    service.delete_run_record(&gone, true).unwrap();
+    assert!(!manifest_file(&root, &gone).exists());
+    assert!(fresh_service(&f, &root, "fresh").runs().unwrap().iter().all(|r| r.id.0 != gone));
+    assert!(service.runs().unwrap().iter().all(|r| r.id.0 != gone), "listed from memory after a permanent deletion");
+}
+
+/// Late output racing a deletion of the run's record (the user deletes the
+/// run while its kernel still sends output): `kind` 0 is a late display
+/// with a figure (the record's manifest is rewritten by
+/// `add_outputs_to_record`, new in this change, then the entry is appended
+/// by `append_to_record`), 1 a late stream line (`append_to_record` only, as
+/// in the base version). Each write checks "deleted?" and then reads,
+/// changes and writes the record without the deletion waiting for it. Returns
+/// how many of `runs` were deleted and yet have a record in the history again,
+/// and how many have both a record and a recoverably deleted copy.
+fn race_late_output_with_deletion(kind: u8, runs: usize) -> (Vec<String>, usize) {
+    let f = Fixture::new();
+    let service = &f._service;
+    let made: Vec<(String, PathBuf)> = (0..runs).map(|n| stored_run_with_folder(&f, n, 60_000)).collect();
+    let root = release_all(service);
+    let mut random = 0x9E37_79B9_7F4A_7C15u64;
+    let (mut resurrected, mut both) = (Vec::new(), 0);
+    for (id, dir) in &made {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        let delay = Duration::from_micros(random % 4000);
+        let deleted = std::thread::scope(|s| {
+            let deleter = s.spawn(|| {
+                std::thread::sleep(delay);
+                service.delete_run_record(id, false)
+            });
+            match kind {
+                0 => late_display(&f.session, id, dir, "output-1.png", &png("racing")),
+                _ => f.session.on_event(HelperEvent::Stream {
+                    run_id: id.clone(),
+                    name: "stdout".into(),
+                    text: "late".into(),
+                }),
+            }
+            deleter.join().unwrap()
+        });
+        if deleted.is_ok() && manifest_file(&root, id).exists() {
+            resurrected.push(id.clone());
+            if deleted_file(&root, id).exists() {
+                both += 1;
+            }
+        }
+    }
+    (resurrected, both)
+}
+
+/// New in this change: a late display with a figure.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_a_late_artifact_racing_a_deletion_never_resurrects_the_record() {
+    let (resurrected, both) = race_late_output_with_deletion(0, 40);
+    assert!(
+        resurrected.is_empty(),
+        "{} of 40 deleted, then written back ({both} with a deleted copy too): {resurrected:?}",
+        resurrected.len()
+    );
+}
+
+/// The same race in the base version's path (a late stream line).
+#[tokio::test(flavor = "multi_thread")]
+async fn review_late_output_racing_a_deletion_never_resurrects_the_record() {
+    let (resurrected, both) = race_late_output_with_deletion(1, 40);
+    assert!(
+        resurrected.is_empty(),
+        "{} of 40 deleted, then written back ({both} with a deleted copy too): {resurrected:?}",
+        resurrected.len()
+    );
+}
+
+/// An active workflow batch whose stored record cannot be read is dropped
+/// from `active_run_records` (the reader the project operations use for
+/// active research work) without an error.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_an_active_batch_whose_record_cannot_be_read_is_not_dropped() {
+    let f = Fixture::new();
+    let service = &f._service;
+    let root = service.workspace_root().unwrap();
+    let id = "run-00000000000000ab";
+    std::fs::create_dir_all(root.join(".exposition").join("runs")).unwrap();
+    std::fs::write(manifest_file(&root, id), b"{ damaged").unwrap();
+    service.set_batch_live(id, true);
+    assert!(service.active_run_ids().iter().any(|a| a == id), "the batch is active");
+    match service.active_run_records() {
+        Err(_) => {}
+        Ok(records) => assert!(records.iter().any(|r| r.id == id), "an active batch vanished: {records:?}"),
+    }
+}
+
+// ---- review 2: consumers that could not be checked; ordered late writes ----
+//
+// Independent review of "a delete plan names the consumers it could not
+// check" and "late writes never bring back a deleted record". Tests marked
+// `#[ignore = "review finding: ..."]` fail against that change and document
+// a finding; every other test passes.
+
+/// The batch record `id` in `root`, as the batch runner writes it before its
+/// job starts (status running), made from a finished run's manifest.
+fn batch_record(f: &Fixture, root: &Path, id: &str) {
+    let template = finished_run(f, 90, 10);
+    let mut manifest = read_manifest(root, &template).unwrap();
+    manifest.record.id = RunId(id.to_owned());
+    manifest.record.status = RunStatus::Running;
+    manifest.record.finished_at_ms = None;
+    write_manifest(root, &manifest).unwrap();
+}
+
+/// A workflow batch of the project that was open before a switch is still
+/// live (its workflow run was only asked to stop: `project_closed` cancels
+/// without waiting, and the job is killed on the batch's next poll). The
+/// open project's active research runs are not that batch, and its record,
+/// which is in the other project, is not an unreadable record of this one.
+/// With the change, `active_run_records` fails in the open project, so every
+/// delete there asks "Running research runs … could not be checked" (and an
+/// agent's deletion is refused) until the other project's batch has ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_a_live_batch_of_the_previous_project_is_no_unreadable_record_of_the_open_one() {
+    let f = Fixture::new();
+    let service = &f._service;
+    let a = service.workspace_root().unwrap();
+    let id = "run-00000000000000cd";
+    batch_record(&f, &a, id);
+    service.set_batch_live(id, true);
+    let here = service.active_run_records().unwrap();
+    assert!(here.iter().any(|r| r.id == id), "the batch is active work of its own project: {here:?}");
+
+    let other = f._dir.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    service.set_workspace(&other, true).unwrap();
+    let records = service.active_run_records();
+    service.set_batch_live(id, false);
+    match records {
+        Ok(records) => assert!(records.iter().all(|r| r.id != id), "another project's batch: {records:?}"),
+        Err(e) => panic!("the open project's active runs could not be read because of another project's batch: {e}"),
+    }
+}
+
+/// The batch runner marks a batch live and then writes its first record
+/// (`sandbox::run_batch`: `set_batch_live(true)` before `write_manifest`, its
+/// job launched only after both). In that window nothing of the project is
+/// in use by it yet (its inputs are already staged as copies), but
+/// `active_run_records` fails, so a delete planned then asks "could not be
+/// checked" in a healthy project.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_a_batch_marked_live_before_its_record_is_written_is_no_unreadable_record() {
+    let f = Fixture::new();
+    let service = &f._service;
+    let id = "run-00000000000000ef";
+    service.set_batch_live(id, true);
+    let records = service.active_run_records();
+    service.set_batch_live(id, false);
+    assert!(records.is_ok(), "a batch whose job has not started: {records:?}");
+}
+
+/// Late output of every kind (stream, display, error) racing a permanent
+/// deletion of the run's record: the record, its deleted copy and its
+/// transcript never come back, and the run leaves the history of this
+/// session (memory) and of a fresh service (disk).
+#[tokio::test(flavor = "multi_thread")]
+async fn review_late_output_racing_a_permanent_deletion_never_brings_the_record_back() {
+    let f = Fixture::new();
+    let service = &f._service;
+    let made: Vec<(String, PathBuf)> = (0..30).map(|n| stored_run_with_folder(&f, n, 20_000)).collect();
+    let root = release_all(service);
+    let mut random = 0x2545_F491_4F6C_DD1Du64;
+    for (k, (id, dir)) in made.iter().enumerate() {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        let delay = Duration::from_micros(random % 3000);
+        // The figure is in the run's folder before the race (the deletion
+        // removes the folder only when it is empty).
+        std::fs::write(dir.join("output-1.png"), png("racing")).unwrap();
+        let deleted = std::thread::scope(|s| {
+            let deleter = s.spawn(|| {
+                std::thread::sleep(delay);
+                service.delete_run_record(id, true)
+            });
+            match k % 3 {
+                0 => late_display(&f.session, id, dir, "output-1.png", &png("racing")),
+                1 => f.session.on_event(HelperEvent::Stream {
+                    run_id: id.clone(),
+                    name: "stdout".into(),
+                    text: "late\n".into(),
+                }),
+                _ => f.session.on_event(HelperEvent::Error {
+                    run_id: id.clone(),
+                    ename: "ValueError".into(),
+                    evalue: "late".into(),
+                    traceback: Vec::new(),
+                }),
+            }
+            deleter.join().unwrap()
+        });
+        deleted.unwrap();
+        // Output that still arrives after the deletion.
+        f.session.on_event(HelperEvent::Stream { run_id: id.clone(), name: "stdout".into(), text: "after\n".into() });
+        assert!(!manifest_file(&root, id).exists(), "{id}: the record came back");
+        assert!(!deleted_file(&root, id).exists(), "{id}: a deleted copy appeared");
+        assert!(!transcript_file(&root, id).exists(), "{id}: the transcript came back");
+        assert!(!lock(&service.shared.runs).contains_key(id), "{id}: still held in memory");
+    }
+    let listed: Vec<String> = service.runs().unwrap().into_iter().map(|r| r.id.0).collect();
+    assert!(made.iter().all(|(id, _)| !listed.contains(id)), "listed after a permanent deletion: {listed:?}");
+    assert!(fresh_service(&f, &root, "fresh").runs().unwrap().is_empty());
+}
+
+/// Late output racing a restore of a recoverably deleted record: whichever
+/// comes first, the restored record is whole (its manifest reads, it counts
+/// exactly the entries of its transcript) and is listed once.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_late_output_racing_a_restore_leaves_a_whole_record() {
+    let f = Fixture::new();
+    let service = &f._service;
+    let made: Vec<(String, PathBuf)> = (0..30).map(|n| stored_run_with_folder(&f, n, 20_000)).collect();
+    let root = release_all(service);
+    for (id, _) in &made {
+        service.delete_run_record(id, false).unwrap();
+    }
+    let mut random = 0x9E37_79B9_7F4A_7C15u64;
+    for (k, (id, dir)) in made.iter().enumerate() {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        let delay = Duration::from_micros(random % 3000);
+        std::thread::scope(|s| {
+            let restorer = s.spawn(|| {
+                std::thread::sleep(delay);
+                service.restore_run_record(id)
+            });
+            for n in 0..4 {
+                match (k + n) % 2 {
+                    0 => late_display(&f.session, id, dir, &format!("output-{n}.png"), &png("racing")),
+                    _ => f.session.on_event(HelperEvent::Stream {
+                        run_id: id.clone(),
+                        name: "stdout".into(),
+                        text: format!("late {n}\n"),
+                    }),
+                }
+            }
+            restorer.join().unwrap().unwrap();
+        });
+        let manifest = read_manifest(&root, id).unwrap();
+        let (entries, page) = all_pages(service, id).unwrap();
+        assert!(!page.truncated, "{id}");
+        assert_eq!(
+            u64::from(manifest.output.entries),
+            entries.len() as u64,
+            "{id}: the manifest counts its transcript"
+        );
+        assert!(!deleted_file(&root, id).exists(), "{id}");
+        displays_name_only_recorded_artifacts(service, &root, id);
+    }
+    let listed: Vec<String> = service.runs().unwrap().into_iter().map(|r| r.id.0).collect();
+    for (id, _) in &made {
+        assert_eq!(listed.iter().filter(|l| *l == id).count(), 1, "{id} listed once");
+    }
+}
+
+/// A release that writes late output to the record (`release_run`: the run
+/// had output after its final record) racing a deletion, recoverable or
+/// permanent: a deleted record is never written back.
+#[tokio::test(flavor = "multi_thread")]
+async fn review_a_release_racing_a_deletion_never_writes_a_deleted_record_back() {
+    let f = Fixture::new();
+    let service = &f._service;
+    let root = service.workspace_root().unwrap();
+    let made: Vec<String> = (0..40).map(|n| finished_run(&f, n, 20_000)).collect();
+    for id in &made {
+        // Output after the final record: the release must write it first.
+        f.session.on_event(HelperEvent::Stream { run_id: id.clone(), name: "stdout".into(), text: "late\n".into() });
+    }
+    let mut random = 0xD1B5_4A32_D192_ED03u64;
+    let mut raced = 0;
+    for (k, id) in made.iter().enumerate() {
+        if !lock(&service.shared.runs).get(id).is_some_and(|r| r.late && r.released.is_none()) {
+            continue;
+        }
+        raced += 1;
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        let delay = Duration::from_micros(random % 3000);
+        let permanent = k % 2 == 0;
+        let deleted = std::thread::scope(|s| {
+            let deleter = s.spawn(|| {
+                std::thread::sleep(delay);
+                service.delete_run_record(id, permanent)
+            });
+            service.shared.release_run(id);
+            deleter.join().unwrap()
+        });
+        deleted.unwrap();
+        assert!(!manifest_file(&root, id).exists(), "{id} (permanent: {permanent}): written back");
+        assert_eq!(deleted_file(&root, id).exists(), !permanent, "{id}");
+    }
+    assert!(raced >= 10, "only {raced} runs had late output held in memory");
+}
+
+/// Every operation that takes `late_writes` or the run table, at once from
+/// several threads (late output of the three kinds, releases, recoverable
+/// and permanent deletions, restores, history pages, the readers the project
+/// operations use): nothing deadlocks (each thread finishes) and nothing
+/// panics.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_late_writes_deletions_restores_releases_and_reads_at_once_never_deadlock() {
+    let f = Fixture::new();
+    let service = &f._service;
+    let made: Vec<(String, PathBuf)> = (0..12).map(|n| stored_run_with_folder(&f, n, 2_000)).collect();
+    release_all(service);
+    let deadline = Instant::now() + Duration::from_secs(4);
+    std::thread::scope(|s| {
+        let workers: Vec<_> = (0..6u64)
+            .map(|worker| {
+                let (made, session) = (&made, f.session.clone());
+                s.spawn(move || {
+                    let mut random = 0x9E37_79B9_7F4A_7C15u64 ^ (worker + 1).wrapping_mul(0xA24B_AED4_963E_E407);
+                    let mut steps = 0usize;
+                    while Instant::now() < deadline {
+                        random ^= random << 13;
+                        random ^= random >> 7;
+                        random ^= random << 17;
+                        let (id, dir) = &made[(random % made.len() as u64) as usize];
+                        match (random >> 8) % 10 {
+                            0 => {
+                                // A permanent deletion removes the emptied folder; the kernel writes anew.
+                                let _ = std::fs::create_dir_all(dir);
+                                if std::fs::write(dir.join("output-1.png"), png("stress")).is_ok() {
+                                    late_display(&session, id, dir, "output-1.png", &png("stress"))
+                                }
+                            }
+                            1 => session.on_event(HelperEvent::Stream {
+                                run_id: id.clone(),
+                                name: "stdout".into(),
+                                text: "stress
+"
+                                .into(),
+                            }),
+                            2 => session.on_event(HelperEvent::Error {
+                                run_id: id.clone(),
+                                ename: "E".into(),
+                                evalue: "stress".into(),
+                                traceback: Vec::new(),
+                            }),
+                            3 => {
+                                service.shared.release_run(id);
+                            }
+                            4 => {
+                                let _ = service.delete_run_record(id, false);
+                            }
+                            5 if (random >> 20).is_multiple_of(8) => {
+                                let _ = service.delete_run_record(id, true);
+                            }
+                            6 => {
+                                let _ = service.restore_run_record(id);
+                            }
+                            7 => {
+                                let _ = service.run_history(&RunHistoryRequest::default());
+                            }
+                            8 => {
+                                let _ = service.active_run_records();
+                                let _ = service.run_records();
+                            }
+                            _ => {
+                                let _ = service.run_output(id, None, 50);
+                            }
+                        }
+                        steps += 1;
+                    }
+                    steps
+                })
+            })
+            .collect();
+        // A worker still running a minute after the deadline is stuck; the
+        // scope would wait for it forever.
+        let limit = deadline + Duration::from_secs(60);
+        while !workers.iter().all(|w| w.is_finished()) {
+            if Instant::now() > limit {
+                let stuck = workers.iter().filter(|w| !w.is_finished()).count();
+                eprintln!("{stuck} of 6 workers are still running a minute after the deadline: a deadlock");
+                std::process::abort();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        for worker in workers {
+            assert!(worker.join().expect("a worker panicked") > 0);
+        }
+    });
+}

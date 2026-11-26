@@ -3,4 +3,4 @@
 /**
  * A concrete project consequence that requires (or informs) a decision.
  */
-export type ImpactKind = "manuscriptDependency" | "workflowInput" | "retainedEvidence" | "pinnedRevision" | "unsavedBuffer" | "activeWork" | "enabledTrigger" | "recoveryLoss" | "savedVersionCopied" | "sourceDependents";
+export type ImpactKind = "manuscriptDependency" | "workflowInput" | "retainedEvidence" | "pinnedRevision" | "unsavedBuffer" | "activeWork" | "enabledTrigger" | "recoveryLoss" | "savedVersionCopied" | "sourceDependents" | "consumersUnknown";
