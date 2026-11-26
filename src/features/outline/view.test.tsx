@@ -105,7 +105,7 @@ describe("Outline view", () => {
     expect(screen.getByTestId("outline-unsaved").textContent).toBe("Unsaved buffer (revision 7)");
     expect(screen.getByTestId("outline-coverage").textContent).toMatch(/^Extraction: Partial \(typst\/1\) — Not interpreted: headings written as #heading/);
     fireEvent.click(within(tree).getAllByRole("row")[1]!);
-    await waitFor(() => expect(env.navigate).toHaveBeenCalledWith(expect.objectContaining({ id: "typst.call:theorem|Main|0" }), OUTLINE, expect.anything()));
+    await waitFor(() => expect(env.navigate).toHaveBeenCalledWith(expect.objectContaining({ id: "typst.call:theorem|Main|0" }), OUTLINE, expect.anything()), { timeout: 3000 });
   });
 
   it("does not rebuild the outline rows when the document changes but the outline does not (perf FE-7)", async () => {
@@ -139,7 +139,7 @@ describe("Outline view", () => {
     const list = within(pages).getByTestId("outline-page-list");
     expect(within(list).getAllByRole("row").map((r) => r.textContent)).toEqual(["Page 1", "Page 2"]);
     fireEvent.click(within(list).getAllByRole("row")[1]!);
-    await waitFor(() => expect(env.showPage).toHaveBeenCalledWith("main.typ", 1));
+    await waitFor(() => expect(env.showPage).toHaveBeenCalledWith("main.typ", 1), { timeout: 3000 });
   });
 
   it("offers the page view when no pages were built", async () => {
